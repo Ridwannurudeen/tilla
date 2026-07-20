@@ -1,7 +1,11 @@
 import json
 import re
 
+import httpx
+import respx
+
 from app import config
+from app.config import WARDEN_SCREEN_URL
 from app.engine import _screening_text, generate, slugify, unique_slug
 
 
@@ -78,6 +82,24 @@ def test_generate_clamps_missing_price(monkeypatch):
     data = generate("i sell a thing")
     assert data["price_usdt"] >= 0.01
     assert data["price_usdt"] != 0
+
+
+@respx.mock
+def test_create_store_missing_price_never_goes_live_at_zero(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(monkeypatch, {"store_name": "No Price Store"})
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("i sell a thing")
+    meta = json.loads(
+        (tmp_path / result["slug"] / "store.json").read_text(encoding="utf-8")
+    )
+    assert meta["status"] == "live"
+    assert meta["amount_usdt"] >= 0.01
+    assert meta["amount_usdt"] != 0
 
 
 def test_screening_text_includes_cta_and_emoji():
