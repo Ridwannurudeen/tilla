@@ -91,7 +91,7 @@
     </div>
   </section>
   <script>
-    const SLUG = "{{SLUG}}";
+    const SLUG = {{ SLUG | tojson }};
     async function startCheckout(){
       document.getElementById('co').classList.add('on');
       document.getElementById('buyBtn').disabled = true;
