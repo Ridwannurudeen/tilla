@@ -13,6 +13,9 @@ FILES=(
   app/main.py
   app/engine.py
   app/payment.py
+  app/config.py
+  app/render.py
+  app/screening.py
   themes/original.html
   themes/bold.html
   themes/editorial.html

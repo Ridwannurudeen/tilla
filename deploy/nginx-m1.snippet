@@ -1,0 +1,38 @@
+# M1 nginx hardening — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# This is the deploy-side half of M1 rate limiting / body-size caps. The
+# app-side half (slowapi in-process limiter + in-app chunked-read body cap)
+# is already committed. nginx should reject abuse before it even reaches
+# uvicorn.
+#
+# 1) In the http{} block (usually /etc/nginx/nginx.conf), define the zone:
+#
+#     limit_req_zone $binary_remote_addr zone=tilla_api:10m rate=20r/m;
+#
+# 2) Inside the tilla.gudman.xyz server{} block, on the /api/ and
+#    /create-store locations, add:
+#
+#     location /api/ {
+#         limit_req zone=tilla_api burst=10 nodelay;
+#         client_max_body_size 128k;
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... existing proxy_set_header lines ...
+#     }
+#
+#     location /create-store {
+#         limit_req zone=tilla_api burst=5 nodelay;
+#         client_max_body_size 128k;
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... existing proxy_set_header lines ...
+#     }
+#
+# Notes:
+# - client_max_body_size 128k is deliberately above the app's in-app
+#   MAX_BODY_BYTES (64 KiB) so the app's 413 (with a JSON body) is what
+#   buyers/agents see in the common case; nginx's 20/minute + burst=10 zone
+#   is a coarser, cheaper-to-enforce backstop above the app's own 6/minute
+#   (create-store) and 20-40/minute (checkout) slowapi limits — it should
+#   never be the first thing to trip in normal use.
+# - `nginx -t` then `systemctl reload nginx` (not restart) to apply.
+# - Do not touch any other location block or vhost on this box (VPS is
+#   shared with other live services — see ground rules).
