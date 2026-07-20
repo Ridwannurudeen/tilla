@@ -14,8 +14,11 @@ import unicodedata
 
 import requests
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
 from app import config, screening
+from app.db import SessionLocal
+from app.models import Product, Store, get_or_create_merchant, log_event
 from app.render import render as render_theme
 
 logger = logging.getLogger("tilla")
@@ -131,10 +134,14 @@ def _screening_text(desc: str, content: dict) -> str:
 
 
 def create_store(desc, addr=None, delivery=None):
-    """Full pipeline: prompt -> generate -> screen -> render -> deploy -> store.json.
+    """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
     Returns dict; a screening-unavailable outcome returns a pending_screening
     dict with no live page deployed, instead of failing the request outright.
+
+    Writes to BOTH the DB (source of truth for checkout and resume) and disk:
+    index.html so nginx keeps serving /s/<slug>/, and store.json as one-milestone
+    rollback insurance so the pre-M2 app can still read a store it didn't create.
     """
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
@@ -146,11 +153,13 @@ def create_store(desc, addr=None, delivery=None):
         )
 
     status = screening.scan_with_retry(_screening_text(desc, content))
+    price_micro = int(round(float(content.get("price_usdt", 0)) * 1e6))
+    pending = status == "pending"
 
     d = STORES_DIR / slug
     d.mkdir(parents=True, exist_ok=True)
 
-    if status == "pending":
+    if pending:
         # Persist everything needed to resume (render + go live) once screening
         # recovers — but write no index.html, so checkout stays 409'd until then.
         meta = {
@@ -164,9 +173,55 @@ def create_store(desc, addr=None, delivery=None):
             "content": content,
             "theme": DEFAULT_THEME,
         }
-        (d / "store.json").write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    else:
+        html = render_theme(content, addr, slug)
+        (d / "index.html").write_text(html, encoding="utf-8")
+        meta = {
+            "slug": slug,
+            "status": "live",
+            "product_name": content.get("product_name", ""),
+            "amount_usdt": content.get("price_usdt", 0),
+            "pay_to": addr,
+            "delivery": delivery,
+        }
+    (d / "store.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    with SessionLocal() as session:
+        merchant = get_or_create_merchant(session, addr)
+        store = Store(
+            slug=slug,
+            merchant_id=merchant.id,
+            status="pending_screening" if pending else "live",
+            pay_to=addr,
+            delivery=delivery,
+            description=desc,
+            content=content if pending else None,
+            theme=DEFAULT_THEME,
         )
+        session.add(store)
+        session.flush()
+        session.add(
+            Product(
+                store_id=store.id,
+                name=content.get("product_name", ""),
+                price_micro=price_micro,
+                active=True,
+            )
+        )
+        log_event(
+            session, "api", "store.created", store_id=store.id, data={"slug": slug}
+        )
+        log_event(
+            session,
+            "api",
+            "store.screening_pending" if pending else "store.live",
+            store_id=store.id,
+        )
+        session.commit()
+
+    if pending:
         return {
             "slug": slug,
             "status": "pending_screening",
@@ -176,20 +231,6 @@ def create_store(desc, addr=None, delivery=None):
                 "It will not go live until screening completes."
             ),
         }
-
-    html = render_theme(content, addr, slug)
-    (d / "index.html").write_text(html, encoding="utf-8")
-    meta = {
-        "slug": slug,
-        "status": "live",
-        "product_name": content.get("product_name", ""),
-        "amount_usdt": content.get("price_usdt", 0),
-        "pay_to": addr,
-        "delivery": delivery,
-    }
-    (d / "store.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
     return {
         "slug": slug,
         "store_name": content.get("store_name", ""),
@@ -201,45 +242,60 @@ def create_store(desc, addr=None, delivery=None):
 
 def resume_pending():
     """Retry screening for every store left in pending_screening (e.g. after a
-    process restart). On ALLOW: render + write index.html + flip to live. On
-    BLOCK: remove the store. Still unavailable: leave it for the next attempt.
-    Defensive by design — a broken store dir is logged and skipped, never fatal,
-    so this can run safely at startup."""
-    if not STORES_DIR.exists():
-        return
-    for d in sorted(STORES_DIR.iterdir()):
-        meta_path = d / "store.json"
-        if not meta_path.exists():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if meta.get("status") != "pending_screening":
-                continue
-            content = meta.get("content")
+    process restart). Reads pending stores from the DB — the content column
+    holds every render input. On ALLOW: render + write index.html + flip the
+    row live. On BLOCK: mark the row blocked and remove the store dir. Still
+    unavailable: leave it for the next attempt. Defensive — a store missing its
+    content is logged and skipped, never fatal, so this is safe at startup."""
+    with SessionLocal() as session:
+        stores = session.scalars(
+            select(Store).where(Store.status == "pending_screening")
+        ).all()
+        for store in stores:
+            content = store.content
             if not isinstance(content, dict):
+                logger.warning(
+                    "resume_pending: %s has no content, skipping", store.slug
+                )
                 continue
             try:
                 status = screening.scan_with_retry(
-                    _screening_text(meta.get("description", ""), content)
+                    _screening_text(store.description or "", content)
                 )
             except screening.ScreeningBlocked:
-                logger.warning("resume_pending: %s blocked by screening", d.name)
-                shutil.rmtree(d, ignore_errors=True)
+                logger.warning("resume_pending: %s blocked by screening", store.slug)
+                store.status = "blocked"
+                log_event(session, "resume", "store.blocked", store_id=store.id)
+                session.commit()
+                shutil.rmtree(STORES_DIR / store.slug, ignore_errors=True)
                 continue
             if status != "allow":
                 continue
-            addr = meta.get("pay_to", DEFAULT_ADDR)
-            slug = meta.get("slug", d.name)
-            theme = meta.get("theme", DEFAULT_THEME)
-            html = render_theme(content, addr, slug, theme)
+            d = STORES_DIR / store.slug
+            d.mkdir(parents=True, exist_ok=True)
+            html = render_theme(content, store.pay_to, store.slug, store.theme)
             (d / "index.html").write_text(html, encoding="utf-8")
-            meta["status"] = "live"
-            meta_path.write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            logger.info("resume_pending: %s screened clean, now live", d.name)
-        except Exception:
-            logger.exception("resume_pending: skipping broken store %s", d.name)
+            _mark_store_json_live(d, store.slug)
+            store.status = "live"
+            log_event(session, "resume", "store.live", store_id=store.id)
+            session.commit()
+            logger.info("resume_pending: %s screened clean, now live", store.slug)
+
+
+def _mark_store_json_live(store_dir, slug):
+    """Flip the on-disk store.json to status=live so the rollback-insurance copy
+    stays in step with the DB (a pre-M2 checkout reads status from store.json)."""
+    meta_path = store_dir / "store.json"
+    if not meta_path.exists():
+        return
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["status"] = "live"
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except (ValueError, OSError):
+        logger.warning("resume_pending: could not update store.json for %s", slug)
 
 
 def main():
