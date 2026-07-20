@@ -21,8 +21,7 @@ def test_create_store_503_without_llm_key():
     assert r.status_code == 503
 
 
-def test_checkout_404_unknown_store(tmp_path, monkeypatch):
-    monkeypatch.setattr(app.main, "STORES", tmp_path)
+def test_checkout_404_unknown_store():
     r = client.post("/api/checkout/does-not-exist")
     assert r.status_code == 404
 
@@ -62,11 +61,10 @@ def test_checkout_422_on_dotted_slug():
     assert r.status_code == 422
 
 
-def test_checkout_404_on_encoded_slash_traversal(tmp_path, monkeypatch):
+def test_checkout_404_on_encoded_slash_traversal():
     # a %2F-encoded traversal attempt doesn't even match the single-segment
     # {slug} route (Starlette decodes it to a literal "/" first) — it 404s
     # before reaching our handler at all, which is the safe outcome.
-    monkeypatch.setattr(app.main, "STORES", tmp_path)
     r = client.post("/api/checkout/..%2F..%2Fetc%2Fpasswd")
     assert r.status_code == 404
 
@@ -208,7 +206,6 @@ def test_pending_store_resumes_live_and_checkout_works(tmp_path, monkeypatch):
     import app.engine as engine
 
     monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
-    monkeypatch.setattr(app.main, "STORES", tmp_path)
     monkeypatch.setattr(app.main, "balance_of", lambda addr: 0.0)
     _mock_llm(monkeypatch, {"store_name": "Resumable Store", "price_usdt": 9})
 
@@ -238,20 +235,25 @@ def test_pending_store_resumes_live_and_checkout_works(tmp_path, monkeypatch):
     assert client.post(f"/api/checkout/{slug}").status_code == 200
 
 
-@respx.mock
-def test_checkout_409_on_pending_screening_store(tmp_path, monkeypatch):
-    monkeypatch.setattr(app.main, "STORES", tmp_path)
-    d = tmp_path / "pending-store"
-    d.mkdir()
-    (d / "store.json").write_text(
-        json.dumps(
-            {
-                "slug": "pending-store",
-                "status": "pending_screening",
-                "pay_to": "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51",
-                "amount_usdt": 9,
-            }
-        )
-    )
+def test_checkout_409_on_pending_screening_store(make_store):
+    make_store(slug="pending-store", status="pending_screening")
     r = client.post("/api/checkout/pending-store")
     assert r.status_code == 409
+
+
+def test_checkout_returns_pay_to_and_consistent_float_amount(make_store, monkeypatch):
+    # Defect fixes: pay_to is present in BOTH the POST and GET responses, and the
+    # amount is the same float in both (POST used to echo the store.json int).
+    make_store(slug="contract-store", pay_to="0x" + "b" * 40, price_micro=9_000_000)
+    monkeypatch.setattr(app.main, "balance_of", lambda addr: 0.0)
+    post = client.post("/api/checkout/contract-store")
+    assert post.status_code == 200
+    pb = post.json()
+    assert pb["pay_to"] == "0x" + "b" * 40
+    assert isinstance(pb["amount"], float)
+    get = client.get(f"/api/checkout/{pb['id']}")
+    assert get.status_code == 200
+    gb = get.json()
+    assert gb["pay_to"] == "0x" + "b" * 40
+    assert isinstance(gb["amount"], float)
+    assert pb["amount"] == gb["amount"] == 9.0
