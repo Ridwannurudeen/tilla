@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{STORE_NAME}} — {{TAGLINE}}</title>
+<style>
+  :root{ --primary:{{C_PRIMARY}}; --accent:{{C_ACCENT}}; --bg:{{C_BG}}; --text:{{C_TEXT}}; }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{ font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+        background:var(--bg); color:var(--text); line-height:1.55; -webkit-font-smoothing:antialiased; }
+  a{ color:inherit; }
+  .wrap{ max-width:960px; margin:0 auto; padding:0 24px; }
+  .glow{ position:fixed; inset:0; z-index:0; pointer-events:none;
+    background:radial-gradient(60% 50% at 50% -10%, color-mix(in srgb, var(--primary) 45%, transparent), transparent 70%),
+               radial-gradient(40% 40% at 90% 20%, color-mix(in srgb, var(--accent) 30%, transparent), transparent 70%);}
+  header{ position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; padding:26px 0; }
+  .brand{ display:flex; align-items:center; gap:12px; font-weight:700; font-size:19px; letter-spacing:-.02em; }
+  .logo{ width:44px; height:44px; display:grid; place-items:center; font-size:24px; border-radius:13px;
+    background:linear-gradient(135deg, var(--primary), var(--accent)); box-shadow:0 8px 30px color-mix(in srgb,var(--primary) 40%,transparent);}
+  .pill{ font-size:12px; font-weight:600; padding:7px 13px; border-radius:999px;
+    border:1px solid color-mix(in srgb,var(--text) 18%,transparent); color:color-mix(in srgb,var(--text) 75%,transparent);}
+  .hero{ position:relative; z-index:1; text-align:center; padding:70px 0 40px; }
+  .hero h1{ font-size:clamp(34px,6vw,60px); font-weight:800; letter-spacing:-.035em; line-height:1.04;
+    background:linear-gradient(180deg,var(--text),color-mix(in srgb,var(--text) 62%,transparent)); -webkit-background-clip:text; background-clip:text; color:transparent;}
+  .hero p{ margin:20px auto 0; max-width:560px; font-size:18px; color:color-mix(in srgb,var(--text) 72%,transparent); }
+  .card{ position:relative; z-index:1; margin:34px auto 0; max-width:520px; border-radius:22px; padding:30px;
+    background:color-mix(in srgb,var(--text) 5%,transparent); border:1px solid color-mix(in srgb,var(--text) 12%,transparent);
+    backdrop-filter:blur(8px); box-shadow:0 24px 70px rgba(0,0,0,.45); }
+  .card h2{ font-size:23px; font-weight:750; letter-spacing:-.02em; }
+  .card .blurb{ margin-top:10px; color:color-mix(in srgb,var(--text) 72%,transparent); font-size:15.5px; }
+  .price{ margin-top:22px; display:flex; align-items:baseline; gap:10px; }
+  .price .n{ font-size:40px; font-weight:800; letter-spacing:-.03em; }
+  .price .u{ font-size:15px; font-weight:600; color:var(--accent); }
+  .buy{ margin-top:22px; width:100%; border:0; cursor:pointer; padding:16px; border-radius:14px; font-size:16px; font-weight:700; color:#fff;
+    background:linear-gradient(135deg,var(--primary),var(--accent)); box-shadow:0 12px 34px color-mix(in srgb,var(--primary) 45%,transparent); transition:transform .12s; }
+  .buy:hover{ transform:translateY(-2px); }
+  .xlayer{ margin-top:14px; text-align:center; font-size:12.5px; color:color-mix(in srgb,var(--text) 55%,transparent); }
+  .checkout{ display:none; margin-top:20px; padding:18px; border-radius:14px; background:color-mix(in srgb,var(--bg) 60%,#000);
+    border:1px dashed color-mix(in srgb,var(--text) 25%,transparent); font-size:14px; }
+  .checkout.on{ display:block; }
+  .row{ display:flex; justify-content:space-between; gap:10px; margin:6px 0; }
+  .addr{ font-family:ui-monospace,monospace; font-size:12px; word-break:break-all; color:var(--accent); }
+  .status{ margin-top:10px; font-weight:600; color:color-mix(in srgb,var(--text) 70%,transparent); }
+  footer{ position:relative; z-index:1; text-align:center; padding:56px 0 40px; font-size:13px; color:color-mix(in srgb,var(--text) 45%,transparent);}
+  footer b{ color:color-mix(in srgb,var(--text) 75%,transparent); }
+</style>
+</head>
+<body>
+<div class="glow"></div>
+<div class="wrap">
+  <header>
+    <div class="brand"><span class="logo">{{EMOJI}}</span> {{STORE_NAME}}</div>
+    <span class="pill">Pay with crypto · X Layer</span>
+  </header>
+
+  <section class="hero">
+    <h1>{{HERO_HEADLINE}}</h1>
+    <p>{{HERO_SUBCOPY}}</p>
+  </section>
+
+  <section class="card">
+    <h2>{{PRODUCT_NAME}}</h2>
+    <div class="blurb">{{PRODUCT_BLURB}}</div>
+    <div class="price"><span class="n">{{PRICE}}</span><span class="u">USDT</span></div>
+    <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}} →</button>
+    <div class="xlayer">Instant settlement in USDT on OKX X Layer · non-custodial</div>
+    <div class="checkout" id="co">
+      <div class="row"><span>Amount</span><b>{{PRICE}} USDT</b></div>
+      <div class="row"><span>Network</span><b>X Layer (OKX)</b></div>
+      <div class="row"><span>Pay to</span></div>
+      <div class="addr">{{ADDR}}</div>
+      <div class="status" id="coStatus">⏳ Waiting for payment… (auto-verified on-chain)</div>
+      <div class="status" id="coDelivery" style="display:none;color:var(--accent)"></div>
+    </div>
+  </section>
+  <script>
+    const SLUG = "{{SLUG}}";
+    async function startCheckout(){
+      document.getElementById('co').classList.add('on');
+      document.getElementById('buyBtn').disabled = true;
+      let r = await fetch('/api/checkout/'+SLUG, {method:'POST'});
+      let d = await r.json();
+      poll(d.id);
+    }
+    async function poll(id){
+      try{
+        let r = await fetch('/api/checkout/'+id);
+        let d = await r.json();
+        if(d.status === 'paid'){
+          document.getElementById('coStatus').textContent = '✅ Payment received & verified on X Layer';
+          const del = document.getElementById('coDelivery');
+          del.style.display='block'; del.textContent = d.delivery || 'Delivered — thank you!';
+          return;
+        }
+      }catch(e){}
+      setTimeout(()=>poll(id), 4000);
+    }
+  </script>
+
+  <footer>Powered by <b>Tilla</b> · your storefront on the agent economy · settled on X Layer</footer>
+</div>
+</body>
+</html>
