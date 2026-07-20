@@ -5,6 +5,7 @@ Env: TILLA_LLM_KEY (Anthropic), TILLA_LLM_MODEL (optional), TILLA_STORES_DIR (de
 """
 
 import json
+import logging
 import os
 import re
 import sys
@@ -16,11 +17,15 @@ from pydantic import BaseModel, Field
 from app import config, screening
 from app.render import render as render_theme
 
+logger = logging.getLogger("tilla")
+
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 KEY = os.environ.get("TILLA_LLM_KEY", "")
 MODEL = os.environ.get("TILLA_LLM_MODEL") or "claude-haiku-4-5"
 STORES_DIR = config.STORES_DIR
 DEFAULT_ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"  # demo receive address
+# floor for a live store; a non-positive price would auto-confirm checkout
+MIN_PRICE_USDT = 1.0
 
 
 class GeneratedContent(BaseModel):
@@ -42,18 +47,23 @@ class GeneratedContent(BaseModel):
 def slugify(s):
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
     s = re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-").lower()
-    return (s or "store")[:40]
+    return (s or "store")[: config.SLUG_MAX_LEN]
 
 
 def unique_slug(base: str) -> str:
     """Resolve `base` to a slug that is neither a reserved app route nor an
-    existing store directory, appending a numeric suffix on collision."""
+    existing store directory, appending a numeric suffix on collision. The
+    base is truncated to leave room for the suffix so the final slug always
+    stays within SLUG_MAX_LEN and matches SLUG_PATTERN (else checkout 422s)."""
     slug = base if base not in config.RESERVED_SLUGS else f"{base}-store"
+    slug = slug[: config.SLUG_MAX_LEN]
     candidate = slug
     n = 2
     while (STORES_DIR / candidate).exists():
-        candidate = f"{slug}-{n}"
+        suffix = f"-{n}"
+        candidate = slug[: config.SLUG_MAX_LEN - len(suffix)] + suffix
         n += 1
+    assert re.fullmatch(config.SLUG_PATTERN, candidate), candidate
     return candidate
 
 
@@ -89,7 +99,17 @@ def generate(desc):
     if not m:
         raise ValueError("LLM did not return JSON: " + text[:200])
     raw = json.loads(m.group(0))
-    return GeneratedContent.model_validate(raw).model_dump()
+    data = GeneratedContent.model_validate(raw).model_dump()
+    # A missing price_usdt defaults to 0 (pydantic doesn't validate defaults);
+    # a 0 amount would make checkout auto-confirm with no payment. Clamp any
+    # non-positive price up to a sane floor before it can reach a live store.
+    if data["price_usdt"] <= 0:
+        logger.warning(
+            "generated content had no valid price; coercing to %.2f USDT",
+            MIN_PRICE_USDT,
+        )
+        data["price_usdt"] = MIN_PRICE_USDT
+    return data
 
 
 def _screening_text(desc: str, content: dict) -> str:
@@ -102,15 +122,10 @@ def _screening_text(desc: str, content: dict) -> str:
             content.get("hero_subcopy", ""),
             content.get("product_name", ""),
             content.get("product_blurb", ""),
+            content.get("cta_text", ""),
+            content.get("emoji", ""),
         ]
     )
-
-
-def deploy(slug, html):
-    d = STORES_DIR / slug
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "index.html").write_text(html, encoding="utf-8")
-    return d / "index.html"
 
 
 def create_store(desc, addr=None, delivery=None):
