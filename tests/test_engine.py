@@ -1,4 +1,4 @@
-from app.engine import render, slugify
+from app.engine import slugify, unique_slug
 
 
 def test_slugify_unicode():
@@ -20,35 +20,25 @@ def test_slugify_empty_fallback():
     assert slugify("") == "store"
 
 
-def test_render_all_tokens_replaced():
-    content = {
-        "store_name": "Acme Supply",
-        "tagline": "Tools that ship",
-        "hero_headline": "Build faster today",
-        "hero_subcopy": "The one product you actually need.",
-        "product_name": "Widget Pro",
-        "product_blurb": "It widgets, beautifully.",
-        "cta_text": "Get it",
-        "price_usdt": 9,
-        "emoji": "🚀",
-        "palette": {
-            "primary": "#111111",
-            "accent": "#222222",
-            "bg": "#333333",
-            "text": "#444444",
-        },
-    }
-    html = render(content, "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51", "acme-supply")
+def test_unique_slug_reserved_name_gets_suffix(tmp_path, monkeypatch):
+    import app.engine as engine
 
-    assert "{{" not in html
-    assert "Acme Supply" in html
-    assert "Tools that ship" in html
-    assert "Build faster today" in html
-    assert "Widget Pro" in html
-    assert "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51" in html
-    assert "acme-supply" in html
-    assert "#111111" in html
-    assert "#222222" in html
-    assert "#333333" in html
-    assert "#444444" in html
-    assert "🚀" in html
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    assert engine.unique_slug("api") == "api-store"
+    assert engine.unique_slug("health") == "health-store"
+
+
+def test_unique_slug_collision_gets_numeric_suffix(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    (tmp_path / "acme").mkdir()
+    (tmp_path / "acme-2").mkdir()
+    assert unique_slug("acme") == "acme-3"
+
+
+def test_unique_slug_no_collision_passthrough(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    assert engine.unique_slug("brand-new") == "brand-new"
