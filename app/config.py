@@ -5,6 +5,7 @@ import pathlib
 
 THEMES_DIR = pathlib.Path(__file__).resolve().parent.parent / "themes"
 STORES_DIR = pathlib.Path(os.environ.get("TILLA_STORES_DIR", "/opt/tilla/stores"))
+DB_PATH = pathlib.Path(os.environ.get("TILLA_DB_PATH", "/opt/tilla/tilla.db"))
 
 WARDEN_SCREEN_URL = os.environ.get(
     "TILLA_SCREEN_URL", "https://warden.gudman.xyz/api/demo/scan"
