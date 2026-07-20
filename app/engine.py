@@ -16,10 +16,7 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 KEY = os.environ.get("TILLA_LLM_KEY", "")
 MODEL = os.environ.get("TILLA_LLM_MODEL") or "claude-haiku-4-5"
 STORES_DIR = pathlib.Path(os.environ.get("TILLA_STORES_DIR", "/opt/tilla/stores"))
-THEMES_DIR = pathlib.Path(
-    os.environ.get("TILLA_THEMES_DIR")
-    or pathlib.Path(__file__).resolve().parent.parent / "themes"
-)
+THEMES_DIR = pathlib.Path(__file__).resolve().parent.parent / "themes"
 DEFAULT_ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"  # demo receive address
 
 TEMPLATE = (THEMES_DIR / "original.html").read_text(encoding="utf-8")
