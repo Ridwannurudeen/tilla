@@ -89,6 +89,37 @@ def test_body_at_cap_is_not_rejected_by_size():
     assert r.status_code != 413
 
 
+def test_malformed_content_length_returns_400():
+    # the test client recomputes Content-Length, so exercise the guard directly:
+    # a non-numeric header must yield 400, not a 500 from int() blowing up.
+    import asyncio
+
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/create-store",
+        "headers": [(b"content-length", b"not-a-number")],
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def call_next(request):
+        raise AssertionError("call_next should not run for a malformed header")
+
+    resp = asyncio.run(app.main.limit_body_size(Request(scope, receive), call_next))
+    assert resp.status_code == 400
+
+
+def test_test_mark_route_absent_without_env():
+    # the /api/_test/mark backdoor is only registered when TILLA_TEST=1; without
+    # it the path does not exist at all (404), not merely a gated 403.
+    r = client.post("/api/_test/mark/whatever")
+    assert r.status_code == 404
+
+
 # ---------- rate limiting ----------
 def test_create_store_rate_limited():
     codes = [

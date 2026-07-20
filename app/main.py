@@ -61,8 +61,17 @@ async def limit_body_size(request: Request, call_next):
     can't be buffered past the limit before we notice."""
     if request.method in ("POST", "PUT", "PATCH"):
         content_length = request.headers.get("content-length")
-        if content_length is not None and int(content_length) > config.MAX_BODY_BYTES:
-            return JSONResponse({"detail": "request body too large"}, status_code=413)
+        if content_length is not None:
+            try:
+                declared = int(content_length)
+            except ValueError:
+                return JSONResponse(
+                    {"detail": "invalid content-length header"}, status_code=400
+                )
+            if declared > config.MAX_BODY_BYTES:
+                return JSONResponse(
+                    {"detail": "request body too large"}, status_code=413
+                )
         body = b""
         async for chunk in request.stream():
             body += chunk
@@ -202,15 +211,17 @@ def checkout_status(request: Request, cid: str):
     return out
 
 
-@app.post("/api/_test/mark/{cid}")
-def _test_mark(cid: str):
-    if os.environ.get("TILLA_TEST") != "1":
-        raise HTTPException(403, "test mode off")
-    c = CHECKOUTS.get(cid)
-    if not c:
-        raise HTTPException(404, "no checkout")
-    c["baseline"] = balance_of(c["pay_to"]) - c["amount"] - 0.001
-    return {"ok": True}
+# Test-only checkout confirmation shim. Registered ONLY when TILLA_TEST=1 so the
+# route cannot exist in production at all, not merely be gated at call time.
+if os.environ.get("TILLA_TEST") == "1":
+
+    @app.post("/api/_test/mark/{cid}")
+    def _test_mark(cid: str):
+        c = CHECKOUTS.get(cid)
+        if not c:
+            raise HTTPException(404, "no checkout")
+        c["baseline"] = balance_of(c["pay_to"]) - c["amount"] - 0.001
+        return {"ok": True}
 
 
 # ---------- x402 paywall on /create-store (Warden's validated config) ----------
