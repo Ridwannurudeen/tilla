@@ -9,28 +9,32 @@ import json
 import logging
 import os
 import re
-import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import requests
-from fastapi import FastAPI, HTTPException, Path, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
 from app import config
+from app.db import get_session
 from app.engine import create_store as gen_store
 from app.engine import resume_pending
+from app.models import Delivery, Order, Product, Store, log_event
 from app.screening import ScreeningBlocked
 
 logger = logging.getLogger("tilla")
 
 RPC = os.environ.get("TILLA_RPC", "https://rpc.xlayer.tech")
 USDT = "0x779ded0c9e1022225f8e0630b35a9b54be713736"  # USDT0 on X Layer, 6dp
-STORES = config.STORES_DIR
+DEFAULT_DELIVERY = "Payment received — thank you!"
 _EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
@@ -47,7 +51,6 @@ app = FastAPI(
     description="Storefronts + crypto checkout on X Layer",
     lifespan=lifespan,
 )
-CHECKOUTS: dict = {}
 
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
@@ -93,13 +96,6 @@ def balance_of(addr: str) -> float:
     }
     res = requests.post(RPC, json=body, timeout=12).json().get("result")
     return int(res, 16) / 1e6 if res and res != "0x" else 0.0
-
-
-def load_store(slug: str) -> dict:
-    p = STORES / slug / "store.json"
-    if not p.exists():
-        raise HTTPException(404, "store not found")
-    return json.loads(p.read_text(encoding="utf-8"))
 
 
 @app.get("/health")
@@ -168,25 +164,41 @@ def create_store_get(
 @app.post("/api/checkout/{slug}")
 @limiter.limit("20/minute")
 def create_checkout(
-    request: Request, slug: str = Path(..., pattern=config.SLUG_PATTERN)
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
 ):
-    s = load_store(slug)
-    if s.get("status") == "pending_screening":
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None:
+        raise HTTPException(404, "store not found")
+    if store.status == "pending_screening":
         raise HTTPException(409, "store is not yet live (pending content screening)")
-    baseline = balance_of(s["pay_to"])
+    if store.status != "live":
+        raise HTTPException(404, "store not found")
+    product = session.scalar(
+        select(Product)
+        .where(Product.store_id == store.id, Product.active.is_(True))
+        .order_by(Product.id)
+    )
+    baseline_micro = round(balance_of(store.pay_to) * 1e6)
     cid = uuid.uuid4().hex[:16]
-    CHECKOUTS[cid] = {
-        "slug": slug,
-        "pay_to": s["pay_to"],
-        "amount": float(s["amount_usdt"]),
-        "baseline": baseline,
-        "status": "pending",
-        "created": time.time(),
-    }
+    session.add(
+        Order(
+            id=cid,
+            store_id=store.id,
+            product_id=product.id,
+            pay_to=store.pay_to,
+            amount_micro=product.price_micro,
+            baseline_micro=baseline_micro,
+            status="pending",
+        )
+    )
+    log_event(session, "api", "order.created", store_id=store.id, order_id=cid)
+    session.commit()
     return {
         "id": cid,
-        "pay_to": s["pay_to"],
-        "amount": s["amount_usdt"],
+        "pay_to": store.pay_to,
+        "amount": product.price_micro / 1e6,
         "network": "X Layer (chainId 196)",
         "token": "USDT",
     }
@@ -194,20 +206,45 @@ def create_checkout(
 
 @app.get("/api/checkout/{cid}")
 @limiter.limit("40/minute")
-def checkout_status(request: Request, cid: str):
-    c = CHECKOUTS.get(cid)
-    if not c:
+def checkout_status(
+    request: Request, cid: str, session: Session = Depends(get_session)
+):
+    order = session.get(Order, cid)
+    if order is None:
         raise HTTPException(404, "checkout not found")
-    if c["status"] != "paid":
-        bal = balance_of(c["pay_to"])
-        if bal >= c["baseline"] + c["amount"] - 1e-6:
-            c["status"] = "paid"
-            c["paid_at"] = time.time()
-    out = {"id": cid, "status": c["status"], "amount": c["amount"]}
-    if c["status"] == "paid":
-        out["delivery"] = load_store(c["slug"]).get(
-            "delivery", "Payment received — thank you!"
-        )
+    if order.status != "paid":
+        bal_micro = round(balance_of(order.pay_to) * 1e6)
+        # exact integer restatement of the old `bal >= baseline + amount - 1e-6`
+        if bal_micro >= order.baseline_micro + order.amount_micro - 1:
+            order.status = "paid"
+            order.paid_at = datetime.now(timezone.utc)
+            store = session.get(Store, order.store_id)
+            payload = store.delivery if store and store.delivery else DEFAULT_DELIVERY
+            session.add(Delivery(order_id=order.id, kind="text", payload=payload))
+            log_event(
+                session,
+                "engine",
+                "order.paid",
+                store_id=order.store_id,
+                order_id=order.id,
+            )
+            log_event(
+                session,
+                "engine",
+                "order.delivered",
+                store_id=order.store_id,
+                order_id=order.id,
+            )
+            session.commit()
+    out = {
+        "id": order.id,
+        "status": order.status,
+        "amount": order.amount_micro / 1e6,
+        "pay_to": order.pay_to,
+    }
+    if order.status == "paid":
+        delivery = session.scalar(select(Delivery).where(Delivery.order_id == order.id))
+        out["delivery"] = delivery.payload if delivery else DEFAULT_DELIVERY
     return out
 
 
@@ -216,11 +253,16 @@ def checkout_status(request: Request, cid: str):
 if os.environ.get("TILLA_TEST") == "1":
 
     @app.post("/api/_test/mark/{cid}")
-    def _test_mark(cid: str):
-        c = CHECKOUTS.get(cid)
-        if not c:
+    def _test_mark(cid: str, session: Session = Depends(get_session)):
+        order = session.get(Order, cid)
+        if order is None:
             raise HTTPException(404, "no checkout")
-        c["baseline"] = balance_of(c["pay_to"]) - c["amount"] - 0.001
+        # drop the baseline below balance so the next status poll confirms paid;
+        # -1000 micro (0.001 USDT) mirrors the old float shim's -0.001 nudge.
+        order.baseline_micro = (
+            round(balance_of(order.pay_to) * 1e6) - order.amount_micro - 1000
+        )
+        session.commit()
         return {"ok": True}
 
 
