@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tilla"
+version = "0.1.0"
+description = "Tilla — AI storefront builder with crypto checkout on X Layer"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.139.2",
+    "uvicorn==0.51.0",
+    "requests",
+    "httpx==0.28.1",
+    "jinja2==3.1.6",
+    "pydantic>=2",
+    "okxweb3-app-x402==0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "respx==0.23.1",
+    "coverage==7.15.2",
+    "ruff==0.15.22",
+]
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
