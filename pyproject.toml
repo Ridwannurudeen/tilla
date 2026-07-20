@@ -16,6 +16,8 @@ dependencies = [
     "pydantic==2.13.4",
     "okxweb3-app-x402==0.1.0",
     "slowapi==0.1.10",
+    "sqlalchemy==2.0.51",
+    "alembic==1.18.5",
 ]
 
 [project.optional-dependencies]
