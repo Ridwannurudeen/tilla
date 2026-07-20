@@ -22,9 +22,11 @@ class ScreeningBlocked(Exception):
 
 
 def scan(payload: str) -> dict:
-    """Screen `payload` with Warden. Returns the verdict dict on ALLOW (or any
-    non-BLOCK verdict). Raises ScreeningBlocked on BLOCK, ScreeningUnavailable
-    on timeout/connection error/5xx."""
+    """Screen `payload` with Warden, fail-closed. Returns the verdict dict only
+    on an explicit ALLOW verdict. Raises ScreeningBlocked on BLOCK, and
+    ScreeningUnavailable on timeout / connection error / any HTTP error status
+    (4xx or 5xx) / a non-JSON body / a missing or unrecognized verdict — so an
+    ambiguous screening result holds the store instead of deploying it."""
     try:
         r = httpx.post(
             WARDEN_SCREEN_URL,
@@ -35,26 +37,34 @@ def scan(payload: str) -> dict:
     except httpx.TimeoutException as exc:
         raise ScreeningUnavailable(f"warden screening timed out: {exc}") from exc
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code >= 500:
-            raise ScreeningUnavailable(
-                f"warden screening returned {exc.response.status_code}"
-            ) from exc
-        raise
+        raise ScreeningUnavailable(
+            f"warden screening returned {exc.response.status_code}"
+        ) from exc
     except httpx.HTTPError as exc:
         raise ScreeningUnavailable(f"warden screening unreachable: {exc}") from exc
 
-    verdict = r.json()
-    if verdict.get("verdict") == "BLOCK":
+    try:
+        verdict = r.json()
+    except ValueError as exc:
+        raise ScreeningUnavailable("warden screening returned a non-JSON body") from exc
+    if not isinstance(verdict, dict):
+        raise ScreeningUnavailable("warden screening returned an unexpected body")
+
+    result = verdict.get("verdict")
+    if result == "BLOCK":
         raise ScreeningBlocked(verdict)
-    return verdict
+    if result == "ALLOW":
+        return verdict
+    raise ScreeningUnavailable(f"warden screening returned verdict {result!r}")
 
 
 def scan_with_retry(payload: str, attempts: int = 2) -> str:
     """Run `scan` with a short retry on transient unavailability.
 
-    Returns "allow" if a non-BLOCK verdict was obtained, or "pending" if the
-    endpoint stayed unreachable/erroring for every attempt. Never swallows a
-    BLOCK verdict — ScreeningBlocked always propagates immediately.
+    Returns "allow" only if an explicit ALLOW verdict was obtained, or
+    "pending" if the endpoint stayed unreachable/erroring/ambiguous for every
+    attempt. Never swallows a BLOCK verdict — ScreeningBlocked always
+    propagates immediately.
     """
     last_error: ScreeningUnavailable | None = None
     for _ in range(max(1, attempts)):

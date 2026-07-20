@@ -52,6 +52,40 @@ def test_scan_raises_unavailable_on_5xx():
 
 
 @respx.mock
+def test_scan_raises_unavailable_on_4xx():
+    respx.post(WARDEN_SCREEN_URL).mock(return_value=httpx.Response(429))
+    with pytest.raises(screening.ScreeningUnavailable):
+        screening.scan("text")
+
+
+@respx.mock
+def test_scan_raises_unavailable_on_missing_verdict():
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"risk_level": "none"})
+    )
+    with pytest.raises(screening.ScreeningUnavailable):
+        screening.scan("text")
+
+
+@respx.mock
+def test_scan_raises_unavailable_on_unrecognized_verdict():
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "REVIEW"})
+    )
+    with pytest.raises(screening.ScreeningUnavailable):
+        screening.scan("text")
+
+
+@respx.mock
+def test_scan_raises_unavailable_on_non_json_body():
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, text="not json")
+    )
+    with pytest.raises(screening.ScreeningUnavailable):
+        screening.scan("text")
+
+
+@respx.mock
 def test_scan_with_retry_returns_allow_on_success():
     respx.post(WARDEN_SCREEN_URL).mock(
         return_value=httpx.Response(200, json={"verdict": "ALLOW"})
@@ -73,6 +107,20 @@ def test_scan_with_retry_recovers_on_second_attempt():
         httpx.Response(200, json={"verdict": "ALLOW"}),
     ]
     assert screening.scan_with_retry("text", attempts=2) == "allow"
+
+
+@respx.mock
+def test_scan_with_retry_pending_on_4xx():
+    respx.post(WARDEN_SCREEN_URL).mock(return_value=httpx.Response(429))
+    assert screening.scan_with_retry("text", attempts=2) == "pending"
+
+
+@respx.mock
+def test_scan_with_retry_pending_on_missing_verdict():
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"risk_level": "none"})
+    )
+    assert screening.scan_with_retry("text", attempts=2) == "pending"
 
 
 @respx.mock
