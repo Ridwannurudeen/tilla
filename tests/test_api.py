@@ -173,6 +173,41 @@ def test_create_store_live_when_screening_allows(tmp_path, monkeypatch):
 
 
 @respx.mock
+def test_pending_store_resumes_live_and_checkout_works(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    monkeypatch.setattr(app.main, "STORES", tmp_path)
+    monkeypatch.setattr(app.main, "balance_of", lambda addr: 0.0)
+    _mock_llm(monkeypatch, {"store_name": "Resumable Store", "price_usdt": 9})
+
+    screen_state = {"available": False}
+
+    def _screen(request):
+        if not screen_state["available"]:
+            raise httpx.TimeoutException("down")
+        return httpx.Response(200, json={"verdict": "ALLOW"})
+
+    respx.post(WARDEN_SCREEN_URL).mock(side_effect=_screen)
+
+    # 1) screening unavailable -> pending: no index.html, checkout 409'd
+    r = client.post("/create-store", json={"description": "something"})
+    assert r.status_code == 200
+    slug = r.json()["slug"]
+    slug_dir = tmp_path / slug
+    assert not (slug_dir / "index.html").exists()
+    assert client.post(f"/api/checkout/{slug}").status_code == 409
+
+    # 2) screening recovers -> resume_pending flips it live, checkout works
+    screen_state["available"] = True
+    engine.resume_pending()
+    assert (slug_dir / "index.html").exists()
+    meta = json.loads((slug_dir / "store.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "live"
+    assert client.post(f"/api/checkout/{slug}").status_code == 200
+
+
+@respx.mock
 def test_checkout_409_on_pending_screening_store(tmp_path, monkeypatch):
     monkeypatch.setattr(app.main, "STORES", tmp_path)
     d = tmp_path / "pending-store"

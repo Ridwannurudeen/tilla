@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import unicodedata
 
@@ -26,6 +27,7 @@ STORES_DIR = config.STORES_DIR
 DEFAULT_ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"  # demo receive address
 # floor for a live store; a non-positive price would auto-confirm checkout
 MIN_PRICE_USDT = 1.0
+DEFAULT_THEME = "original.html"  # matches app.render.render's default
 
 
 class GeneratedContent(BaseModel):
@@ -137,6 +139,11 @@ def create_store(desc, addr=None, delivery=None):
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
     slug = unique_slug(slugify(content.get("store_name") or desc))
+    if delivery is None:
+        delivery = (
+            f"✅ Thank you! Your {content.get('product_name', 'product')} is ready: "
+            f"https://tilla.gudman.xyz/files/{slug} (demo delivery link)"
+        )
 
     status = screening.scan_with_retry(_screening_text(desc, content))
 
@@ -144,12 +151,18 @@ def create_store(desc, addr=None, delivery=None):
     d.mkdir(parents=True, exist_ok=True)
 
     if status == "pending":
+        # Persist everything needed to resume (render + go live) once screening
+        # recovers — but write no index.html, so checkout stays 409'd until then.
         meta = {
             "slug": slug,
             "status": "pending_screening",
             "product_name": content.get("product_name", ""),
             "amount_usdt": content.get("price_usdt", 0),
             "pay_to": addr,
+            "delivery": delivery,
+            "description": desc,
+            "content": content,
+            "theme": DEFAULT_THEME,
         }
         (d / "store.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -166,11 +179,6 @@ def create_store(desc, addr=None, delivery=None):
 
     html = render_theme(content, addr, slug)
     (d / "index.html").write_text(html, encoding="utf-8")
-    if delivery is None:
-        delivery = (
-            f"✅ Thank you! Your {content.get('product_name', 'product')} is ready: "
-            f"https://tilla.gudman.xyz/files/{slug} (demo delivery link)"
-        )
     meta = {
         "slug": slug,
         "status": "live",
@@ -189,6 +197,49 @@ def create_store(desc, addr=None, delivery=None):
         "product_name": content.get("product_name", ""),
         "price_usdt": content.get("price_usdt", 0),
     }
+
+
+def resume_pending():
+    """Retry screening for every store left in pending_screening (e.g. after a
+    process restart). On ALLOW: render + write index.html + flip to live. On
+    BLOCK: remove the store. Still unavailable: leave it for the next attempt.
+    Defensive by design — a broken store dir is logged and skipped, never fatal,
+    so this can run safely at startup."""
+    if not STORES_DIR.exists():
+        return
+    for d in sorted(STORES_DIR.iterdir()):
+        meta_path = d / "store.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("status") != "pending_screening":
+                continue
+            content = meta.get("content")
+            if not isinstance(content, dict):
+                continue
+            try:
+                status = screening.scan_with_retry(
+                    _screening_text(meta.get("description", ""), content)
+                )
+            except screening.ScreeningBlocked:
+                logger.warning("resume_pending: %s blocked by screening", d.name)
+                shutil.rmtree(d, ignore_errors=True)
+                continue
+            if status != "allow":
+                continue
+            addr = meta.get("pay_to", DEFAULT_ADDR)
+            slug = meta.get("slug", d.name)
+            theme = meta.get("theme", DEFAULT_THEME)
+            html = render_theme(content, addr, slug, theme)
+            (d / "index.html").write_text(html, encoding="utf-8")
+            meta["status"] = "live"
+            meta_path.write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            logger.info("resume_pending: %s screened clean, now live", d.name)
+        except Exception:
+            logger.exception("resume_pending: skipping broken store %s", d.name)
 
 
 def main():

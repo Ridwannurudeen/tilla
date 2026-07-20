@@ -11,6 +11,7 @@ import os
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import requests
 from fastapi import FastAPI, HTTPException, Path, Request
@@ -22,6 +23,7 @@ from starlette.responses import JSONResponse
 
 from app import config
 from app.engine import create_store as gen_store
+from app.engine import resume_pending
 from app.screening import ScreeningBlocked
 
 logger = logging.getLogger("tilla")
@@ -31,7 +33,20 @@ USDT = "0x779ded0c9e1022225f8e0630b35a9b54be713736"  # USDT0 on X Layer, 6dp
 STORES = config.STORES_DIR
 _EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
-app = FastAPI(title="Tilla", description="Storefronts + crypto checkout on X Layer")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Retry any stores held in pending_screening from before this process
+    # started, so a restart flips recovered ones live instead of stranding them.
+    resume_pending()
+    yield
+
+
+app = FastAPI(
+    title="Tilla",
+    description="Storefronts + crypto checkout on X Layer",
+    lifespan=lifespan,
+)
 CHECKOUTS: dict = {}
 
 limiter = Limiter(key_func=get_remote_address)
