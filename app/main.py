@@ -5,23 +5,58 @@
 Run: uvicorn app.main:app --host 127.0.0.1 --port 8040   (EnvironmentFile=/opt/tilla/.env)
 """
 
-import os
 import json
+import logging
+import os
+import re
 import time
 import uuid
-import pathlib
-import requests
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
+import requests
+from fastapi import FastAPI, HTTPException, Path, Request
+from pydantic import BaseModel, Field, ValidationError, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.responses import JSONResponse
+
+from app import config
 from app.engine import create_store as gen_store
+from app.screening import ScreeningBlocked
+
+logger = logging.getLogger("tilla")
 
 RPC = os.environ.get("TILLA_RPC", "https://rpc.xlayer.tech")
 USDT = "0x779ded0c9e1022225f8e0630b35a9b54be713736"  # USDT0 on X Layer, 6dp
-STORES = pathlib.Path(os.environ.get("TILLA_STORES_DIR", "/opt/tilla/stores"))
+STORES = config.STORES_DIR
+_EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 app = FastAPI(title="Tilla", description="Storefronts + crypto checkout on X Layer")
 CHECKOUTS: dict = {}
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.middleware("http")
+async def limit_body_size(request: Request, call_next):
+    """Enforce a body-size budget in-app since FastAPI/Starlette has no
+    built-in cap; reads the request in chunks so an unbounded/chunked body
+    can't be buffered past the limit before we notice."""
+    if request.method in ("POST", "PUT", "PATCH"):
+        content_length = request.headers.get("content-length")
+        if content_length is not None and int(content_length) > config.MAX_BODY_BYTES:
+            return JSONResponse({"detail": "request body too large"}, status_code=413)
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > config.MAX_BODY_BYTES:
+                return JSONResponse(
+                    {"detail": "request body too large"}, status_code=413
+                )
+        request._body = body
+    return await call_next(request)
 
 
 def balance_of(addr: str) -> float:
@@ -40,7 +75,7 @@ def load_store(slug: str) -> dict:
     p = STORES / slug / "store.json"
     if not p.exists():
         raise HTTPException(404, "store not found")
-    return json.loads(p.read_text())
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 @app.get("/health")
@@ -50,19 +85,47 @@ def health():
 
 # ---------- ASP endpoint: create a store (x402-paid) ----------
 class CreateStoreBody(BaseModel):
-    description: str
+    description: str = Field(min_length=1, max_length=config.MAX_DESCRIPTION_LEN)
     receive_address: str | None = None
+
+    @field_validator("receive_address")
+    @classmethod
+    def _validate_address(cls, v):
+        if v is None or v == "":
+            return None
+        if not _EVM_ADDRESS.fullmatch(v):
+            raise ValueError(
+                "receive_address must be a 0x-prefixed 20-byte EVM address"
+            )
+        if int(v[2:], 16) == 0:
+            raise ValueError("receive_address must not be the zero address")
+        return v
+
+
+def _run_create_store(description: str, receive_address: str | None):
+    try:
+        return gen_store(description, receive_address)
+    except ScreeningBlocked as exc:
+        logger.warning(
+            "store creation blocked by screening: risk_level=%s",
+            exc.verdict.get("risk_level"),
+        )
+        raise HTTPException(422, "content did not pass safety screening") from exc
 
 
 @app.post("/create-store")
-def create_store_post(body: CreateStoreBody):
+@limiter.limit("6/minute")
+def create_store_post(request: Request, body: CreateStoreBody):
     if not os.environ.get("TILLA_LLM_KEY"):
         raise HTTPException(503, "generation unavailable")
-    return gen_store(body.description, body.receive_address)
+    return _run_create_store(body.description, body.receive_address)
 
 
 @app.get("/create-store")
-def create_store_get(description: str = "", receive_address: str = ""):
+@limiter.limit("6/minute")
+def create_store_get(
+    request: Request, description: str = "", receive_address: str = ""
+):
     # unpaid GET is intercepted by the x402 paywall (402). A paid GET reaches here.
     if not description:
         return {
@@ -70,13 +133,22 @@ def create_store_get(description: str = "", receive_address: str = ""):
             "how": "POST {description, receive_address} (x402-paid) → returns a live store URL",
             "network": "eip155:196",
         }
-    return gen_store(description, receive_address or None)
+    try:
+        body = CreateStoreBody(description=description, receive_address=receive_address)
+    except ValidationError as exc:
+        raise HTTPException(422, json.loads(exc.json())) from exc
+    return _run_create_store(body.description, body.receive_address)
 
 
 # ---------- store checkout: buyer pays the merchant ----------
 @app.post("/api/checkout/{slug}")
-def create_checkout(slug: str):
+@limiter.limit("20/minute")
+def create_checkout(
+    request: Request, slug: str = Path(..., pattern=config.SLUG_PATTERN)
+):
     s = load_store(slug)
+    if s.get("status") == "pending_screening":
+        raise HTTPException(409, "store is not yet live (pending content screening)")
     baseline = balance_of(s["pay_to"])
     cid = uuid.uuid4().hex[:16]
     CHECKOUTS[cid] = {
@@ -97,7 +169,8 @@ def create_checkout(slug: str):
 
 
 @app.get("/api/checkout/{cid}")
-def checkout_status(cid: str):
+@limiter.limit("40/minute")
+def checkout_status(request: Request, cid: str):
     c = CHECKOUTS.get(cid)
     if not c:
         raise HTTPException(404, "checkout not found")
@@ -133,10 +206,11 @@ if os.getenv("OKX_API_KEY"):
     from x402.http.types import RouteConfig
     from x402.mechanisms.evm.exact.server import ExactEvmScheme
     from x402.server import x402ResourceServer
+
     from app.payment import (
-        load_payment_rail,
-        build_payment_option,
         NoRedirectOKXFacilitatorClient,
+        build_payment_option,
+        load_payment_rail,
     )
 
     _rail = load_payment_rail(os.environ)

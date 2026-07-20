@@ -15,6 +15,7 @@ dependencies = [
     "jinja2==3.1.6",
     "pydantic==2.13.4",
     "okxweb3-app-x402==0.1.0",
+    "slowapi==0.1.10",
 ]
 
 [project.optional-dependencies]
