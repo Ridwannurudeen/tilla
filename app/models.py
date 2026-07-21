@@ -102,6 +102,10 @@ class Order(Base):
         ),
         # Buyer library lookup: orders for a given on-chain payer wallet.
         Index("ix_orders_from_addr", "from_addr"),
+        # x402 agent buys: the EIP-3009 authorization nonce is the idempotency /
+        # replay key. UNIQUE dedupes order creation; SQLite allows unlimited NULLs
+        # here, so human (web) orders — which never set it — are unaffected.
+        Index("ux_orders_x402_nonce", "x402_nonce", unique=True),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -126,6 +130,14 @@ class Order(Base):
     # insurance, no longer populated by M3 code.
     baseline_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    # 'web' = human unique-amount checkout; 'agent' = x402 per-store buy. Marks
+    # the reaper scope + analytics; defaulted so pre-0004 code inserts stay valid.
+    channel: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="web", server_default="web"
+    )
+    # The EIP-3009 authorization nonce of an x402 agent buy (0x + 32 bytes), the
+    # idempotency/replay key. NULL for human orders (see the unique index above).
+    x402_nonce: Mapped[str | None] = mapped_column(String(66), nullable=True)
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     from_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
