@@ -334,6 +334,15 @@
     el.appendChild(receiptRow("Network", "X Layer (chainId 196)"));
     var tx = CO.txHash || d.tx_hash;
     if (tx && TX_RE.test(tx)) el.appendChild(receiptRow("Transaction", "View on OKLink", OKLINK_TX + tx));
+    // M11 on-chain receipt: a hex-guarded UID (XSS-inert via receiptRow's textContent);
+    // link only to a server-built OKLink attest-tx URL, never an arbitrary href.
+    var auid = d.attestation_uid;
+    if (auid && TX_RE.test(auid)) {
+      var shortUid = auid.slice(0, 10) + "…" + auid.slice(-6);
+      var aurl = d.attestation_tx_url;
+      if (aurl && aurl.indexOf(OKLINK_TX) === 0) el.appendChild(receiptRow("On-chain receipt", shortUid, aurl));
+      else el.appendChild(receiptRow("On-chain receipt", shortUid));
+    }
     el.style.display = "block";
   }
 

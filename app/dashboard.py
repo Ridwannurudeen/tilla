@@ -495,6 +495,12 @@ def merchant_order_detail(
     detail["product_name"] = product.name if product else None
     detail["buyer_email"] = order.buyer_email
     detail["tx_url"] = config.OKLINK_TX_BASE + order.tx_hash if order.tx_hash else None
+    # M11 on-chain receipt (additive, NULL until an attestation exists).
+    detail["attest_status"] = order.attest_status
+    detail["attestation_uid"] = order.attestation_uid
+    detail["attestation_tx_url"] = (
+        config.OKLINK_TX_BASE + order.attest_tx if order.attest_tx else None
+    )
     refunds = session.scalars(
         select(Refund).where(Refund.order_id == order.id).order_by(Refund.id)
     ).all()

@@ -360,6 +360,12 @@
     meta.appendChild(kv("Buyer", o.from_addr, true));
     meta.appendChild(kv("Buyer email", o.buyer_email));
     if (o.tx_url) { var d = el("div"); d.appendChild(el("span", "muted", "Payment tx: ")); var a = el("a", null, o.tx_hash); a.href = o.tx_url; a.rel = "noopener"; a.target = "_blank"; d.appendChild(a); meta.appendChild(d); }
+    // M11 on-chain receipt (textContent-only, XSS-safe; link is the server-built OKLink URL)
+    if (o.attest_status && o.attest_status !== "none") meta.appendChild(kv("Attestation", o.attest_status));
+    if (o.attestation_uid) {
+      if (o.attestation_tx_url) { var ad = el("div"); ad.appendChild(el("span", "muted", "On-chain receipt: ")); var aa = el("a", "mono", o.attestation_uid); aa.href = o.attestation_tx_url; aa.rel = "noopener"; aa.target = "_blank"; ad.appendChild(aa); meta.appendChild(ad); }
+      else meta.appendChild(kv("On-chain receipt", o.attestation_uid, true));
+    }
     head.appendChild(meta);
     box.appendChild(head);
 

@@ -28,6 +28,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from app import (
     agentic,
+    attest,
     chain,
     checkout,
     config,
@@ -77,12 +78,19 @@ async def lifespan(app: FastAPI):
     # so the test suite never touches the network.
     sweeper = None
     webhook_task = None
+    attest_task = None
     if config.SWEEP_ENABLED:
         sweeper = asyncio.create_task(checkout.sweeper_loop())
         # M9 outbound webhook dispatcher — shares the sweeper's background-loop gate
         # so the test suite never starts it or hits the network. Idle until a
         # merchant registers a webhook URL.
         webhook_task = asyncio.create_task(webhooks.webhook_loop())
+        # M11 EAS attester — TRIPLE-GATED dormant: only starts with SWEEP_ENABLED AND
+        # ATTEST_ENABLED AND a signing key. Missing any one => no task, no RPC, no
+        # gas, and app.attest never constructs a Web3/Account. Enabling it (key + OKB
+        # + flag on the VPS) is an explicit user-gated runbook step.
+        if config.ATTEST_ENABLED and config.TILLA_ATTESTER_KEY:
+            attest_task = asyncio.create_task(attest.attest_loop())
     # x402 agent commerce (prod only): pre-warm the facilitator /supported off-loop
     # so the first protected request doesn't do the blocking sync GET, and run the
     # reaper that voids agent orders stuck delivered-without-settle.
@@ -93,7 +101,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (sweeper, webhook_task, reaper):
+        for task in (sweeper, webhook_task, attest_task, reaper):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -525,6 +533,13 @@ def _order_response(
             select(Delivery).where(Delivery.order_id == order.id)
         )
         out["tx_hash"] = order.tx_hash
+        # M11 on-chain receipt (additive, NULL-safe): surfaced only once an
+        # attestation exists. Deployed static pages ignore unknown keys, and the
+        # link is the verified OKLink attest-tx URL (no unverified EAS-scan link).
+        if order.attestation_uid:
+            out["attestation_uid"] = order.attestation_uid
+        if order.attest_tx:
+            out["attestation_tx_url"] = config.OKLINK_TX_BASE + order.attest_tx
         if include_gated:
             # Capability surface (wallet session / magic link): the authorized
             # owner may see the full payload and freshly minted gated keys.
