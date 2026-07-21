@@ -247,6 +247,29 @@ TILLA_ACP_SIGNING_SECRET = os.environ.get("TILLA_ACP_SIGNING_SECRET", "")
 # many active subscribers (abuse bound, alongside the tightest slowapi limiter).
 TILLA_SUBSCRIBERS_MAX = int(os.environ.get("TILLA_SUBSCRIBERS_MAX", "5000"))
 
+# ---------- M16 B2B wholesale tiers: read-only ERC-8004 owner verification -----
+# A wholesale tier discount is granted ONLY when the settled payer wallet equals
+# the on-chain owner of the presented ERC-8004 agent id (INV-1), resolved by a
+# READ-ONLY eth_call to this IdentityRegistry — Tilla never writes to it and never
+# signs. Empty (the default) => verification always returns None => every quote and
+# settle falls back to the base price (fail-to-base, never fail-open-to-a-discount).
+# The live X Layer registry address is set in the VPS .env (user-gated, like the
+# other dormant on-chain constants); tests inject it + mock the RPC.
+ERC8004_REGISTRY = os.environ.get("TILLA_ERC8004_REGISTRY", "").lower()
+# Owner lookup selector: ownerOf(uint256) = 0x6352211e. ERC-8004 agents are ERC-721
+# tokens whose tokenId is the agentId, so ownerOf returns the controlling wallet.
+# Overridable in case the deployed registry exposes a differently-named read.
+ERC8004_OWNER_SELECTOR = os.environ.get("TILLA_ERC8004_OWNER_SELECTOR", "0x6352211e")
+# Positive-result cache TTL (seconds) for the identity read — bounds enumeration /
+# DoS on the public quote endpoint. Only verified owners are cached; an RPC outage
+# is never cached, so a discount is never served on stale trust.
+ERC8004_LOOKUP_TTL = float(os.environ.get("TILLA_ERC8004_LOOKUP_TTL", "300"))
+# Wholesale tier bounds (micro-USDT), mirroring the M1 product price bounds
+# (0.01 .. 10000 USDT); no floats — micro ints only.
+TIER_PRICE_MICRO_MIN = 10_000
+TIER_PRICE_MICRO_MAX = 10_000_000_000
+TIERS_MAX = 20
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
 
