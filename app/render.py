@@ -34,9 +34,31 @@ def _safe_hex(value: object, fallback: str) -> str:
     return text if _HEX_COLOR.fullmatch(text) else fallback
 
 
+def _relative_luminance(hex_color: str) -> float:
+    """WCAG relative luminance of an already-validated hex color
+    (https://www.w3.org/TR/WCAG21/#dfn-relative-luminance). Short #RGB/#RGBA
+    forms are expanded; alpha digits are ignored."""
+    digits = hex_color[1:]
+    if len(digits) in (3, 4):
+        digits = "".join(d * 2 for d in digits)
+    srgb = [int(digits[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in srgb]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _on_primary(primary: str) -> str:
+    """Pure "#000" or "#fff" — whichever has the higher WCAG contrast ratio
+    against the validated primary color."""
+    lum = _relative_luminance(primary)
+    contrast_black = (lum + 0.05) / 0.05
+    contrast_white = 1.05 / (lum + 0.05)
+    return "#000" if contrast_black >= contrast_white else "#fff"
+
+
 def _palette_ctx(content: Mapping) -> dict:
     """The four validated palette hex values (safe fallback on anything not a
-    strict hex color), shared by the store themes and the OG image."""
+    strict hex color), shared by the store themes and the OG image, plus the
+    derived C_ON_PRIMARY (pure #000/#fff by WCAG contrast against C_PRIMARY)."""
     palette = content.get("palette") or {}
     if not isinstance(palette, Mapping):
         palette = {}
@@ -45,6 +67,9 @@ def _palette_ctx(content: Mapping) -> dict:
         "C_ACCENT": _safe_hex(palette.get("accent"), DEFAULT_PALETTE["accent"]),
         "C_BG": _safe_hex(palette.get("bg"), DEFAULT_PALETTE["bg"]),
         "C_TEXT": _safe_hex(palette.get("text"), DEFAULT_PALETTE["text"]),
+        "C_ON_PRIMARY": _on_primary(
+            _safe_hex(palette.get("primary"), DEFAULT_PALETTE["primary"])
+        ),
     }
 
 
