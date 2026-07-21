@@ -97,6 +97,20 @@ def test_pricing_accepts_tiers(make_store):
     assert _product("b1").pricing_params["tiers"] == [TIER_6961, TIER_ANY]
 
 
+def test_pricing_rejects_tier_above_base_price(make_store):
+    make_store(slug="babove", price_micro=9_000_000)
+    r = _set_tiers("babove", [{"buyer": "any_agent", "price_micro": 9_000_001}])
+    assert r.status_code == 422
+    assert "exceed the base" in r.text
+
+
+def test_pricing_canonicalizes_leading_zero_agent_id(make_store):
+    make_store(slug="bzeros", price_micro=9_000_000)
+    r = _set_tiers("bzeros", [{"buyer": "erc8004:0007", "price_micro": 5_000_000}])
+    assert r.status_code == 200
+    assert _product("bzeros").pricing_params["tiers"][0]["buyer"] == "erc8004:7"
+
+
 def test_tiers_coexist_with_model_params(make_store):
     make_store(slug="b2")
     metered = {"unit": "token", "price_per_unit_micro": 1000, "min_deposit_micro": 1}

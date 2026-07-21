@@ -910,8 +910,14 @@ class _WholesaleTier(BaseModel):
     @field_validator("buyer")
     @classmethod
     def _v_buyer(cls, v: str) -> str:
-        if v == "any_agent" or re.fullmatch(r"erc8004:\d{1,20}", v):
+        if v == "any_agent":
             return v
+        m = re.fullmatch(r"erc8004:(\d{1,20})", v)
+        if m:
+            # Canonicalize the id (strip leading zeros) so the stored buyer always
+            # matches match_tier's f"erc8004:{int}" form — 'erc8004:07' would
+            # otherwise be a dead tier that silently never applies.
+            return f"erc8004:{int(m.group(1))}"
         raise ValueError("buyer must be 'any_agent' or 'erc8004:<id>'")
 
 
@@ -930,9 +936,13 @@ _PRICING_PARAM_MODELS = {
 }
 
 
-def _validate_tiers(tiers: list[_WholesaleTier] | None) -> list[dict] | None:
+def _validate_tiers(
+    tiers: list[_WholesaleTier] | None, base_price_micro: int
+) -> list[dict] | None:
     """Normalize wholesale tiers or raise 422: at most TIERS_MAX, no duplicate
-    buyers. Per-tier shape/bounds are already enforced by the pydantic model."""
+    buyers, and every tier at or below the base price (a wholesale tier is a
+    discount — a tier above base would grief verified buyers once 16.2 wires
+    tiers into the 402). Per-tier shape/bounds are enforced by the model."""
     if not tiers:
         return None
     if len(tiers) > config.TIERS_MAX:
@@ -940,6 +950,11 @@ def _validate_tiers(tiers: list[_WholesaleTier] | None) -> list[dict] | None:
     buyers = [t.buyer for t in tiers]
     if len(set(buyers)) != len(buyers):
         raise HTTPException(422, "duplicate tier buyer")
+    for t in tiers:
+        if t.price_micro > base_price_micro:
+            raise HTTPException(
+                422, "tier price_micro must not exceed the base product price"
+            )
     return [t.model_dump() for t in tiers]
 
 
@@ -992,7 +1007,6 @@ async def set_pricing(
             f"invalid pricing body ({loc or 'pricing_model'}): {first.get('msg')}",
         ) from None
     params = _validate_pricing_params(parsed.pricing_model, parsed.params)
-    tiers = _validate_tiers(parsed.tiers)
     product = session.scalar(
         select(Product)
         .where(Product.store_id == store.id, Product.active.is_(True))
@@ -1000,6 +1014,7 @@ async def set_pricing(
     )
     if product is None:
         raise HTTPException(409, "store has no active product")
+    tiers = _validate_tiers(parsed.tiers, product.price_micro)
     # Tiers ride the SAME JSON column under a 'tiers' key alongside any model params.
     merged = dict(params) if params else {}
     if tiers:
