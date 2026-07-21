@@ -589,6 +589,30 @@ def agent_buy_get(
 # ============================================================================
 # Settlement-failed hook + reaper: void a provisional 'settling' when settle fails
 # ============================================================================
+def _void_settling(session: Session, order: Order, event: str) -> bool:
+    """Conditionally void a provisional 'settling' agent order (→ canceled), revoking
+    its entitlement (killing the minted download token / license key) and enqueuing an
+    ``order.voided`` webhook. The winning ``settling -> canceled`` transition is a
+    conditional UPDATE, so a settled order (already 'delivered') and a concurrent
+    voider are both no-ops. Does NOT commit — the caller owns the transaction.
+    Returns True on the winning void."""
+    if not checkout.transition(session, order.id, ("settling",), "canceled"):
+        return False
+    delivery.revoke_entitlement(session, order)
+    log_event(
+        session,
+        "agentic",
+        event,
+        store_id=order.store_id,
+        order_id=order.id,
+    )
+    store = session.get(Store, order.store_id)
+    if store is not None:
+        session.refresh(order)
+        webhooks.enqueue(session, store.merchant_id, "order.voided", order)
+    return True
+
+
 def settle_failed_core(nonce: str) -> dict:
     """Compensator for a settle failure on a just-delivered agent order. If the
     order is already in a terminal delivered status an earlier settle on this
@@ -614,19 +638,7 @@ def settle_failed_core(nonce: str) -> dict:
                 "order_id": order.id,
                 "message": CLAIM_DELIVERY_MESSAGE,
             }
-        if checkout.transition(session, order.id, ("settling",), "canceled"):
-            delivery.revoke_entitlement(session, order)
-            log_event(
-                session,
-                "agentic",
-                "agent_order.settle_failed",
-                store_id=order.store_id,
-                order_id=order.id,
-            )
-            store = session.get(Store, order.store_id)
-            if store is not None:
-                session.refresh(order)
-                webhooks.enqueue(session, store.merchant_id, "order.voided", order)
+        if _void_settling(session, order, "agent_order.settle_failed"):
             session.commit()
         return {"error": "settlement_failed"}
 
@@ -680,19 +692,7 @@ def reap_agent_orders(session: Session, now=None) -> int:
     for o in orders:
         reached = checkout._naive(o.paid_at) or checkout._naive(o.created_at)
         if reached is not None and reached <= cutoff:
-            if checkout.transition(session, o.id, ("settling",), "canceled"):
-                delivery.revoke_entitlement(session, o)
-                log_event(
-                    session,
-                    "agentic",
-                    "agent_order.reaped",
-                    store_id=o.store_id,
-                    order_id=o.id,
-                )
-                store = session.get(Store, o.store_id)
-                if store is not None:
-                    session.refresh(o)
-                    webhooks.enqueue(session, store.merchant_id, "order.voided", o)
+            if _void_settling(session, o, "agent_order.reaped"):
                 reaped += 1
     return reaped
 
@@ -761,6 +761,40 @@ def _settle_tier_data(session: Session, order: Order, agent_id: int | None) -> d
     return data
 
 
+def _finalize_settled(
+    session: Session, order: Order, tx: str | None, settle_data: dict | None
+) -> bool:
+    """Flip a provisional 'settling' agent order to terminal 'delivered' on a confirmed
+    settle — exposing the goods to the out-of-band claim paths — recording the settle
+    ``tx_hash`` when present, then firing the paid/delivered webhooks (suppressed in
+    ``checkout.deliver`` for agent orders), queueing the M11 EAS attestation, and
+    accruing the M13 affiliate rev-share. Every downstream effect is written ONLY on the
+    winning ``settling -> delivered`` transition, so a voided/reaped order never reaches
+    them. Idempotent: the conditional UPDATE is a no-op once the order has left
+    'settling'. Does NOT commit — the caller owns the transaction. Returns True on the
+    winning flip."""
+    fields = {"tx_hash": tx} if tx else {}
+    if not checkout.transition(session, order.id, ("settling",), "delivered", **fields):
+        return False
+    log_event(
+        session,
+        "agentic",
+        "agent_order.settled",
+        store_id=order.store_id,
+        order_id=order.id,
+        data=settle_data,
+    )
+    store = session.get(Store, order.store_id)
+    if store is not None:
+        session.refresh(order)
+        if config.ATTEST_ENABLED:
+            order.attest_status = "pending"
+        webhooks.enqueue(session, store.merchant_id, "order.paid", order)
+        webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
+        affiliates.accrue(session, order, store)
+    return True
+
+
 def record_settlement(
     order_id: str,
     payment_response_header: str,
@@ -784,17 +818,30 @@ def record_settlement(
     before TILLA_AGGR_DEFERRED is ever enabled.) Idempotent (the conditional
     transition is a no-op once the order has left 'settling')."""
     tx = None
+    status = None
     try:
         settle = decode_payment_response_header(payment_response_header)
         tx = settle.transaction or None
+        status = settle.status
     except Exception:
         logger.exception("record_settlement: undecodable PAYMENT-RESPONSE")
     with SessionLocal() as session:
         order = session.get(Order, order_id)
         if order is None or order.channel != "agent":
             return
-        if scheme == PAYMENT_SCHEME_AGGR_DEFERRED and tx is None:
+        # aggr_deferred is UNCONFIRMED at serve time when there is no decoded tx OR the
+        # facilitator marks the aggregated tx 'pending' — in both cases the on-chain tx
+        # is not yet final, so we do NOT flip to a terminal 'delivered' or log
+        # 'agent_order.settled' (which would claim settlement with no evidence). The
+        # order stays provisional 'settling' with the 'agent_order.settle_pending'
+        # marker; when a pending aggregated ref IS present we persist it so the
+        # reconciliation poller (app.reconcile) can later finalize on its confirmed tx.
+        if scheme == PAYMENT_SCHEME_AGGR_DEFERRED and (
+            tx is None or status == "pending"
+        ):
             if order.status == "settling":
+                if tx is not None and order.settle_ref != tx:
+                    order.settle_ref = tx
                 log_event(
                     session,
                     "agentic",
@@ -804,7 +851,6 @@ def record_settlement(
                 )
                 session.commit()
             return
-        fields = {"tx_hash": tx} if tx else {}
         # INV-1 settle re-verify: for a tiered buy re-derive the tier with a FRESH
         # ownership read (never the positive cache) BEFORE the terminal flip, so a
         # discount can never ride a stale cache entry. tier_applied is recorded on
@@ -817,32 +863,7 @@ def record_settlement(
                 settle_data["tx"] = "unparsed"
         else:
             settle_data = None if tx else {"tx": "unparsed"}
-        if checkout.transition(session, order.id, ("settling",), "delivered", **fields):
-            log_event(
-                session,
-                "agentic",
-                "agent_order.settled",
-                store_id=order.store_id,
-                order_id=order_id,
-                data=settle_data,
-            )
-            # Fire the paid/delivered webhooks here (suppressed in checkout.deliver
-            # for agent orders): the settle is now confirmed on-chain, so the
-            # merchant's consumer counts revenue only for a settled buy.
-            store = session.get(Store, order.store_id)
-            if store is not None:
-                session.refresh(order)
-                # M11: queue for EAS attestation ONLY here, on the settling->delivered
-                # flip — a voided/reaped agent order (which never reaches this branch)
-                # is therefore never attested. Flag OFF => stays 'none', never queued.
-                if config.ATTEST_ENABLED:
-                    order.attest_status = "pending"
-                webhooks.enqueue(session, store.merchant_id, "order.paid", order)
-                webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
-                # M13 affiliate accrual: written ONLY here, on the settling->delivered
-                # flip — a voided/reaped agent order (which never reaches this branch)
-                # is therefore never accrued, the same guarantee as EAS queueing.
-                affiliates.accrue(session, order, store)
+        if _finalize_settled(session, order, tx, settle_data):
             session.commit()
 
 

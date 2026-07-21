@@ -19,7 +19,7 @@ from x402.schemas import PaymentPayload, PaymentRequired, PaymentRequirements
 import app.main as main  # noqa: F401 — ensures app + limiter wired for direct calls
 from app import agentic, config
 from app.db import SessionLocal
-from app.models import Product, Store
+from app.models import Order, Product, Store
 from app.payment import (
     build_store_payment_option,
     build_store_payment_options,
@@ -282,3 +282,154 @@ def test_aggr_deferred_with_real_tx_flips_delivered(make_store):
         assert s.get(Order, oid).status == "delivered"
         assert s.get(Order, oid).tx_hash == "0x" + "d" * 64
     assert "agent_order.settled" in _events(oid)
+
+
+# ------------------------ get_settle_status reconciliation poller (M8 blocker) ------
+from app import reconcile  # noqa: E402
+
+
+class _FakeStatusClient:
+    """Stands in for the OKX sync facilitator client — no network. Records the
+    reference it was polled with and returns a canned SettleStatusResponse."""
+
+    def __init__(self, resp):
+        self._resp = resp
+        self.queried: list[str] = []
+
+    def get_settle_status(self, tx_hash: str):
+        self.queried.append(tx_hash)
+        return self._resp
+
+
+def _status(**kw):
+    from x402.schemas.responses import SettleStatusResponse
+
+    return SettleStatusResponse(**kw)
+
+
+def _pending_settling_order(make_store, slug: str, ref: str = "0x" + "e" * 64) -> str:
+    """A batch order held 'settling' after a deferred settle returned success with a
+    PENDING (unconfirmed) aggregated reference — the state the poller finalizes."""
+    from x402.http.utils import encode_payment_response_header
+    from x402.schemas import SettleResponse
+
+    oid = _batch_settling_order(make_store, slug)
+    header = encode_payment_response_header(
+        SettleResponse(
+            success=True, transaction=ref, status="pending", network="eip155:196"
+        )
+    )
+    agentic.record_settlement(oid, header, "aggr_deferred")
+    return oid
+
+
+def test_pending_settle_captures_ref_and_stays_settling(make_store):
+    # A deferred settle marked 'pending' (aggregated tx not yet confirmed) must NOT
+    # flip to delivered — it stays settling, records the pollable ref, logs pending.
+    oid = _pending_settling_order(make_store, "rp0")
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "settling"
+        assert o.settle_ref == "0x" + "e" * 64
+        assert o.tx_hash is None
+    events = _events(oid)
+    assert "agent_order.settle_pending" in events
+    assert "agent_order.settled" not in events
+
+
+def test_reconcile_confirmed_tx_flips_delivered(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp1")
+    client = _FakeStatusClient(
+        _status(
+            success=True,
+            status="success",
+            transaction="0x" + "c" * 64,
+            network="eip155:196",
+        )
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 1
+    assert client.queried == ["0x" + "e" * 64]
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash == "0x" + "c" * 64
+    assert "agent_order.settled" in _events(oid)
+
+
+def test_reconcile_pending_leaves_settling(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp2")
+    client = _FakeStatusClient(_status(success=True, status="pending"))
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "settling"
+        assert o.tx_hash is None
+    assert "agent_order.settled" not in _events(oid)
+
+
+def test_reconcile_success_without_tx_never_delivers(make_store, monkeypatch):
+    # Never deliver without a confirmed tx hash, even on a 'success' status.
+    oid = _pending_settling_order(make_store, "rp3")
+    client = _FakeStatusClient(
+        _status(success=True, status="success", transaction=None)
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+
+def test_reconcile_failed_voids(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp4")
+    client = _FakeStatusClient(
+        _status(success=False, status="failed", error_reason="reverted")
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 1
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "canceled"
+    events = _events(oid)
+    assert "agent_order.settle_reconcile_failed" in events
+    assert "agent_order.settled" not in events
+
+
+def test_reconcile_idempotent_double_tick(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp5")
+    client = _FakeStatusClient(
+        _status(
+            success=True,
+            status="success",
+            transaction="0x" + "a" * 64,
+            network="eip155:196",
+        )
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 1
+    # A delivered order has left 'settling', so the second tick never re-selects it —
+    # no re-delivery, no duplicate settled event.
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "delivered"
+    assert _events(oid).count("agent_order.settled") == 1
+
+
+def test_reconcile_skips_orders_without_settle_ref(make_store, monkeypatch):
+    # An order with no captured ref is never polled (the poller only touches rows
+    # carrying settle_ref) — a no-tx settle stays for the reaper, not the poller.
+    oid = _batch_settling_order(make_store, "rp6")
+    agentic.record_settlement(oid, "not-a-decodable-header", "aggr_deferred")
+    client = _FakeStatusClient(_status(success=True, status="success"))
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    assert client.queried == []
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+
+def test_reconcile_dormant_without_client(make_store, monkeypatch):
+    _pending_settling_order(make_store, "rp7")
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: None)
+    # No client (no creds) => idle, zero network, nothing acted on.
+    assert reconcile.reconcile_tick() == 0

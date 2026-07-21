@@ -198,6 +198,13 @@ class Order(Base):
     # idempotency/replay key. NULL for human orders (see the unique index above).
     x402_nonce: Mapped[str | None] = mapped_column(String(66), nullable=True)
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # M8 aggr_deferred reconciliation: the pending aggregated settle reference the
+    # facilitator returns for a deferred (async) settle that has NOT yet confirmed
+    # on-chain. Captured on the settling order so the reconciliation poller
+    # (app.reconcile) can query get_settle_status(settle_ref) and finalize the order
+    # only once its aggregated tx confirms. NULL for every other order (exact rail,
+    # human orders) — the poller only ever touches rows carrying it.
+    settle_ref: Mapped[str | None] = mapped_column(String(66), nullable=True)
     from_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
     # M13 affiliate attribution: the referring agent's payout wallet, captured at
     # order creation (first-write-wins, immutable afterwards). Lowercased + zero-

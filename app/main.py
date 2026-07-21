@@ -52,6 +52,7 @@ from app import (
     mpp,
     payment,
     providers,
+    reconcile,
     subscriptions,
     webhooks,
 )
@@ -110,6 +111,7 @@ async def lifespan(app: FastAPI):
     sweeper = None
     webhook_task = None
     attest_task = None
+    reconcile_task = None
     federation_task = None
     growth_sched_task = None
     if config.SWEEP_ENABLED:
@@ -124,6 +126,13 @@ async def lifespan(app: FastAPI):
         # + flag on the VPS) is an explicit user-gated runbook step.
         if config.ATTEST_ENABLED and config.TILLA_ATTESTER_KEY:
             attest_task = asyncio.create_task(attest.attest_loop())
+        # M8 aggr_deferred settle reconciliation poller — DORMANT: only starts with
+        # SWEEP_ENABLED AND AGGR_DEFERRED_ENABLED AND OKX creds. Missing any one => no
+        # task, no RPC, and the SDK facilitator client is never built. It finalizes
+        # deferred (async) settles once their aggregated tx confirms; idle until a
+        # batch buy leaves an order in 'settling' with a pending settle_ref.
+        if config.AGGR_DEFERRED_ENABLED and os.getenv("OKX_API_KEY"):
+            reconcile_task = asyncio.create_task(reconcile.reconcile_loop())
         # M16.4 federation ingest — shares the background-loop gate so tests never
         # start it. DOUBLY dormant: also a no-op unless TILLA_FEDERATION_PEERS is
         # set (empty => the loop idles with zero network). Read-only discovery
@@ -152,6 +161,7 @@ async def lifespan(app: FastAPI):
             sweeper,
             webhook_task,
             attest_task,
+            reconcile_task,
             reaper,
             federation_task,
             growth_sched_task,

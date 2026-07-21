@@ -183,6 +183,11 @@ def _flag(name: str) -> bool:
 # eip155:196 makes the middleware's lazy initialize raise -> 502 on ALL protected
 # routes, so only flip after the /supported probe confirms the scheme.
 AGGR_DEFERRED_ENABLED = _flag("TILLA_AGGR_DEFERRED")
+# aggr_deferred reconciliation poller cadence + burst bound (mirrors the attest loop
+# knobs). Only meaningful when the reconcile loop runs (SWEEP_ENABLED AND
+# AGGR_DEFERRED_ENABLED AND OKX creds) — never in tests, which disable SWEEP_ENABLED.
+RECONCILE_INTERVAL = float(os.environ.get("TILLA_RECONCILE_INTERVAL", "30"))
+RECONCILE_MAX_PER_TICK = int(os.environ.get("TILLA_RECONCILE_MAX_PER_TICK", "20"))
 # MPP pay-as-you-go: /s/{slug}/mpp/* endpoints. OFF -> every endpoint 503s.
 MPP_ENABLED = _flag("TILLA_MPP_ENABLED")
 # Subscriptions (x402 period, JS sidecar): /s/{slug}/subscribe. OFF -> 503.
