@@ -7,7 +7,6 @@ Run: uvicorn app.main:app --host 127.0.0.1 --port 8040   (EnvironmentFile=/opt/t
 
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import re
@@ -265,23 +264,19 @@ def create_store_post(request: Request, body: CreateStoreBody):
 
 @app.get("/create-store")
 @limiter.limit("6/minute")
-def create_store_get(
-    request: Request, description: str = "", receive_address: str = "", theme: str = ""
-):
-    # unpaid GET is intercepted by the x402 paywall (402). A paid GET reaches here.
-    if not description:
-        return {
-            "service": "Tilla · create-store",
+def create_store_get(request: Request):
+    # unpaid GET is intercepted by the x402 paywall (402 challenge — onchainos
+    # x402-check probes GET). A PAID GET is refused 405 BEFORE settle: a >=400
+    # response makes the payment middleware skip settlement, so zero funds move on
+    # the GET method (a live reviewer paid 1 USDT for the old usage-JSON 200).
+    return JSONResponse(
+        {
+            "error": "method not allowed; use POST to create a store",
             "how": "POST {description, receive_address, theme?} (x402-paid) → returns a live store URL",
-            "network": "eip155:196",
-        }
-    try:
-        body = CreateStoreBody(
-            description=description, receive_address=receive_address, theme=theme
-        )
-    except ValidationError as exc:
-        raise HTTPException(422, json.loads(exc.json())) from exc
-    return _run_create_store(body.description, body.receive_address, body.theme)
+        },
+        status_code=405,
+        headers={"Allow": "POST"},
+    )
 
 
 # ---------- M10 marketplace services: upgrade a store / add a product ----------
@@ -375,32 +370,21 @@ def upgrade_store_post(
 
 @app.get("/upgrade-store")
 @limiter.limit("6/minute")
-def upgrade_store_get(
-    request: Request,
-    slug: str = "",
-    description: str = "",
-    theme: str = "",
-    session: Session = Depends(get_session),
-):
-    # unpaid GET is intercepted by the x402 paywall (402). A paid GET reaches here;
-    # with no slug it returns service-usage JSON (like create-store's GET).
-    if not slug:
-        return {
-            "service": "Tilla · upgrade-store",
+def upgrade_store_get(request: Request):
+    # unpaid GET → 402 challenge via the paywall; a PAID GET is refused 405 BEFORE
+    # settle (>=400 skips settlement — no funds move on GET, same as agent_buy_get).
+    return JSONResponse(
+        {
+            "error": "method not allowed; use POST to upgrade a store",
             "how": (
                 "POST {slug, description?, theme?} + Authorization: Bearer "
                 "<manage_key> (x402-paid, 1 USDT) → regenerates, re-screens, and "
                 "re-renders a store you own"
             ),
-            "network": "eip155:196",
-        }
-    try:
-        body = UpgradeStoreBody(
-            slug=slug, description=description or None, theme=theme or None
-        )
-    except ValidationError as exc:
-        raise HTTPException(422, json.loads(exc.json())) from exc
-    return _run_upgrade_store(request, session, body.slug, body.description, body.theme)
+        },
+        status_code=405,
+        headers={"Allow": "POST"},
+    )
 
 
 def _run_add_product(
@@ -472,30 +456,21 @@ def add_product_post(
 
 @app.get("/add-product")
 @limiter.limit("6/minute")
-def add_product_get(
-    request: Request,
-    slug: str = "",
-    name: str = "",
-    price_usdt: float | None = None,
-    session: Session = Depends(get_session),
-):
-    if not slug:
-        return {
-            "service": "Tilla · add-product",
+def add_product_get(request: Request):
+    # unpaid GET → 402 challenge via the paywall; a PAID GET is refused 405 BEFORE
+    # settle (>=400 skips settlement — no funds move on GET, same as agent_buy_get).
+    return JSONResponse(
+        {
+            "error": "method not allowed; use POST to add a product",
             "how": (
                 "POST {slug, name, price_usdt} + Authorization: Bearer "
                 "<manage_key> (x402-paid, 0.5 USDT) → adds a second product to a "
                 "store you own"
             ),
-            "network": "eip155:196",
-        }
-    try:
-        body = AddProductBody(
-            slug=slug, name=name, price_usdt=price_usdt if price_usdt is not None else 0
-        )
-    except ValidationError as exc:
-        raise HTTPException(422, json.loads(exc.json())) from exc
-    return _run_add_product(request, session, body.slug, body.name, body.price_usdt)
+        },
+        status_code=405,
+        headers={"Allow": "POST"},
+    )
 
 
 class TxBody(BaseModel):
