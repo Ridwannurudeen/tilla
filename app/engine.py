@@ -12,6 +12,7 @@ import shutil
 import sys
 import time
 import unicodedata
+from typing import Literal, get_args
 
 import requests
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -58,6 +59,25 @@ def _is_transient_status(code: int) -> bool:
     return code == 429 or 500 <= code <= 599
 
 
+class DesignDNA(BaseModel):
+    """The five Design DNA style axes (docs/DESIGN-DNA.md): server-validated
+    enums the LLM picks to express a brand's personality. An out-of-set value
+    is coerced to the axis default — never a ValidationError that could block a
+    sale — mirroring the fail-closed contract of ``_safe_hex`` / ``theme``."""
+
+    scale: Literal["compact", "balanced", "dramatic", "monumental"] = "balanced"
+    weight: Literal["light", "regular", "heavy"] = "regular"
+    rhythm: Literal["tight", "roomy", "airy"] = "roomy"
+    hero: Literal["stacked", "split", "offset"] = "stacked"
+    texture: Literal["sparse", "medium", "dense"] = "medium"
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _coerce_axis(cls, v, info):
+        field = cls.model_fields[info.field_name]
+        return v if v in get_args(field.annotation) else field.default
+
+
 class GeneratedContent(BaseModel):
     """Bounds on what the LLM is allowed to hand back before it ever reaches
     a template or a price tag."""
@@ -76,11 +96,21 @@ class GeneratedContent(BaseModel):
     # value outside the allowed set is coerced to the default so a stray
     # suggestion can never fail generation.
     theme: str = Field(default="original")
+    # Optional style-axes pick (docs/DESIGN-DNA.md); stores/content without it
+    # render exactly as before (render._dna_ctx falls back to the defaults).
+    design_dna: DesignDNA | None = None
 
     @field_validator("theme")
     @classmethod
     def _coerce_theme(cls, v):
         return v if v in config.ALLOWED_THEMES else "original"
+
+    @field_validator("design_dna", mode="before")
+    @classmethod
+    def _coerce_design_dna(cls, v):
+        # A stray non-object design_dna (string/list/number) is dropped rather
+        # than failing generation; the renderer then uses the default look.
+        return v if isinstance(v, dict) else None
 
 
 def _resolve_theme(name: str | None) -> str:
@@ -192,7 +222,16 @@ def generate(desc):
         "theme (one of exactly: original, bold, editorial — pick the layout that best fits the brand: "
         "original = maximal flagship with kinetic type and a generative block mosaic, "
         "bold = loud brutalist uppercase with hard offset shadows, "
-        "editorial = quiet numbered-ledger magazine, understated luxury). "
+        "editorial = quiet numbered-ledger magazine, understated luxury), "
+        "design_dna (object with EXACTLY these keys, each value one of the exact options listed: "
+        "scale (one of exactly: compact, balanced, dramatic, monumental), "
+        "weight (one of exactly: light, regular, heavy), "
+        "rhythm (one of exactly: tight, roomy, airy), "
+        "hero (one of exactly: stacked, split, offset), "
+        "texture (one of exactly: sparse, medium, dense) "
+        "— pick the combination that expresses the brand's personality: a loud, maximal brand "
+        "wants heavy weight, dramatic or monumental scale, dense texture, offset hero; a refined, "
+        "understated brand wants light weight, airy rhythm, sparse texture, stacked hero). "
         "Make copy crisp and compelling, no placeholders."
     )
     resp = _post_generation(prompt)

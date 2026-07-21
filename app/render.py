@@ -73,6 +73,49 @@ def _palette_ctx(content: Mapping) -> dict:
     }
 
 
+# Design DNA axis whitelists (docs/DESIGN-DNA.md): each enum value the LLM may
+# pick maps onto a server-owned token value. Anything outside a whitelist falls
+# back to the default, so a bogus value never reaches a style context — the
+# same fail-closed contract as _safe_hex. The defaults (balanced / regular /
+# roomy / stacked / medium) reproduce the pre-DNA look exactly.
+_DNA_SCALE = {
+    "compact": "1.18",
+    "balanced": "1.25",
+    "dramatic": "1.34",
+    "monumental": "1.5",
+}
+_DNA_WEIGHT = {"light": "300", "regular": "450", "heavy": "700"}
+_DNA_SPACE = {"tight": "0.82", "roomy": "1", "airy": "1.35"}
+_DNA_HERO = {"stacked": "stacked", "split": "split", "offset": "offset"}
+_DNA_TEXTURE = {"sparse": "sparse", "medium": "medium", "dense": "dense"}
+
+
+def _safe_enum(value: object, mapping: Mapping, fallback: str) -> str:
+    """Map a whitelisted Design DNA enum value to its token value, falling back
+    on anything else (wrong type included) — the enum analogue of _safe_hex."""
+    return mapping[value] if isinstance(value, str) and value in mapping else fallback
+
+
+def _dna_ctx(content: Mapping) -> dict:
+    """The five validated Design DNA tokens (docs/DESIGN-DNA.md). A store whose
+    content has no design_dna — or a partial/invalid one — gets the defaults on
+    every missing/bogus axis, so pre-DNA stores render with the current look."""
+    dna = content.get("design_dna") or {}
+    if not isinstance(dna, Mapping):
+        dna = {}
+    return {
+        "DNA_SCALE": _safe_enum(dna.get("scale"), _DNA_SCALE, _DNA_SCALE["balanced"]),
+        "DNA_WEIGHT": _safe_enum(
+            dna.get("weight"), _DNA_WEIGHT, _DNA_WEIGHT["regular"]
+        ),
+        "DNA_SPACE": _safe_enum(dna.get("rhythm"), _DNA_SPACE, _DNA_SPACE["roomy"]),
+        "DNA_HERO": _safe_enum(dna.get("hero"), _DNA_HERO, _DNA_HERO["stacked"]),
+        "DNA_TEXTURE": _safe_enum(
+            dna.get("texture"), _DNA_TEXTURE, _DNA_TEXTURE["medium"]
+        ),
+    }
+
+
 def _seo_ctx(content: Mapping, slug: str) -> dict:
     """Canonical URL, OG image path, meta description and a schema.org/Product
     JSON-LD object for the theme <head>. The JSON-LD is emitted with `| tojson`
@@ -123,6 +166,7 @@ def render(content: Mapping, addr: str, slug: str, theme: str = "original.html")
         "EMOJI": str(content.get("emoji", "🛍️")),
         "ADDR": addr,
         **_palette_ctx(content),
+        **_dna_ctx(content),
         **_seo_ctx(content, slug),
     }
     template = _env.get_template(theme)
