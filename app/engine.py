@@ -15,6 +15,7 @@ import unicodedata
 import requests
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app import config, screening
 from app.db import SessionLocal
@@ -55,16 +56,30 @@ def slugify(s):
     return (s or "store")[: config.SLUG_MAX_LEN]
 
 
+def _slug_taken(candidate: str) -> bool:
+    """A slug is taken if a store dir exists on disk OR a DB row already holds
+    it. The DB check catches blocked stores whose dir was removed but whose
+    row keeps the slug (stores.slug is UNIQUE — a disk-only check would let a
+    later collision IntegrityError out)."""
+    if (STORES_DIR / candidate).exists():
+        return True
+    with SessionLocal() as session:
+        return (
+            session.scalar(select(Store.id).where(Store.slug == candidate)) is not None
+        )
+
+
 def unique_slug(base: str) -> str:
     """Resolve `base` to a slug that is neither a reserved app route nor an
-    existing store directory, appending a numeric suffix on collision. The
-    base is truncated to leave room for the suffix so the final slug always
-    stays within SLUG_MAX_LEN and matches SLUG_PATTERN (else checkout 422s)."""
+    existing store (on disk or in the DB), appending a numeric suffix on
+    collision. The base is truncated to leave room for the suffix so the final
+    slug always stays within SLUG_MAX_LEN and matches SLUG_PATTERN (else
+    checkout 422s)."""
     slug = base if base not in config.RESERVED_SLUGS else f"{base}-store"
     slug = slug[: config.SLUG_MAX_LEN]
     candidate = slug
     n = 2
-    while (STORES_DIR / candidate).exists():
+    while _slug_taken(candidate):
         suffix = f"-{n}"
         candidate = slug[: config.SLUG_MAX_LEN - len(suffix)] + suffix
         n += 1
@@ -145,81 +160,98 @@ def create_store(desc, addr=None, delivery=None):
     """
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
-    slug = unique_slug(slugify(content.get("store_name") or desc))
-    if delivery is None:
-        delivery = (
-            f"✅ Thank you! Your {content.get('product_name', 'product')} is ready: "
-            f"https://tilla.gudman.xyz/files/{slug} (demo delivery link)"
-        )
-
     status = screening.scan_with_retry(_screening_text(desc, content))
     price_micro = int(round(float(content.get("price_usdt", 0)) * 1e6))
     pending = status == "pending"
 
-    d = STORES_DIR / slug
-    d.mkdir(parents=True, exist_ok=True)
-
-    if pending:
-        # Persist everything needed to resume (render + go live) once screening
-        # recovers — but write no index.html, so checkout stays 409'd until then.
-        meta = {
-            "slug": slug,
-            "status": "pending_screening",
-            "product_name": content.get("product_name", ""),
-            "amount_usdt": content.get("price_usdt", 0),
-            "pay_to": addr,
-            "delivery": delivery,
-            "description": desc,
-            "content": content,
-            "theme": DEFAULT_THEME,
-        }
-    else:
-        html = render_theme(content, addr, slug)
-        (d / "index.html").write_text(html, encoding="utf-8")
-        meta = {
-            "slug": slug,
-            "status": "live",
-            "product_name": content.get("product_name", ""),
-            "amount_usdt": content.get("price_usdt", 0),
-            "pay_to": addr,
-            "delivery": delivery,
-        }
-    (d / "store.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    with SessionLocal() as session:
-        merchant = get_or_create_merchant(session, addr)
-        store = Store(
-            slug=slug,
-            merchant_id=merchant.id,
-            status="pending_screening" if pending else "live",
-            pay_to=addr,
-            delivery=delivery,
-            description=desc,
-            content=content if pending else None,
-            theme=DEFAULT_THEME,
-        )
-        session.add(store)
-        session.flush()
-        session.add(
-            Product(
-                store_id=store.id,
-                name=content.get("product_name", ""),
-                price_micro=price_micro,
-                active=True,
+    # Resolve the slug and write everything slug-dependent inside a short retry
+    # loop: stores.slug is UNIQUE, so a concurrent create that grabbed the same
+    # candidate between our check and insert raises IntegrityError — we clean up,
+    # re-slug (now DB-aware, so it skips the committed row) and re-render once.
+    for attempt in range(2):
+        slug = unique_slug(slugify(content.get("store_name") or desc))
+        store_delivery = delivery
+        if store_delivery is None:
+            store_delivery = (
+                f"✅ Thank you! Your {content.get('product_name', 'product')} is ready: "
+                f"https://tilla.gudman.xyz/files/{slug} (demo delivery link)"
             )
+
+        d = STORES_DIR / slug
+        d.mkdir(parents=True, exist_ok=True)
+
+        if pending:
+            # Persist everything needed to resume (render + go live) once
+            # screening recovers — but write no index.html, so checkout stays
+            # 409'd until then.
+            meta = {
+                "slug": slug,
+                "status": "pending_screening",
+                "product_name": content.get("product_name", ""),
+                "amount_usdt": content.get("price_usdt", 0),
+                "pay_to": addr,
+                "delivery": store_delivery,
+                "description": desc,
+                "content": content,
+                "theme": DEFAULT_THEME,
+            }
+        else:
+            html = render_theme(content, addr, slug)
+            (d / "index.html").write_text(html, encoding="utf-8")
+            meta = {
+                "slug": slug,
+                "status": "live",
+                "product_name": content.get("product_name", ""),
+                "amount_usdt": content.get("price_usdt", 0),
+                "pay_to": addr,
+                "delivery": store_delivery,
+            }
+        (d / "store.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        log_event(
-            session, "api", "store.created", store_id=store.id, data={"slug": slug}
-        )
-        log_event(
-            session,
-            "api",
-            "store.screening_pending" if pending else "store.live",
-            store_id=store.id,
-        )
-        session.commit()
+
+        try:
+            with SessionLocal() as session:
+                merchant = get_or_create_merchant(session, addr)
+                store = Store(
+                    slug=slug,
+                    merchant_id=merchant.id,
+                    status="pending_screening" if pending else "live",
+                    pay_to=addr,
+                    delivery=store_delivery,
+                    description=desc,
+                    content=content if pending else None,
+                    theme=DEFAULT_THEME,
+                )
+                session.add(store)
+                session.flush()
+                session.add(
+                    Product(
+                        store_id=store.id,
+                        name=content.get("product_name", ""),
+                        price_micro=price_micro,
+                        active=True,
+                    )
+                )
+                log_event(
+                    session,
+                    "api",
+                    "store.created",
+                    store_id=store.id,
+                    data={"slug": slug},
+                )
+                log_event(
+                    session,
+                    "api",
+                    "store.screening_pending" if pending else "store.live",
+                    store_id=store.id,
+                )
+                session.commit()
+            break
+        except IntegrityError:
+            shutil.rmtree(d, ignore_errors=True)
+            if attempt == 1:
+                raise
 
     if pending:
         return {
