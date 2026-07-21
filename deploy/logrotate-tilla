@@ -6,6 +6,7 @@
 # dance. Validate before relying on it:  logrotate -d /etc/logrotate.d/tilla
 # Rollback: rm /etc/logrotate.d/tilla
 /var/log/tilla-backup.log /var/log/tilla-offsite.log {
+    su root root
     weekly
     rotate 8
     compress
