@@ -28,6 +28,11 @@ dependencies = [
     "itsdangerous==2.2.0",
     "python-multipart==0.0.32",
     "eth-account==0.13.7",
+    # M11 EAS receipt attester. Imported LAZILY inside app/attest.py's enabled path
+    # only (flag + key), so a dormant boot never loads it — but it must be installed
+    # for that live path (build the attest tx, sign, broadcast, read the receipt).
+    # Pinned to the exact version already on the VPS (the x402 branch uses it too).
+    "web3==7.16.0",
 ]
 
 [project.optional-dependencies]
