@@ -38,6 +38,7 @@ from app.models import (
     Order,
     Product,
     Refund,
+    ScreeningReceipt,
     Store,
     get_or_create_merchant,
     log_event,
@@ -357,6 +358,78 @@ def merchant_summary(request: Request, session: Session = Depends(get_session)):
         "outstanding_overpaid_usdt": usdt(outstanding_overpaid_micro),
         "underpaid": underpaid,
     }
+
+
+@router.get("/api/merchant/marketplace")
+@limiter.limit("60/minute")
+def merchant_marketplace(request: Request, session: Session = Depends(get_session)):
+    """Read-only M10 marketplace surface for the caller's stores: listing status,
+    per-channel sold counts (web vs agent), and each store's screening receipts
+    (demo + paid Warden hires) with an OKLink tx link when a paid receipt settled.
+    Behind the same _require_merchant + merchant_id IDOR gate as every M9 route —
+    non-owned/unknown stores are simply absent. Strictly read-only: nothing here can
+    trigger an on-chain action or a paid scan; listing state changes only via the
+    runbook's server-side mark_listed command."""
+    merchant = _require_merchant(request, session)
+    stores = session.scalars(
+        select(Store)
+        .where(Store.merchant_id == merchant.id)
+        .order_by(Store.created_at.desc())
+    ).all()
+    store_ids = [s.id for s in stores]
+
+    sold: dict[int, dict[str, int]] = {sid: {"web": 0, "agent": 0} for sid in store_ids}
+    receipts: dict[int, list[dict]] = {sid: [] for sid in store_ids}
+    if store_ids:
+        rows = session.execute(
+            select(Order.store_id, Order.channel, func.count())
+            .where(
+                Order.store_id.in_(store_ids),
+                Order.status.in_(checkout.TERMINAL_DELIVERED),
+            )
+            .group_by(Order.store_id, Order.channel)
+        ).all()
+        for sid, channel, n in rows:
+            bucket = sold.setdefault(sid, {"web": 0, "agent": 0})
+            bucket[channel] = bucket.get(channel, 0) + int(n)
+        for r in session.scalars(
+            select(ScreeningReceipt)
+            .where(ScreeningReceipt.store_id.in_(store_ids))
+            .order_by(ScreeningReceipt.id.desc())
+        ):
+            receipts[r.store_id].append(
+                {
+                    "mode": r.mode,
+                    "verdict": r.verdict,
+                    "risk_level": r.risk_level,
+                    "amount_usdt": usdt(r.amount_micro) if r.amount_micro else None,
+                    "tx_hash": r.tx_hash,
+                    "tx_url": config.OKLINK_TX_BASE + r.tx_hash if r.tx_hash else None,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+            )
+
+    out = []
+    for s in stores:
+        counts = sold.get(s.id, {"web": 0, "agent": 0})
+        out.append(
+            {
+                "slug": s.slug,
+                "marketplace_status": s.marketplace_status,
+                "marketplace_listed_at": (
+                    s.marketplace_listed_at.isoformat()
+                    if s.marketplace_listed_at
+                    else None
+                ),
+                "sold_count": {
+                    "web": counts.get("web", 0),
+                    "agent": counts.get("agent", 0),
+                    "total": counts.get("web", 0) + counts.get("agent", 0),
+                },
+                "screening": receipts.get(s.id, []),
+            }
+        )
+    return {"merchant": merchant.wallet_address, "stores": out}
 
 
 def _order_row(order: Order, store: Store) -> dict:

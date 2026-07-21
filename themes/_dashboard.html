@@ -91,6 +91,8 @@
     <div id="underpaid" class="card scroll"></div>
     <h3>Your stores</h3>
     <div id="stores"></div>
+    <h3>Marketplace</h3>
+    <div id="marketplace"></div>
   </div>
 
   <!-- one store's orders -->
@@ -190,7 +192,64 @@
     byId("signBtn").classList.add("hide");
     byId("signOut").classList.remove("hide");
     show("viewMain");
-    await Promise.all([loadSummary(), loadStores(), loadWebhook()]);
+    await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace()]);
+  }
+
+  // ---- marketplace (read-only: listing status, sold split, screening receipts) ----
+  async function loadMarketplace() {
+    var data;
+    try { data = await api("/api/merchant/marketplace"); } catch (e) { return; }
+    var box = byId("marketplace"); clear(box);
+    if (!data.stores || !data.stores.length) { box.appendChild(el("div", "card muted", "No stores yet.")); return; }
+    data.stores.forEach(function (st) {
+      var c = el("div", "card");
+      var head = el("div", "row"); head.style.justifyContent = "space-between";
+      var left = el("div");
+      left.appendChild(el("strong", null, st.slug));
+      left.appendChild(document.createTextNode(" "));
+      left.appendChild(el("span", "pill", st.marketplace_status || "unlisted"));
+      head.appendChild(left);
+      var sc = st.sold_count || { web: 0, agent: 0, total: 0 };
+      var right = el("div", "muted");
+      right.textContent = "Sold: " + (sc.total || 0) + " (web " + (sc.web || 0) + " · agent " + (sc.agent || 0) + ")";
+      head.appendChild(right);
+      c.appendChild(head);
+      if (st.marketplace_listed_at) {
+        var when = el("div", "muted"); when.style.marginTop = "6px";
+        when.textContent = "Listed " + String(st.marketplace_listed_at).slice(0, 19).replace("T", " ");
+        c.appendChild(when);
+      }
+      var scr = st.screening || [];
+      if (!scr.length) {
+        c.appendChild(el("div", "muted", "No screening events yet."));
+      } else {
+        var t = el("table"), thead = el("thead"), tr = el("tr");
+        ["Mode", "Verdict", "Risk", "Amount", "Receipt", "When"].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+        thead.appendChild(tr); t.appendChild(thead);
+        var tb = el("tbody");
+        scr.forEach(function (r) {
+          var row = el("tr");
+          if (r.mode === "paid") {
+            var mtd = el("td"); mtd.appendChild(el("span", "pill", "Warden #3808 — paid scan")); row.appendChild(mtd);
+          } else {
+            row.appendChild(el("td", "muted", "demo"));
+          }
+          row.appendChild(el("td", null, r.verdict || ""));
+          row.appendChild(el("td", null, r.risk_level || "—"));
+          row.appendChild(el("td", null, r.amount_usdt ? (r.amount_usdt + " USDT0") : "—"));
+          var rtd = el("td");
+          if (r.tx_url) { var a = el("a", "mono", (r.tx_hash || "").slice(0, 14) + "…"); a.href = r.tx_url; a.rel = "noopener"; a.target = "_blank"; rtd.appendChild(a); }
+          else { rtd.appendChild(el("span", "muted", "—")); }
+          row.appendChild(rtd);
+          row.appendChild(el("td", "muted", (r.created_at || "").slice(0, 19).replace("T", " ")));
+          tb.appendChild(row);
+        });
+        t.appendChild(tb);
+        var wrap = el("div", "scroll"); wrap.style.marginTop = "8px"; wrap.appendChild(t);
+        c.appendChild(wrap);
+      }
+      box.appendChild(c);
+    });
   }
 
   // ---- summary ----
