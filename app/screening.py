@@ -2,10 +2,18 @@
 
 Contract (verified live): POST TILLA_SCREEN_URL {"payload": "<text>"} ->
 {"verdict": "ALLOW"|"BLOCK"|..., "risk_level": ..., "threat_classes": [...], ...}
+
+``scan`` / ``scan_with_retry`` hit the FREE demo endpoint and are unchanged. The
+M10 entry point ``screen`` dispatches to a PAID Warden hire when enabled (dormant
+by default) and returns the verdict + a queryable receipt; on any paid-path problem
+it degrades to the free demo scan, so the ALLOW/BLOCK/pending semantics never move.
 """
+
+from dataclasses import dataclass
 
 import httpx
 
+from app import config
 from app.config import WARDEN_SCREEN_TIMEOUT, WARDEN_SCREEN_URL
 
 
@@ -76,3 +84,74 @@ def scan_with_retry(payload: str, attempts: int = 2) -> str:
             continue
     assert last_error is not None
     return "pending"
+
+
+@dataclass
+class ScanReceipt:
+    """A queryable record of one screening event, persisted as a screening_receipts
+    row. ``mode='demo'`` carries no amount/tx; ``mode='paid'`` records the x402 hire
+    amount and the on-chain settle tx hash."""
+
+    mode: str  # 'demo' | 'paid'
+    endpoint: str
+    verdict: str
+    risk_level: str | None = None
+    amount_micro: int | None = None
+    tx_hash: str | None = None
+
+
+@dataclass
+class ScanOutcome:
+    """The result of a :func:`screen` call: the go-live decision plus the receipt
+    (present only on an ALLOW; a still-unavailable screen has no verdict)."""
+
+    status: str  # 'allow' | 'pending'
+    receipt: ScanReceipt | None = None
+
+
+def _paid_enabled() -> bool:
+    """The paid Warden hire runs ONLY when the flag is on AND a payer key is present.
+    Either missing => the free demo endpoint is used and the signing path is never
+    constructed, so no funds can move (dormant-by-default)."""
+    return bool(config.WARDEN_PAID_ENABLED and config.TILLA_WARDEN_PAYER_KEY)
+
+
+def screen(payload: str, attempts: int = 2) -> ScanOutcome:
+    """Screen `payload`, fail-closed, returning the go-live decision + a receipt.
+
+    When the paid hire is enabled a single x402 hire of Warden's scan service is
+    attempted first; a served ALLOW yields a mode='paid' receipt with the settle tx.
+    On BLOCK the paid verdict is honored (fail-closed, ScreeningBlocked propagates).
+    Any paid-path problem degrades to the free demo scan — byte-identical to today's
+    behaviour — so screening semantics (allow / block / pending) never change.
+    """
+    if _paid_enabled():
+        # Imported lazily so the signing path is never even loaded while dormant.
+        from app import warden_hire
+
+        result = warden_hire.paid_scan(payload)
+        if result is not None:
+            verdict = result.verdict.get("verdict")
+            if verdict == "BLOCK":
+                raise ScreeningBlocked(result.verdict)
+            if verdict == "ALLOW":
+                return ScanOutcome(
+                    "allow",
+                    ScanReceipt(
+                        mode="paid",
+                        endpoint=config.WARDEN_PAID_SCAN_URL,
+                        verdict="ALLOW",
+                        risk_level=result.verdict.get("risk_level"),
+                        amount_micro=result.amount_micro,
+                        tx_hash=result.tx_hash,
+                    ),
+                )
+            # An unrecognized paid verdict is ambiguous -> fall back to the demo scan
+            # rather than trusting it (fail-safe).
+    status = scan_with_retry(payload, attempts)
+    if status == "allow":
+        return ScanOutcome(
+            "allow",
+            ScanReceipt(mode="demo", endpoint=WARDEN_SCREEN_URL, verdict="ALLOW"),
+        )
+    return ScanOutcome("pending", None)
