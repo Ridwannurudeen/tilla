@@ -61,6 +61,11 @@ class SandboxBoundaryError(ValueError):
     """An external plugin of a non-'theme' kind was rejected by INV-1."""
 
 
+class ThemeNameConflict(ValueError):
+    """An external theme tried to claim a built-in theme name (would overwrite
+    the audited built-in file on install)."""
+
+
 # --------------------------------------------------------------- delivery providers
 @runtime_checkable
 class DeliveryProvider(Protocol):
@@ -310,6 +315,13 @@ def register_external(
         raise SandboxBoundaryError(
             f"external '{kind}' plugins are forbidden by INV-1 (theme-only)"
         )
+    # Never let an external plugin claim a built-in theme name: install() writes
+    # THEMES_DIR/<name>.html, which would overwrite the audited built-in file and
+    # serve it live (built-ins resolve by on-disk filename, bypassing pending/
+    # approve). The UNIQUE(kind,name) row also guards this, but only in a seeded
+    # DB — reject explicitly so an unseeded DB can't be exploited.
+    if kind == "theme" and name in config.ALLOWED_THEMES:
+        raise ThemeNameConflict(f"'{name}' collides with a built-in theme")
     from app import screening
 
     outcome = screening.screen(manifest_text)

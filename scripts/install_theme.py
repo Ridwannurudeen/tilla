@@ -60,6 +60,12 @@ _SAFE_FILTER = re.compile(r"\|\s*safe\b")
 _RAW_BLOCK = re.compile(r"{%-?\s*raw\b")
 _INCLUDE = re.compile(r"""{%-?\s*include\s+['"]([^'"]+)['"]""")
 _INLINE_HANDLER = re.compile(r"""<[^>]*?\son[a-z]+\s*=\s*['"]""", re.IGNORECASE)
+# Off-origin asset references (img/script/link src, CSS url(), @import) let a
+# theme phone home a visitor's IP/presence — autoescape does not stop them.
+_EXTERNAL_URL = re.compile(
+    r"""(?:src|href)\s*=\s*['"]?\s*https?://|url\(\s*['"]?\s*https?://|@import\s+['"]?\s*(?:url\()?\s*https?://""",
+    re.IGNORECASE,
+)
 # An include target that stays inside themes/: a bare ``name.html`` with no path
 # separator and no parent traversal.
 _BARE_TEMPLATE = re.compile(r"^[A-Za-z0-9_.-]+\.html$")
@@ -98,6 +104,11 @@ def lint_template(source: str) -> None:
         raise ThemeInstallError("theme uses a {% raw %} block (autoescape bypass)")
     if _INLINE_HANDLER.search(source):
         raise ThemeInstallError("theme uses an inline on*= event-handler attribute")
+    if _EXTERNAL_URL.search(source):
+        raise ThemeInstallError(
+            "theme references an off-origin URL (src/href/url()/@import) — "
+            "visitor-tracking beacon"
+        )
     for target in _INCLUDE.findall(source):
         if ".." in target or not _BARE_TEMPLATE.fullmatch(target):
             raise ThemeInstallError(

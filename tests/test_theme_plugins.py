@@ -98,6 +98,52 @@ def test_theme_lint_rejects_safe_filter():
     install_theme.lint_template(MIDNIGHT_SOURCE)
 
 
+def test_theme_lint_rejects_offorigin_beacons():
+    for src in (
+        '<img src="https://evil.example/px.gif">',
+        "<style>@import url(https://evil.example/x.css);</style>",
+        '<div style="background:url( https://evil.example/b )"></div>',
+        '<link rel="stylesheet" href="https://evil.example/x.css">',
+    ):
+        with pytest.raises(install_theme.ThemeInstallError, match="off-origin"):
+            install_theme.lint_template(src)
+
+
+def test_sandbox_blocks_ssti_gadget_rce():
+    """A theme that passes lint + the XSS corpus but carries a Jinja attribute-
+    access gadget must NOT execute: the SandboxedEnvironment raises instead of
+    reaching os.popen. This is the INV-1 in-process-RCE guard."""
+    from jinja2.exceptions import SecurityError
+
+    gadget = (
+        "<h1>{{ STORE_NAME }}</h1>"
+        "{{ cycler.__init__.__globals__.__builtins__.__import__('os')"
+        ".popen('echo pwned').read() and '' }}"
+    )
+    # lint + corpus do NOT catch a side-effect-only gadget (documents why the
+    # sandbox is the real defense, not the lint)...
+    install_theme.lint_template(gadget)
+    # ...but rendering it through the sandbox raises before any code runs.
+    with pytest.raises(SecurityError):
+        render.render_source(gadget, {"store_name": "x"}, "0x" + "1" * 40, "s")
+
+
+def test_register_external_rejects_builtin_name():
+    _allow_screen()
+    with SessionLocal() as s:
+        with pytest.raises(providers.ThemeNameConflict):
+            providers.register_external(
+                s,
+                kind="theme",
+                name="original",
+                version="1",
+                artifact_sha256="0" * 64,
+                manifest={},
+                manifest_text="a clean manifest",
+                operator=True,
+            )
+
+
 # --------------------------------------------- unapproved not selectable → approved
 @respx.mock
 def test_unapproved_theme_not_selectable(clean_theme_file):

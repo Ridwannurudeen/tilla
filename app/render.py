@@ -10,7 +10,8 @@ are separately validated against a strict hex pattern with a safe fallback.
 import re
 from typing import Mapping
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import FileSystemLoader, select_autoescape
+from jinja2.sandbox import SandboxedEnvironment
 
 from app.config import PUBLIC_BASE_URL, THEMES_DIR
 
@@ -23,7 +24,12 @@ DEFAULT_PALETTE = {
     "text": "#F5F5FA",
 }
 
-_env = Environment(
+# SandboxedEnvironment (not plain Environment): a theme is third-party code once
+# M15.2 lets an external author supply one, and autoescape only escapes OUTPUT —
+# it does NOT stop template EXECUTION. The sandbox blocks the attribute-access
+# gadget chains (``__init__.__globals__.__builtins__`` …) that would otherwise
+# give an installed theme in-process RCE, keeping INV-1 (declarative-only) true.
+_env = SandboxedEnvironment(
     loader=FileSystemLoader(str(THEMES_DIR)),
     autoescape=select_autoescape(["html"], default_for_string=True, default=True),
 )
