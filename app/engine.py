@@ -20,7 +20,13 @@ from sqlalchemy.exc import IntegrityError
 from app import config, screening
 from app.db import SessionLocal
 from app.delivery import mint_manage_key
-from app.models import Product, Store, get_or_create_merchant, log_event
+from app.models import (
+    Product,
+    ScreeningReceipt,
+    Store,
+    get_or_create_merchant,
+    log_event,
+)
 from app.render import render as render_theme
 from app.render import render_og
 
@@ -175,6 +181,25 @@ def _screening_text(desc: str, content: dict) -> str:
     )
 
 
+def _persist_receipt(session, store_id: int, receipt) -> None:
+    """Write one ScreeningReceipt row bound to `store_id`, in the caller's txn. A
+    None receipt (defensive: a paid/demo screen that returned no receipt) is a
+    no-op."""
+    if receipt is None:
+        return
+    session.add(
+        ScreeningReceipt(
+            store_id=store_id,
+            mode=receipt.mode,
+            verdict=receipt.verdict,
+            risk_level=receipt.risk_level,
+            endpoint=receipt.endpoint,
+            amount_micro=receipt.amount_micro,
+            tx_hash=receipt.tx_hash,
+        )
+    )
+
+
 def create_store(desc, addr=None, delivery=None, theme=None):
     """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
@@ -191,9 +216,9 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
     theme_file = _resolve_theme(theme or content.get("theme"))
-    status = screening.scan_with_retry(_screening_text(desc, content))
+    outcome = screening.screen(_screening_text(desc, content))
     price_micro = int(round(float(content.get("price_usdt", 0)) * 1e6))
-    pending = status == "pending"
+    pending = outcome.status == "pending"
     # Per-store capability secret returned ONCE to the paid caller (the store
     # owner by construction). Only its sha256 hash is persisted.
     manage_key, manage_key_hash = mint_manage_key()
@@ -273,6 +298,11 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                         active=True,
                     )
                 )
+                # Record the screening receipt in the SAME txn as the store row. A
+                # pending (screening-unavailable) create has no verdict, so no
+                # receipt — one is written when resume_pending flips it live.
+                if not pending:
+                    _persist_receipt(session, store.id, outcome.receipt)
                 log_event(
                     session,
                     "api",
@@ -314,6 +344,46 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     }
 
 
+def upgrade_store(session, store, description=None, theme=None) -> dict:
+    """M10 upgrade-store seam: regenerate a live store's copy (and optionally its
+    theme), re-screen FAIL-CLOSED, then apply + re-render. Screening runs BEFORE any
+    write: ScreeningBlocked (unsafe) and ScreeningUnavailable (screening down) both
+    propagate with the store untouched, so the old live page keeps serving and the
+    paid endpoint returns >=400 (the x402 middleware skips settle, zero funds move).
+    Only an explicit ALLOW updates stores.content/description/theme and re-renders
+    index.html. The product row + price are untouched (price changes stay on the
+    pricing route). Commits in the caller's txn."""
+    desc = description if description is not None else (store.description or "")
+    content = generate(desc)
+    theme_file = _resolve_theme(theme) if theme else store.theme
+    outcome = screening.screen(_screening_text(desc, content))
+    if outcome.status != "allow":
+        # Screening unavailable — refuse rather than deploy unscreened content or
+        # strand the live store in a pending state.
+        raise screening.ScreeningUnavailable(
+            "content screening temporarily unavailable"
+        )
+    store.content = content
+    if description is not None:
+        store.description = desc
+    store.theme = theme_file
+    d = STORES_DIR / store.slug
+    d.mkdir(parents=True, exist_ok=True)
+    _write_store_pages(d, content, store.pay_to, store.slug, theme_file)
+    _persist_receipt(session, store.id, outcome.receipt)
+    log_event(
+        session, "api", "store.upgraded", store_id=store.id, data={"slug": store.slug}
+    )
+    session.commit()
+    return {
+        "slug": store.slug,
+        "url": f"https://tilla.gudman.xyz/s/{store.slug}/",
+        "status": "upgraded",
+        "store_name": content.get("store_name", ""),
+        "theme": theme_file,
+    }
+
+
 def resume_pending():
     """Retry screening for every store left in pending_screening (e.g. after a
     process restart). Reads pending stores from the DB — the content column
@@ -333,7 +403,7 @@ def resume_pending():
                 )
                 continue
             try:
-                status = screening.scan_with_retry(
+                outcome = screening.screen(
                     _screening_text(store.description or "", content)
                 )
             except screening.ScreeningBlocked:
@@ -343,13 +413,14 @@ def resume_pending():
                 session.commit()
                 shutil.rmtree(STORES_DIR / store.slug, ignore_errors=True)
                 continue
-            if status != "allow":
+            if outcome.status != "allow":
                 continue
             d = STORES_DIR / store.slug
             d.mkdir(parents=True, exist_ok=True)
             _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
             _mark_store_json_live(d, store.slug)
             store.status = "live"
+            _persist_receipt(session, store.id, outcome.receipt)
             log_event(session, "resume", "store.live", store_id=store.id)
             session.commit()
             logger.info("resume_pending: %s screened clean, now live", store.slug)
