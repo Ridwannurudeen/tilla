@@ -1,0 +1,49 @@
+# M12 nginx rate limiting — SUPERSEDES the stale numbers in nginx-m1.snippet.
+#
+# Applied via a NEW /etc/nginx/conf.d file so the shared /etc/nginx/nginx.conf is NEVER
+# edited. slowapi already enforces per-route app-level limits; nginx here is only a
+# coarse backstop ABOVE those, so it should never be the first limiter to trip.
+#
+# PRE-FLIGHT GATE (required): confirm the stock conf.d include exists —
+#     nginx -T | grep 'include /etc/nginx/conf.d/\*.conf'
+#   If it is ABSENT on this box, DEFER this step entirely (the only alternative is editing
+#   the shared nginx.conf, not worth it on a many-project box) and record the deferral in
+#   docs/OPS.md. If present, proceed.
+#
+# 1) NEW FILE /etc/nginx/conf.d/tilla-limit-req.conf — zone definitions ONLY (zones are
+#    inert until referenced, so this file alone cannot affect any other vhost):
+#
+#      limit_req_zone $binary_remote_addr zone=tilla_api:10m rate=120r/m;
+#      limit_req_zone $binary_remote_addr zone=tilla_create:10m rate=12r/m;
+#
+#    Note: the M1 snippet's 20r/m would 429 legitimate buyers — the checkout page polls
+#    order status every few seconds and the app itself allows 40/min on status alone.
+#    120r/m (2r/s) keeps nginx a backstop above slowapi, never the first to trip.
+#
+# 2) Edit ONLY /etc/nginx/sites-enabled/tilla.gudman.xyz.conf (back it up first). Add the
+#    limit_req line inside each location, keeping the existing proxy_pass/headers:
+#
+#      location /api/ {
+#          limit_req zone=tilla_api burst=30 nodelay;
+#          client_max_body_size 128k;
+#          proxy_pass http://127.0.0.1:8040;
+#          # ... existing proxy_set_header lines ...
+#      }
+#
+#      # /create-store, /upgrade-store, /add-product (the paid ASP routes):
+#      location /create-store {
+#          limit_req zone=tilla_create burst=5 nodelay;
+#          client_max_body_size 128k;
+#          proxy_pass http://127.0.0.1:8040;
+#          # ... existing proxy_set_header lines ...
+#      }
+#      # (repeat the same block for location /upgrade-store and location /add-product)
+#
+# 3) Apply:  nginx -t  then  systemctl reload nginx   (reload, NEVER restart).
+#
+# Smoke: store page 200; checkout status poll at 1 req/3s stays 200; a ~40-request rapid
+#   curl loop on /api/ trips 429 past the burst; unpaid POST /create-store still 402.
+# Rollback: restore the vhost backup, rm /etc/nginx/conf.d/tilla-limit-req.conf,
+#   nginx -t, systemctl reload nginx.
+#
+# Do NOT touch any other location block or vhost on this box (shared VPS — ground rules).

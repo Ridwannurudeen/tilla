@@ -1,0 +1,16 @@
+# Installed on the VPS as /etc/logrotate.d/tilla — a NEW, tilla-only file that cannot
+# affect any other project's logs. Covers exactly the two tilla cron logs (the API itself
+# logs to journald, which has its own box-wide cap — never touched here).
+#
+# copytruncate: cron appends with >>, so truncating in place avoids any signal/reopen
+# dance. Validate before relying on it:  logrotate -d /etc/logrotate.d/tilla
+# Rollback: rm /etc/logrotate.d/tilla
+/var/log/tilla-backup.log /var/log/tilla-offsite.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
