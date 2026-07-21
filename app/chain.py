@@ -13,6 +13,7 @@ import threading
 import httpx
 
 from app import config
+from app.payment import ChainConfig
 
 
 class ChainError(RuntimeError):
@@ -33,7 +34,7 @@ class ChainBusy(ChainError):
 _RPC_SEMAPHORE = threading.BoundedSemaphore(config.RPC_MAX_CONCURRENT)
 
 
-def _rpc(method: str, params: list, timeout: float | None = None):
+def _rpc(cfg: ChainConfig, method: str, params: list, timeout: float | None = None):
     if not _RPC_SEMAPHORE.acquire(timeout=config.RPC_ACQUIRE_TIMEOUT):
         raise ChainBusy(f"{method}: RPC concurrency cap reached")
     try:
@@ -41,7 +42,7 @@ def _rpc(method: str, params: list, timeout: float | None = None):
         with httpx.Client(
             timeout=timeout or config.RPC_TIMEOUT, trust_env=False
         ) as client:
-            resp = client.post(config.RPC_URL, json=body)
+            resp = client.post(cfg.rpc_url, json=body)
         resp.raise_for_status()
         data = resp.json()
         if data.get("error"):
@@ -51,8 +52,8 @@ def _rpc(method: str, params: list, timeout: float | None = None):
         _RPC_SEMAPHORE.release()
 
 
-def block_number(timeout: float | None = None) -> int:
-    return int(_rpc("eth_blockNumber", [], timeout), 16)
+def block_number(cfg: ChainConfig, timeout: float | None = None) -> int:
+    return int(_rpc(cfg, "eth_blockNumber", [], timeout), 16)
 
 
 def eth_call(to: str, data: str, timeout: float | None = None) -> str | None:
@@ -67,13 +68,17 @@ def pad_address(addr: str) -> str:
 
 
 def get_logs(
-    from_block: int, to_block: int, addresses: list[str], timeout: float | None = None
+    cfg: ChainConfig,
+    from_block: int,
+    to_block: int,
+    addresses: list[str],
+    timeout: float | None = None,
 ) -> list[dict]:
-    """USDT0 Transfer logs whose `to` topic is any of `addresses`, in the given
-    inclusive block window."""
+    """`cfg.asset` Transfer logs whose `to` topic is any of `addresses`, in the
+    given inclusive block window."""
     params = [
         {
-            "address": config.USDT0,
+            "address": cfg.asset,
             "fromBlock": hex(from_block),
             "toBlock": hex(to_block),
             "topics": [
@@ -83,11 +88,13 @@ def get_logs(
             ],
         }
     ]
-    return _rpc("eth_getLogs", params, timeout) or []
+    return _rpc(cfg, "eth_getLogs", params, timeout) or []
 
 
-def get_transaction_receipt(tx_hash: str, timeout: float | None = None) -> dict | None:
-    return _rpc("eth_getTransactionReceipt", [tx_hash], timeout)
+def get_transaction_receipt(
+    cfg: ChainConfig, tx_hash: str, timeout: float | None = None
+) -> dict | None:
+    return _rpc(cfg, "eth_getTransactionReceipt", [tx_hash], timeout)
 
 
 def decode_transfer_log(log: dict) -> dict:

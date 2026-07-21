@@ -158,6 +158,14 @@ class Order(Base):
         ForeignKey("products.id"), nullable=True
     )
     pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
+    # M18 cross-chain: the settlement chain (CAIP-2) this order is pinned to at
+    # creation. Every verification path (sweeper matching, verify_txhash, refunds)
+    # resolves its RPC + asset from THIS value via payment.chain_for(), so a tx on
+    # any other chain can never confirm it. Defaults + backfills to the canonical
+    # X Layer ledger (eip155:196, INV-2); every pre-M18 order is that chain.
+    network: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="eip155:196", server_default="eip155:196"
+    )
     amount_micro: Mapped[int] = mapped_column(Integer, nullable=False)
     # The exact micro-USDT a buyer must send = price + unique offset; payment
     # matching is on this, not amount_micro. Backfilled to amount_micro for

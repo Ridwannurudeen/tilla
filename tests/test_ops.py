@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 
 import app.main as main
-from app import chain, checkout, config, engine
+from app import chain, checkout, config, engine, payment
 from app.db import SessionLocal
 from app.db import engine as db_engine
 from app.db import expected_migration_head
@@ -195,7 +195,7 @@ def test_rpc_concurrency_cap(make_store, monkeypatch):
         assert chain._RPC_SEMAPHORE.acquire(blocking=False)
     try:
         with pytest.raises(chain.ChainBusy):
-            chain.block_number()
+            chain.block_number(payment.CANONICAL_CHAIN)
         # /tx: ChainBusy is a ChainError, mapped to 502 by the existing handler.
         assert (
             client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1}).status_code
@@ -219,7 +219,7 @@ def test_request_path_rpc_timeout(make_store, monkeypatch):
     recorded: list[tuple[str, float | None]] = []
     head = 200
 
-    def fake_rpc(method, params, timeout=None):
+    def fake_rpc(cfg, method, params, timeout=None):
         recorded.append((method, timeout))
         if method == "eth_blockNumber":
             return hex(head)
@@ -253,9 +253,9 @@ def test_request_path_rpc_timeout(make_store, monkeypatch):
     assert ("eth_getTransactionReceipt", config.RPC_TIMEOUT_REQUEST) in recorded
     assert ("eth_blockNumber", config.RPC_TIMEOUT_REQUEST) in recorded
 
-    # (C) the sweeper's bare call passes None (-> RPC_TIMEOUT inside _rpc)
+    # (C) the sweeper's canonical-chain call passes None (-> RPC_TIMEOUT inside _rpc)
     recorded.clear()
-    chain.block_number()
+    chain.block_number(payment.CANONICAL_CHAIN)
     assert ("eth_blockNumber", None) in recorded
     assert config.RPC_TIMEOUT == 10.0
     assert config.RPC_TIMEOUT_REQUEST == 5.0
