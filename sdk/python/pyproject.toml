@@ -25,6 +25,8 @@ dev = [
     "pytest>=8",
     "respx>=0.21",
     "eth-account>=0.13",
+    # Pinned to the app's ruff so lint/format behaviour is identical across jobs.
+    "ruff==0.15.22",
 ]
 
 [tool.setuptools]

@@ -17,3 +17,19 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q
+
+  sdk-test:
+    # The tilla-sdk client package is separately installable and never part of the
+    # app deploy; it gets its own isolated install + test job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e "./sdk/python[dev]"
+      - run: ruff check sdk/python
+      - run: ruff format --check sdk/python
+      - run: pytest -q
+        working-directory: sdk/python
