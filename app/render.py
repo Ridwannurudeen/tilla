@@ -12,7 +12,7 @@ from typing import Mapping
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from app.config import THEMES_DIR
+from app.config import PUBLIC_BASE_URL, THEMES_DIR
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{3,8}$")
 
@@ -34,12 +34,57 @@ def _safe_hex(value: object, fallback: str) -> str:
     return text if _HEX_COLOR.fullmatch(text) else fallback
 
 
-def render(content: Mapping, addr: str, slug: str, theme: str = "original.html") -> str:
-    """Render a store theme from generator output. `content` is untrusted
-    (LLM-produced); `addr`/`slug` are our own already-validated values."""
+def _palette_ctx(content: Mapping) -> dict:
+    """The four validated palette hex values (safe fallback on anything not a
+    strict hex color), shared by the store themes and the OG image."""
     palette = content.get("palette") or {}
     if not isinstance(palette, Mapping):
         palette = {}
+    return {
+        "C_PRIMARY": _safe_hex(palette.get("primary"), DEFAULT_PALETTE["primary"]),
+        "C_ACCENT": _safe_hex(palette.get("accent"), DEFAULT_PALETTE["accent"]),
+        "C_BG": _safe_hex(palette.get("bg"), DEFAULT_PALETTE["bg"]),
+        "C_TEXT": _safe_hex(palette.get("text"), DEFAULT_PALETTE["text"]),
+    }
+
+
+def _seo_ctx(content: Mapping, slug: str) -> dict:
+    """Canonical URL, OG image path, meta description and a schema.org/Product
+    JSON-LD object for the theme <head>. The JSON-LD is emitted with `| tojson`
+    (which unicode-escapes `<`, `>`, `&`) so untrusted copy can't break out of
+    the <script type="application/ld+json"> block."""
+    base = PUBLIC_BASE_URL.rstrip("/")
+    canonical = f"{base}/s/{slug}/"
+    og_image = f"{base}/s/{slug}/og.svg"
+    store_name = str(content.get("store_name", "My Store"))
+    description = str(content.get("hero_subcopy") or content.get("tagline") or "")
+    product_name = str(content.get("product_name", "")) or store_name
+    jsonld = {
+        "@context": "https://schema.org",
+        "@type": "Product",
+        "name": product_name,
+        "description": str(content.get("product_blurb", "")),
+        "image": og_image,
+        "brand": {"@type": "Brand", "name": store_name},
+        "offers": {
+            "@type": "Offer",
+            "price": str(content.get("price_usdt", 0)),
+            "priceCurrency": "USDT",
+            "url": canonical,
+            "availability": "https://schema.org/InStock",
+        },
+    }
+    return {
+        "CANONICAL_URL": canonical,
+        "OG_IMAGE": og_image,
+        "META_DESCRIPTION": description,
+        "PRODUCT_JSONLD": jsonld,
+    }
+
+
+def render(content: Mapping, addr: str, slug: str, theme: str = "original.html") -> str:
+    """Render a store theme from generator output. `content` is untrusted
+    (LLM-produced); `addr`/`slug` are our own already-validated values."""
     ctx = {
         "SLUG": slug,
         "STORE_NAME": str(content.get("store_name", "My Store")),
@@ -52,10 +97,23 @@ def render(content: Mapping, addr: str, slug: str, theme: str = "original.html")
         "PRICE": str(content.get("price_usdt", 0)),
         "EMOJI": str(content.get("emoji", "🛍️")),
         "ADDR": addr,
-        "C_PRIMARY": _safe_hex(palette.get("primary"), DEFAULT_PALETTE["primary"]),
-        "C_ACCENT": _safe_hex(palette.get("accent"), DEFAULT_PALETTE["accent"]),
-        "C_BG": _safe_hex(palette.get("bg"), DEFAULT_PALETTE["bg"]),
-        "C_TEXT": _safe_hex(palette.get("text"), DEFAULT_PALETTE["text"]),
+        **_palette_ctx(content),
+        **_seo_ctx(content, slug),
     }
     template = _env.get_template(theme)
     return template.render(**ctx)
+
+
+def render_og(content: Mapping, slug: str) -> str:
+    """Render the per-store Open Graph card (SVG, 1200x630). Served statically at
+    /s/<slug>/og.svg and referenced from og:image / twitter:image. Autoescaped
+    like the themes, so untrusted copy stays inert inside the SVG text nodes."""
+    ctx = {
+        "STORE_NAME": str(content.get("store_name", "My Store")),
+        "TAGLINE": str(content.get("tagline", "")),
+        "PRODUCT_NAME": str(content.get("product_name", "")),
+        "PRICE": str(content.get("price_usdt", 0)),
+        "EMOJI": str(content.get("emoji", "🛍️")),
+        **_palette_ctx(content),
+    }
+    return _env.get_template("og.svg").render(**ctx)

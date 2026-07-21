@@ -1,10 +1,23 @@
+import json
+import re
+import xml.etree.ElementTree as ET
+
 import pytest
 
-from app.render import DEFAULT_PALETTE, render
+from app.render import DEFAULT_PALETTE, render, render_og
 
 ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"
 SLUG = "acme-supply"
 THEMES = ["original.html", "bold.html", "editorial.html"]
+
+_LD_RE = re.compile(r'<script type="application/ld\+json">(.*?)</script>', re.S)
+
+
+def _jsonld(html):
+    m = _LD_RE.search(html)
+    assert m, "JSON-LD script block missing"
+    return json.loads(m.group(1))
+
 
 XSS_PAYLOADS = [
     "<script>alert(1)</script>",
@@ -154,3 +167,91 @@ def test_checkout_retry_resets_state_before_poll(theme):
     assert reset in html
     # the reset must run before startCheckout()'s poll() call, not after
     assert html.index(reset) < html.index("poll();")
+
+
+# ---------- M6 SEO: canonical + OG/twitter meta + JSON-LD ----------
+@pytest.mark.parametrize("theme", THEMES)
+def test_og_and_canonical_meta_present(theme):
+    content = {
+        "store_name": "Acme Supply",
+        "tagline": "Tools that ship",
+        "hero_subcopy": "The one product you actually need.",
+        "product_name": "Widget Pro",
+        "price_usdt": 9,
+    }
+    html = render(content, ADDR, SLUG, theme)
+    canonical = f"https://tilla.gudman.xyz/s/{SLUG}/"
+    og_image = f"https://tilla.gudman.xyz/s/{SLUG}/og.svg"
+    assert f'<link rel="canonical" href="{canonical}">' in html
+    assert f'<meta property="og:image" content="{og_image}">' in html
+    assert f'<meta name="twitter:image" content="{og_image}">' in html
+    assert 'property="og:title"' in html
+    assert 'name="twitter:card" content="summary_large_image"' in html
+    assert 'name="description"' in html
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_jsonld_present_and_valid_product(theme):
+    content = {
+        "store_name": "Acme Supply",
+        "tagline": "Tools that ship",
+        "product_name": "Widget Pro",
+        "product_blurb": "It widgets, beautifully.",
+        "price_usdt": 9,
+    }
+    ld = _jsonld(render(content, ADDR, SLUG, theme))
+    assert ld["@context"] == "https://schema.org"
+    assert ld["@type"] == "Product"
+    assert ld["name"] == "Widget Pro"
+    assert ld["brand"]["name"] == "Acme Supply"
+    assert ld["offers"]["price"] == "9"
+    assert ld["offers"]["priceCurrency"] == "USDT"
+    assert ld["offers"]["url"] == f"https://tilla.gudman.xyz/s/{SLUG}/"
+    assert ld["image"] == f"https://tilla.gudman.xyz/s/{SLUG}/og.svg"
+
+
+@pytest.mark.parametrize("theme", THEMES)
+@pytest.mark.parametrize("payload", XSS_PAYLOADS)
+def test_jsonld_xss_inert_and_still_valid_json(theme, payload):
+    # A hostile store_name / product copy must never break out of the ld+json
+    # script block (| tojson unicode-escapes < > &): the page stays inert AND the
+    # JSON-LD still parses, with the payload surfacing only as an escaped string.
+    html = render(_content(payload), ADDR, SLUG, theme)
+    assert "<script>alert(1)</script>" not in html
+    ld = _jsonld(html)  # raises if the block was broken / not valid JSON
+    assert ld["@type"] == "Product"
+    assert ld["brand"]["name"] == payload  # decoded back to the literal, inert
+
+
+# ---------- M6 OG image ----------
+@pytest.mark.parametrize("payload", XSS_PAYLOADS)
+def test_render_og_is_valid_xml_and_escapes_untrusted_copy(payload):
+    svg = render_og(_content(payload), SLUG)
+    # parses as XML (a broken-out tag would make this raise) and injects no live
+    # markup; the bogus palette can't reach the fill attributes either.
+    root = ET.fromstring(svg)
+    assert root.tag.endswith("svg")
+    assert "<script>alert(1)</script>" not in svg
+    assert "<img src=x onerror=alert(1)>" not in svg
+    assert DEFAULT_PALETTE["primary"] in svg
+
+
+def test_render_og_uses_valid_palette_and_copy():
+    content = {
+        "store_name": "Acme Supply",
+        "tagline": "Tools that ship",
+        "product_name": "Widget Pro",
+        "price_usdt": 9,
+        "palette": {
+            "primary": "#111111",
+            "accent": "#222222",
+            "bg": "#333333",
+            "text": "#444444",
+        },
+    }
+    svg = render_og(content, SLUG)
+    ET.fromstring(svg)
+    assert "Acme Supply" in svg
+    assert "Widget Pro" in svg
+    assert "9 USDT" in svg
+    assert "#111111" in svg and "#222222" in svg
