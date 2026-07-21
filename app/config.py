@@ -173,6 +173,41 @@ WARDEN_PAID_ENABLED = _flag("TILLA_WARDEN_PAID")
 # exposed). The proxy 503s if it is unreachable, never a false 402/200.
 SUBSCRIPTION_SIDECAR_URL = os.environ.get("TILLA_SIDECAR_URL", "http://127.0.0.1:8790")
 
+# ---------- M11 on-chain depth: EAS receipt attestations — DORMANT by default ---
+# A background worker attests a signed EAS receipt for every terminal-delivered
+# order (recipient = buyer). It is TRIPLE-GATED off: ATTEST_ENABLED default OFF,
+# TILLA_ATTESTER_KEY absent (VPS .env only), and the lifespan task refuses to start
+# without both. Flag off OR key unset => zero on-chain tx, zero RPC, zero gas, and
+# app.attest never imports web3 or constructs a signer (the WARDEN_PAID pattern).
+# Enabling it = signing an on-chain tx that spends OKB gas = user-gated runbook step
+# (mint/fund the attester key, set TILLA_ATTESTER_KEY + TILLA_ATTEST=1 in .env).
+ATTEST_ENABLED = _flag("TILLA_ATTEST")
+# The attester's signing key. VPS .env only, NEVER in the repo; empty => the attest
+# path is unreachable regardless of the flag (the exact WARDEN_PAID_ENABLED pattern).
+TILLA_ATTESTER_KEY = os.environ.get("TILLA_ATTESTER_KEY", "")
+# RPC + chain the attester signs against. Defaults to the checkout RPC / mainnet 196;
+# set ATTEST_CHAIN_ID=1952 (+ a testnet RPC) for the user's testnet dry-run. The tick
+# refuses to sign if the connected chain_id does not equal ATTEST_CHAIN_ID.
+ATTEST_RPC = os.environ.get("TILLA_ATTEST_RPC", RPC_URL)
+ATTEST_CHAIN_ID = int(os.environ.get("TILLA_ATTEST_CHAIN_ID", "196"))
+# EAS + SchemaRegistry OP-Stack predeploys — the SAME addresses on X Layer mainnet
+# 196 and testnet 1952 (verified Spike 4). Not env-configurable: they are protocol
+# predeploy constants.
+EAS_ADDR = "0x4200000000000000000000000000000000000021"
+SCHEMA_REGISTRY_ADDR = "0x4200000000000000000000000000000000000020"
+# The Tilla receipt schema. Field ORDER is load-bearing: it defines both the schema
+# UID (keccak of schema+resolver+revocable) and the abi.encode layout of every
+# attestation's data blob. Changing it silently orphans every prior attestation.
+ATTEST_SCHEMA = "address buyer,string storeId,uint256 amountUsdt6,bytes32 paymentTxHash"
+# Worker cadence + burst bound (mirrors the webhook loop knobs).
+ATTEST_INTERVAL = float(os.environ.get("TILLA_ATTEST_INTERVAL", "30"))
+ATTEST_MAX_PER_TICK = int(os.environ.get("TILLA_ATTEST_MAX_PER_TICK", "5"))
+# Per-tx gas-cost cap in wei (estimate_gas * gas_price). Over this the tick REFUSES
+# to sign and leaves the order 'pending' for a calmer fee window — refuse, never
+# overspend (the TILLA_WARDEN_MAX_MICRO philosophy). Default 0.01 OKB (~30x a normal
+# attest), so ordinary operation never trips it but a fee spike is refused.
+TILLA_ATTEST_MAX_GAS_WEI = int(os.environ.get("TILLA_ATTEST_MAX_GAS_WEI", str(10**16)))
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
 
