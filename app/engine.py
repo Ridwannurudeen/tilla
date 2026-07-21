@@ -187,9 +187,12 @@ def generate(desc):
         "store_name (short brand), tagline (<=6 words), hero_headline (punchy, <=8 words), "
         "hero_subcopy (1 sentence), product_name, product_blurb (1-2 sentences, benefit-led), "
         "cta_text (<=4 words), price_usdt (number), emoji (single emoji for the brand), "
-        "palette (object: primary, accent, bg, text as hex colors — modern, high-contrast, premium), "
+        "palette (object: primary, accent, bg, text as hex colors — modern, high-contrast, premium; "
+        "bg must be decisively near-dark or near-light, never mid-gray, with text strongly contrasting it), "
         "theme (one of exactly: original, bold, editorial — pick the layout that best fits the brand: "
-        "original = sleek modern gradient, bold = high-energy uppercase, editorial = elegant serif). "
+        "original = maximal flagship with kinetic type and a generative block mosaic, "
+        "bold = loud brutalist uppercase with hard offset shadows, "
+        "editorial = quiet numbered-ledger magazine, understated luxury). "
         "Make copy crisp and compelling, no placeholders."
     )
     resp = _post_generation(prompt)
