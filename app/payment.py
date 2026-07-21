@@ -267,9 +267,16 @@ def _dynamic_store_hooks(rail: PaymentRail):
         return await asyncio.to_thread(resolve_pay_to, ctx.path, sentinel_pay_to)
 
     async def _price(ctx: HTTPRequestContext) -> AssetAmount:
-        from app.agentic import resolve_price
+        from app.agentic import payer_from_payment_header, resolve_price
 
-        return await asyncio.to_thread(resolve_price, ctx.path)
+        # M16 B2B: the wholesale tier is keyed on (agent_id query param, verified
+        # payer). agent_id rides the query string (like ?ref=, it survives the
+        # 402->paid-retry); the payer is recovered from the payment header. Absent
+        # either, resolve_price returns the base price — byte-identical to today.
+        adapter = getattr(ctx, "adapter", None)
+        agent_id = adapter.get_query_param("agent_id") if adapter is not None else None
+        payer = payer_from_payment_header(getattr(ctx, "payment_header", None))
+        return await asyncio.to_thread(resolve_price, ctx.path, agent_id, payer)
 
     return _pay_to, _price
 
