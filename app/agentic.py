@@ -594,14 +594,25 @@ def _guard_store_status(slug: str) -> tuple[int, str] | None:
         return None
 
 
-def record_settlement(order_id: str, payment_response_header: str) -> None:
+def record_settlement(
+    order_id: str, payment_response_header: str, scheme: str | None = None
+) -> None:
     """A served 200 with a PAYMENT-RESPONSE header IS the settle-success signal, so
     flip the provisional 'settling' order to 'delivered' — exposing the goods to
     the out-of-band claim paths — and record the settle tx_hash when the header
-    decodes. The flip does NOT depend on the header decoding: an undecodable/empty
-    transaction still delivers (logged for reconciliation) instead of leaving a
-    genuinely-paid order in 'settling' for the reaper to void. Idempotent (the
-    conditional transition is a no-op once the order has left 'settling')."""
+    decodes. For the EXACT rail the flip does NOT depend on the header decoding: an
+    undecodable/empty transaction still delivers (logged for reconciliation)
+    instead of leaving a genuinely-paid order in 'settling' for the reaper to void.
+
+    For ``aggr_deferred`` that unparsed-header fallback is WRONG: the aggregated
+    settle can succeed with no tx hash at serve time, and the real on-chain tx only
+    exists after a later session/settle reconciliation. So without a decoded tx we
+    do NOT flip to a terminal 'delivered' and do NOT log 'agent_order.settled'
+    (which would claim settlement with no evidence) — the order stays provisional
+    'settling' with a distinct non-terminal 'agent_order.settle_pending' marker
+    until a reconciliation poll supplies the real tx hash. (That poll must ship
+    before TILLA_AGGR_DEFERRED is ever enabled.) Idempotent (the conditional
+    transition is a no-op once the order has left 'settling')."""
     tx = None
     try:
         settle = decode_payment_response_header(payment_response_header)
@@ -611,6 +622,17 @@ def record_settlement(order_id: str, payment_response_header: str) -> None:
     with SessionLocal() as session:
         order = session.get(Order, order_id)
         if order is None or order.channel != "agent":
+            return
+        if scheme == PAYMENT_SCHEME_AGGR_DEFERRED and tx is None:
+            if order.status == "settling":
+                log_event(
+                    session,
+                    "agentic",
+                    "agent_order.settle_pending",
+                    store_id=order.store_id,
+                    order_id=order_id,
+                )
+                session.commit()
             return
         fields = {"tx_hash": tx} if tx else {}
         if checkout.transition(session, order.id, ("settling",), "delivered", **fields):
@@ -654,7 +676,8 @@ async def agent_guard_dispatch(request: Request, call_next):
         pr = response.headers.get("PAYMENT-RESPONSE")
         order_id = getattr(request.state, "agent_order_id", None)
         if pr and order_id:
-            await asyncio.to_thread(record_settlement, order_id, pr)
+            scheme = _payment_scheme(request)
+            await asyncio.to_thread(record_settlement, order_id, pr, scheme)
     return response
 
 

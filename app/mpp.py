@@ -30,7 +30,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import JSONResponse
 
-from app import checkout, config
+from app import checkout, config, delivery
 from app.db import SessionLocal
 from app.limiter import limiter
 from app.models import MppChannel, Product, Store, log_event
@@ -245,14 +245,45 @@ def open_channel(
         return _channel_view(row)
 
 
+def _voucher_message(channel_id: str, cumulative_micro: int) -> str:
+    """The canonical message the buyer signs to authorize spend up to
+    ``cumulative_micro`` on ``channel_id``. Binding both fields makes a voucher
+    non-transferable across channels and non-replayable at a lower amount."""
+    return (
+        f"tilla:mpp-voucher\nchannel:{channel_id}\ncumulative_micro:{cumulative_micro}"
+    )
+
+
+def _verify_voucher_signature(
+    buyer_addr: str | None, channel_id: str, cumulative_micro: int, voucher_json: dict
+) -> None:
+    """Recover the voucher's ``signature`` over (channel_id, cumulative_micro) and
+    require it to match the channel's depositing buyer. A voucher with no buyer to
+    check against, no signature, or a signature that recovers to anyone else is
+    rejected (400) — so knowing a live channel_id is not enough to spend it."""
+    if not buyer_addr:
+        raise MppStateError("voucher: channel has no buyer address to verify against")
+    signature = (
+        voucher_json.get("signature") if isinstance(voucher_json, dict) else None
+    )
+    if not isinstance(signature, str) or not signature:
+        raise MppStateError("voucher: missing buyer signature")
+    recovered = delivery._recover_signer(
+        _voucher_message(channel_id, cumulative_micro), signature
+    )
+    if recovered is None or recovered.lower() != buyer_addr.lower():
+        raise MppStateError("voucher: signature does not match channel buyer")
+
+
 def apply_voucher(
     *, channel_id: str, cumulative_micro: int, voucher_json: dict
 ) -> dict:
     """LOCAL off-chain accounting (no SA call). The voucher carries the cumulative
     spend; it must STRICTLY advance (a decrease or replay is a regression) and stay
-    within the deposit (overspend). On success the spent counter moves via a
-    conditional UPDATE keyed on the observed spent, so a concurrent voucher loses
-    instead of double-serving. Any rejection leaves the row unchanged."""
+    within the deposit (overspend), and its signature must recover to the channel's
+    buyer. On success the spent counter moves via a conditional UPDATE keyed on the
+    observed spent, so a concurrent voucher loses instead of double-serving. Any
+    rejection leaves the row unchanged."""
     with SessionLocal() as session:
         ch = session.scalar(
             select(MppChannel).where(MppChannel.channel_id == channel_id)
@@ -265,6 +296,9 @@ def apply_voucher(
             raise MppStateError("voucher regression: cumulative amount did not advance")
         if cumulative_micro > ch.deposit_micro:
             raise MppStateError("voucher overspend: cumulative amount exceeds deposit")
+        _verify_voucher_signature(
+            ch.buyer_addr, channel_id, cumulative_micro, voucher_json
+        )
         moved = session.execute(
             update(MppChannel)
             .where(
@@ -334,7 +368,10 @@ def topup_channel(*, channel_id: str, add_micro: int) -> dict:
 def close_channel(*, channel_id: str, final_spent_micro: int | None = None) -> dict:
     """Transition an open/closing channel to 'closed' after the SA settled. The
     conditional transition is idempotent — a replay after a lost response finds the
-    row already 'closed' and returns it unchanged (rowcount 0, no error)."""
+    row already 'closed' and returns it unchanged (rowcount 0, no error). A supplied
+    final spend can only RAISE the recorded spend: it is clamped to never fall below
+    the voucher-accumulated total, so a buyer cannot close at a lower amount after
+    consuming vouchers and make merchant reconciliation under-collect."""
     with SessionLocal() as session:
         ch = session.scalar(
             select(MppChannel).where(MppChannel.channel_id == channel_id)
@@ -343,7 +380,7 @@ def close_channel(*, channel_id: str, final_spent_micro: int | None = None) -> d
             raise ChannelNotFound(channel_id)
         values = {"status": "closed", "closed_at": checkout._now()}
         if final_spent_micro is not None:
-            values["spent_micro"] = final_spent_micro
+            values["spent_micro"] = max(final_spent_micro, ch.spent_micro)
         moved = session.execute(
             update(MppChannel)
             .where(
@@ -401,6 +438,18 @@ async def _sa_call(coro):
     except Exception:
         logger.exception("mpp: settlement agent call failed")
         raise HTTPException(502, "settlement agent unavailable") from None
+
+
+def _channel_exists(channel_id: str) -> bool:
+    """Whether a channel row exists — checked BEFORE the fund-moving SA call so a
+    missing channel 404s without first moving escrow on-chain."""
+    with SessionLocal() as session:
+        return (
+            session.scalar(
+                select(MppChannel.id).where(MppChannel.channel_id == channel_id)
+            )
+            is not None
+        )
 
 
 @router.post("/s/{slug}/mpp/open")
@@ -480,14 +529,24 @@ async def mpp_topup(
     channel_id = body.get("channel_id")
     if not isinstance(channel_id, str) or not channel_id:
         raise HTTPException(422, "channel_id is required")
+    # Validate every body field BEFORE the fund-moving SA call, so a malformed
+    # request 422s without first moving escrow and diverging the local row.
+    add_micro = _int_field(body, "additional_deposit_micro")
+    if add_micro <= 0:
+        raise HTTPException(422, "additional_deposit_micro must be positive")
     payload = body.get("payload")
     if not isinstance(payload, dict):
         raise HTTPException(422, "payload (signed SessionIntent topUp) is required")
+    if not await asyncio.to_thread(_channel_exists, channel_id):
+        raise HTTPException(404, "channel not found")
     gateway = _get_gateway()
     if gateway is None:
         raise HTTPException(503, "mpp pay-as-you-go is not configured")
     receipt = await _sa_call(gateway.top_up(payload))
-    add_micro = _int_field(body, "additional_deposit_micro")
+    # Authoritative deposit increase comes from the SA receipt (as mpp_open derives
+    # its deposit via _receipt_deposit), never the buyer's claimed number; the
+    # validated client value is only the fallback when the SA omits it.
+    add_micro = _receipt_deposit(receipt, add_micro)
     try:
         row = await asyncio.to_thread(
             topup_channel, channel_id=channel_id, add_micro=add_micro
@@ -511,13 +570,9 @@ async def mpp_close(
     channel_id = body.get("channel_id")
     if not isinstance(channel_id, str) or not channel_id:
         raise HTTPException(422, "channel_id is required")
-    payload = body.get("payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(422, "payload (signed SessionIntent close) is required")
-    gateway = _get_gateway()
-    if gateway is None:
-        raise HTTPException(503, "mpp pay-as-you-go is not configured")
-    receipt = await _sa_call(gateway.close(payload))
+    # Validate every body field BEFORE the fund-moving SA call, so a malformed
+    # request 422s without first closing the channel on-chain and diverging the
+    # local row.
     final_spent = body.get("final_spent_micro")
     if final_spent is not None and (
         not isinstance(final_spent, int)
@@ -525,6 +580,15 @@ async def mpp_close(
         or final_spent < 0
     ):
         raise HTTPException(422, "final_spent_micro must be a non-negative integer")
+    payload = body.get("payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "payload (signed SessionIntent close) is required")
+    if not await asyncio.to_thread(_channel_exists, channel_id):
+        raise HTTPException(404, "channel not found")
+    gateway = _get_gateway()
+    if gateway is None:
+        raise HTTPException(503, "mpp pay-as-you-go is not configured")
+    receipt = await _sa_call(gateway.close(payload))
     try:
         row = await asyncio.to_thread(
             close_channel, channel_id=channel_id, final_spent_micro=final_spent

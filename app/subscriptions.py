@@ -13,12 +13,16 @@ creates an Order + delivers — a settle failure or 503 delivers nothing.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
 import uuid
 
 import httpx
 from fastapi import APIRouter, HTTPException, Path, Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from starlette.responses import JSONResponse
 
 from app import agentic, checkout, config
@@ -84,11 +88,13 @@ async def _sidecar_post(path: str, *, json: dict, headers: dict | None = None):
         raise HTTPException(503, "subscription sidecar unreachable") from None
 
 
-async def _serve_challenge(ctx: dict) -> JSONResponse:
-    """No PAYMENT-SIGNATURE yet: ask the sidecar to build the period 402 challenge
-    from the product's pricing_params and relay its body + APP-PAYMENT-REQUIRED
-    header verbatim."""
-    challenge_req = {
+def _challenge_req(ctx: dict) -> dict:
+    """The exact body POSTed to the sidecar /subscriptions/challenge — the single
+    source of truth for the subscription terms (payTo, per-period amount, period).
+    Used both to serve the 402 AND to rebuild the requirements server-side at
+    verify/settle, so a buyer can never substitute their own terms (e.g. pay
+    themselves 1 micro)."""
+    return {
         "payTo": ctx["pay_to"],
         "amount": str(ctx["amount_per_period_micro"]),
         "period": ctx["period_sec"],
@@ -99,7 +105,13 @@ async def _serve_challenge(ctx: dict) -> JSONResponse:
             "name": ctx["plan_name"],
         },
     }
-    resp = await _sidecar_post("/subscriptions/challenge", json=challenge_req)
+
+
+async def _serve_challenge(ctx: dict) -> JSONResponse:
+    """No PAYMENT-SIGNATURE yet: ask the sidecar to build the period 402 challenge
+    from the product's pricing_params and relay its body + APP-PAYMENT-REQUIRED
+    header verbatim."""
+    resp = await _sidecar_post("/subscriptions/challenge", json=_challenge_req(ctx))
     headers = dict(_SUB_HEADERS)
     app_pr = resp.headers.get("APP-PAYMENT-REQUIRED")
     if app_pr:
@@ -117,26 +129,53 @@ def _safe_json(resp) -> dict:
     return body if isinstance(body, dict) else {"data": body}
 
 
-async def _verify_and_settle(request: Request, ctx: dict, sig: str) -> JSONResponse:
-    """With a PAYMENT-SIGNATURE: run the sidecar's LOCAL verify, and only on
-    localVerify.ok settle through the facilitator. localVerify false -> 402 (no
-    Order); a facilitator settle failure / 503 -> the same status, NO Order; only a
-    facilitator success creates the Order + delivers."""
+def _subscription_idem_key(sig: str) -> str:
+    """A stable idempotency key for a subscription PAYMENT-SIGNATURE — the period
+    scheme's analogue of the exact rail's EIP-3009 nonce. Prefers the buyer's
+    EIP-712 terms signature (unique per authorization); falls back to the whole
+    header when the envelope cannot be decoded. Hashed to 32 bytes so it fits the
+    shared ``x402_nonce`` unique index."""
+    basis = sig
     try:
-        body = await request.json()
+        decoded = json.loads(base64.b64decode(sig))
+        inner = decoded.get("payload") if isinstance(decoded, dict) else None
+        terms_sig = inner.get("termsSignature") if isinstance(inner, dict) else None
+        if isinstance(terms_sig, str) and terms_sig:
+            basis = terms_sig
     except Exception:
-        body = {}
-    requirements = body.get("requirements") if isinstance(body, dict) else None
+        pass
+    return "0x" + hashlib.sha256(basis.encode()).hexdigest()
+
+
+async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
+    """With a PAYMENT-SIGNATURE: rebuild the requirements SERVER-SIDE from ctx (so
+    verify/settle bind the buyer's signature to the STORE's payTo/amount/period,
+    never a buyer-supplied copy), run the sidecar's LOCAL verify, and only on
+    localVerify.ok is True settle through the facilitator. A replayed signature
+    returns the existing order (no re-settle). localVerify not ok -> 402 (no Order);
+    a facilitator settle failure / 503 -> the same status, NO Order; only a
+    facilitator success creates the Order + delivers."""
+    idem_key = _subscription_idem_key(sig)
+    replay = await asyncio.to_thread(_subscription_replay, ctx, idem_key)
+    if replay is not None:
+        return JSONResponse(replay, headers=_SUB_HEADERS)
+
+    cresp = await _sidecar_post("/subscriptions/challenge", json=_challenge_req(ctx))
+    accepts = _safe_json(cresp).get("accepts")
+    if not isinstance(accepts, list) or not accepts or not isinstance(accepts[0], dict):
+        raise HTTPException(502, "subscription challenge returned no requirements")
+    requirements = accepts[0]
     sig_headers = {"PAYMENT-SIGNATURE": sig}
 
-    verify_body = {"requirements": requirements} if requirements else {}
     vresp = await _sidecar_post(
-        "/subscriptions/verify", json=verify_body, headers=sig_headers
+        "/subscriptions/verify",
+        json={"requirements": requirements},
+        headers=sig_headers,
     )
     if vresp.status_code != 200:
         raise HTTPException(402, "subscription verify rejected")
     local_verify = _safe_json(vresp).get("localVerify")
-    if not isinstance(local_verify, dict) or local_verify.get("ok") is False:
+    if not isinstance(local_verify, dict) or local_verify.get("ok") is not True:
         raise HTTPException(402, "subscription verify rejected")
 
     sresp = await _sidecar_post(
@@ -151,16 +190,48 @@ async def _verify_and_settle(request: Request, ctx: dict, sig: str) -> JSONRespo
             "subscription settle failed",
         )
     reference = _safe_json(sresp).get("facilitator")
-    body_out = await asyncio.to_thread(_fulfill_subscription, ctx, reference)
+    body_out = await asyncio.to_thread(_fulfill_subscription, ctx, reference, idem_key)
     return JSONResponse(body_out, headers=_SUB_HEADERS)
 
 
-def _fulfill_subscription(ctx: dict, reference) -> dict:
+def _subscription_body(session, order: Order, ctx: dict) -> dict:
+    """Build the subscribe response body for an order, delivering through the exact
+    M3/M4 ``checkout.deliver`` path (idempotent, so it is identical on a replay)."""
+    product = session.get(Product, ctx["product_id"])
+    delivery_row = checkout.deliver(session, order)
+    body = {
+        "order_id": order.id,
+        "product": product.name if product else None,
+        "subscription": True,
+        "amount_micro": ctx["amount_per_period_micro"],
+        "period_sec": ctx["period_sec"],
+        "kind": delivery_row.kind if delivery_row else "text",
+        "delivery": delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY,
+    }
+    agentic._augment_agent_gated(session, order, body)
+    return body
+
+
+def _subscription_replay(ctx: dict, idem_key: str) -> dict | None:
+    """Return the existing order's body for a replayed PAYMENT-SIGNATURE (keyed on
+    the terms signature), or None on a first submission. Prevents a replay from
+    re-hitting the facilitator and minting a duplicate order + delivery."""
+    with SessionLocal() as session:
+        order = session.scalar(select(Order).where(Order.x402_nonce == idem_key))
+        if order is None:
+            return None
+        body = _subscription_body(session, order, ctx)
+        session.commit()
+        return body
+
+
+def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
     """Record the settled subscription as an agent Order and deliver through the
     exact M3/M4 ``checkout.deliver`` path. Runs ONLY after a real facilitator settle
-    success — never on a mocked/failed settle."""
+    success — never on a mocked/failed settle. The terms-signature idempotency key
+    is stored on ``x402_nonce`` (unique), so a settle that raced a replay reconciles
+    to the winner instead of minting a duplicate."""
     with SessionLocal() as session:
-        product = session.get(Product, ctx["product_id"])
         order = Order(
             id=uuid.uuid4().hex[:16],
             store_id=ctx["store_id"],
@@ -170,10 +241,20 @@ def _fulfill_subscription(ctx: dict, reference) -> dict:
             expected_micro=ctx["amount_per_period_micro"],
             status="confirmed",
             channel="agent",
+            x402_nonce=idem_key,
             paid_at=checkout._now(),
         )
         session.add(order)
-        session.flush()
+        try:
+            session.flush()
+        except IntegrityError:
+            session.rollback()
+            existing = session.scalar(select(Order).where(Order.x402_nonce == idem_key))
+            if existing is None:
+                raise
+            body = _subscription_body(session, existing, ctx)
+            session.commit()
+            return body
         log_event(
             session,
             "subscriptions",
@@ -182,19 +263,7 @@ def _fulfill_subscription(ctx: dict, reference) -> dict:
             order_id=order.id,
             data={"reference": reference} if isinstance(reference, dict) else None,
         )
-        delivery_row = checkout.deliver(session, order)
-        body = {
-            "order_id": order.id,
-            "product": product.name if product else None,
-            "subscription": True,
-            "amount_micro": ctx["amount_per_period_micro"],
-            "period_sec": ctx["period_sec"],
-            "kind": delivery_row.kind if delivery_row else "text",
-            "delivery": delivery_row.payload
-            if delivery_row
-            else checkout.DEFAULT_DELIVERY,
-        }
-        agentic._augment_agent_gated(session, order, body)
+        body = _subscription_body(session, order, ctx)
         session.commit()
         return body
 
@@ -211,4 +280,4 @@ async def subscribe(
     sig = request.headers.get("PAYMENT-SIGNATURE")
     if not sig:
         return await _serve_challenge(ctx)
-    return await _verify_and_settle(request, ctx, sig)
+    return await _verify_and_settle(ctx, sig)

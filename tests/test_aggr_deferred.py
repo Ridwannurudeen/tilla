@@ -224,3 +224,61 @@ def test_handler_allows_exact_on_non_batch(make_store):
     with SessionLocal() as s:
         resp = agentic.agent_buy(_paid_request("hg3", "exact"), "hg3", s)
     assert resp.status_code == 200
+
+
+# --------------------------------- aggr_deferred settle reconciliation (finding #3)
+def _batch_settling_order(make_store, slug: str) -> str:
+    make_store(slug=slug)
+    _set_pricing(slug, "batch")
+    with SessionLocal() as s:
+        agentic.agent_buy(_paid_request(slug, "aggr_deferred"), slug, s)
+    from app.models import Order
+
+    with SessionLocal() as s:
+        return s.scalar(select(Order)).id
+
+
+def _events(order_id: str) -> list[str]:
+    from app.models import EventLog
+
+    with SessionLocal() as s:
+        return [
+            e.event
+            for e in s.scalars(
+                select(EventLog).where(EventLog.order_id == order_id)
+            ).all()
+        ]
+
+
+def test_aggr_deferred_no_tx_stays_settling_and_is_not_marked_settled(make_store):
+    # aggr_deferred can serve 200 with NO decodable tx at settle time; the order
+    # must NOT go terminal 'delivered' or emit 'agent_order.settled' with no
+    # evidence — it stays provisional 'settling' with a distinct pending marker.
+    oid = _batch_settling_order(make_store, "ad1")
+    agentic.record_settlement(oid, "not-a-decodable-header", "aggr_deferred")
+    from app.models import Order
+
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+        assert s.get(Order, oid).tx_hash is None
+    events = _events(oid)
+    assert "agent_order.settle_pending" in events
+    assert "agent_order.settled" not in events
+
+
+def test_aggr_deferred_with_real_tx_flips_delivered(make_store):
+    # Once a real aggregated tx hash is present, the order flips to delivered.
+    from x402.http.utils import encode_payment_response_header
+    from x402.schemas import SettleResponse
+
+    oid = _batch_settling_order(make_store, "ad2")
+    header = encode_payment_response_header(
+        SettleResponse(success=True, transaction="0x" + "d" * 64, network="eip155:196")
+    )
+    agentic.record_settlement(oid, header, "aggr_deferred")
+    from app.models import Order
+
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "delivered"
+        assert s.get(Order, oid).tx_hash == "0x" + "d" * 64
+    assert "agent_order.settled" in _events(oid)
