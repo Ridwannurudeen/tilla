@@ -117,12 +117,12 @@ Tags: **[TS]** table-stakes · **[DIFF]** differentiator · **[EXCEEDS]** exceed
 | Pay-per-crawl catalog access (Cloudflare pattern) | DIFF | S |
 | XMTP negotiation channel | DIFF | L |
 
-### 2.7 Growth
-| Feature | Tag | Effort |
-|---|---|---|
-| **Agent affiliate attribution** (ACP affiliate object + on-chain USDT0 rev-share to referring agents) | EXCEEDS | M |
-| Merchant feed export: OpenAI feed + Google Merchant shape; Perplexity merchant program (free) | DIFF | S |
-| Embeddable buy button; email capture + broadcasts | DIFF | S–M |
+### 2.7 Growth — BUILT (M13; see docs/acp-checkout.md)
+| Feature | Tag | Effort | Status |
+|---|---|---|---|
+| **Agent affiliate attribution** (ACP affiliate object + on-chain USDT0 rev-share to referring agents) | EXCEEDS | M | LIVE — capture (web/agent/MCP/ACP) + accrual ledger + self-referral guard + merchant/referrer read surfaces + verify-and-record payout. Payout *execution* never in code (manual operator send, recorded post-hoc). |
+| Merchant feed export: OpenAI feed + Google Merchant shape; Perplexity merchant program (free) | DIFF | S | LIVE (export shapes read-only). *Listing* on each surface = USER-owned external step, never claimed. |
+| Embeddable buy button; email capture + broadcasts | DIFF | S–M | LIVE — `/embed.js` shadow-DOM button + waitlist capture/export. Broadcasts + SMTP sends parked (dormant until creds). |
 
 ### 2.8 On-chain depth
 | Feature | Tag | Effort |
@@ -163,7 +163,7 @@ All "nobody has" claims `[inferred]` from the live scan (§5): ASPs are overwhel
 - **Phase 5 — Merchant platform:** accounts, multi-store, dashboard, CSV, merchant API + webhooks.
 - **Phase 6 — Marketplace citizenship:** more services under #6961; store-as-ASP auto-listing; task-board participation; agents-hiring-agents (Warden hire); post-task ratings.
 - **Phase 7 — On-chain depth:** EAS receipts; StoreRegistry; ERC-8004 experiments.
-- **Phase 8 — Growth:** affiliates, external feeds (OpenAI/Perplexity/Google), embeds, ACP checkout.
+- **Phase 8 — Growth — BUILT (M13; live, with USER-gated tails):** affiliate attribution + accrual ledger + verify-and-record payout (payout execution never in code — a manual operator wallet send, recorded post-hoc); external feeds (OpenAI JSON + Google Merchant RSS + Tilla-wide aggregate, read-only); embeddable shadow-DOM buy button (`/embed.js`); ACP `/checkout_sessions` five-endpoint surface (mounted dormant-503 behind `TILLA_ACP_ENABLED`, tx-hash complete live once flipped; x402-middleware complete = spike 9, parked). External *listings* (ChatGPT/Instant-Checkout, Perplexity, Google Merchant Center) + SMTP broadcasts are USER-owned and never claimed until a real artifact exists. See `docs/acp-checkout.md`.
 
 **Hackathon checkpoint (2026-07-27 22:59 UTC):** submit whatever is genuinely done — target = Phases 1–3 complete with at least one real arm's-length purchase. Submission assets (X thread, ≤90s demo, form) are drafted and **user-owned/approval-gated**.
 

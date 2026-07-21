@@ -137,7 +137,16 @@
     byId("coManual").style.display = "";
     var d;
     try {
-      var r = await fetch("/api/checkout/" + SLUG, { method: "POST" });
+      // M13 affiliate attribution: forward a well-formed ?ref= from the link. A
+      // malformed ref is dropped client-side (best-effort — a bad marketing param
+      // never blocks the sale); a valid one is captured first-write-wins server-side.
+      var ref = new URLSearchParams(location.search).get("ref");
+      var opts = { method: "POST" };
+      if (ref && /^0x[0-9a-fA-F]{40}$/.test(ref)) {
+        opts.headers = { "content-type": "application/json" };
+        opts.body = JSON.stringify({ ref: ref });
+      }
+      var r = await fetch("/api/checkout/" + SLUG, opts);
       d = await r.json();
       if (!r.ok || !d.id) throw new Error("checkout");
     } catch (e) {

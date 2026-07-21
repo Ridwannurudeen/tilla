@@ -307,6 +307,16 @@
       c.appendChild(line);
       var b = el("button", "ghost", "View orders"); b.style.marginTop = "10px"; b.onclick = function () { openStore(st.slug); };
       c.appendChild(b);
+      // M13 embed snippet: a copy-paste buy-button tag. Built via textContent only
+      // (the '<script>' below is inert text in a <pre>, never parsed as markup), and
+      // st.slug is server-validated to the slug pattern — no XSS surface.
+      var eb = el("button", "ghost", "Embed button"); eb.style.marginTop = "10px"; eb.style.marginLeft = "8px";
+      var snippet = '<script src="https://tilla.gudman.xyz/embed.js" data-tilla-store="' + st.slug + '" async><\/script>';
+      var pre = el("pre", "muted"); pre.textContent = snippet; pre.style.display = "none";
+      pre.style.marginTop = "8px"; pre.style.whiteSpace = "pre-wrap"; pre.style.wordBreak = "break-all";
+      eb.onclick = function () { pre.style.display = pre.style.display === "none" ? "" : "none"; };
+      c.appendChild(eb);
+      c.appendChild(pre);
       box.appendChild(c);
     });
   }
