@@ -48,6 +48,7 @@ from app import (
     external_feeds,
     federation,
     growth,
+    growth_scheduler,
     mpp,
     providers,
     subscriptions,
@@ -109,6 +110,7 @@ async def lifespan(app: FastAPI):
     webhook_task = None
     attest_task = None
     federation_task = None
+    growth_sched_task = None
     if config.SWEEP_ENABLED:
         sweeper = asyncio.create_task(checkout.sweeper_loop())
         # M9 outbound webhook dispatcher — shares the sweeper's background-loop gate
@@ -127,6 +129,13 @@ async def lifespan(app: FastAPI):
         # mirror; never moves funds.
         if config.FEDERATION_PEERS:
             federation_task = asyncio.create_task(federation.federation_loop())
+        # M17.3 content-calendar scheduler — DORMANT: only under SWEEP_ENABLED AND
+        # TILLA_GROWTH_SCHED_ENABLED (default OFF), so zero LLM spend by default and
+        # never started in tests. It drafts + screens + queues only; sends nothing.
+        if config.GROWTH_SCHED_ENABLED:
+            growth_sched_task = asyncio.create_task(
+                growth_scheduler.growth_scheduler_loop()
+            )
     # x402 agent commerce (prod only): pre-warm the facilitator /supported off-loop
     # so the first protected request doesn't do the blocking sync GET, and run the
     # reaper that voids agent orders stuck delivered-without-settle.
@@ -137,7 +146,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (sweeper, webhook_task, attest_task, reaper, federation_task):
+        for task in (
+            sweeper,
+            webhook_task,
+            attest_task,
+            reaper,
+            federation_task,
+            growth_sched_task,
+        ):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

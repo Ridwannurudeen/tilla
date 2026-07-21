@@ -29,20 +29,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
-from typing import Annotated
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select, update
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
-from app import config, engine, screening
+from app import checkout, config, engine, screening
 from app.db import get_session
 from app.engine import GenerationUnavailable
 from app.limiter import limiter
-from app.models import EventLog, GrowthDraft, Store, log_event
+from app.models import (
+    AffiliateAccrual,
+    EmailSubscriber,
+    EventLog,
+    GrowthDraft,
+    Order,
+    Store,
+    log_event,
+)
 
 router = APIRouter()
 
@@ -69,9 +77,11 @@ def _content(store: Store) -> dict:
     return store.content if isinstance(store.content, dict) else {}
 
 
-def _build_prompt(store: Store, slug: str) -> str:
+def _build_prompt(store: Store, slug: str, perf_block: str = "") -> str:
     """Build the generation prompt from the persisted, already-screened content
-    only — no request body ever reaches the LLM."""
+    only — no request body ever reaches the LLM. ``perf_block`` (M17.3) is an
+    optional compact FIRST-PARTY performance summary (own-DB numbers only, from
+    17.2's aggregates); no buyer-supplied text or fetched content ever enters."""
     c = _content(store)
     url = f"{config.PUBLIC_BASE_URL.rstrip('/')}/s/{slug}/"
     return (
@@ -85,7 +95,8 @@ def _build_prompt(store: Store, slug: str) -> str:
         f"Product: {c.get('product_name', '')}\n"
         f"Product description: {c.get('product_blurb', '')}\n"
         f"Price: {c.get('price_usdt', '')} USDT\n"
-        f"Store URL: {url}\n\n"
+        f"Store URL: {url}\n"
+        f"{perf_block}\n"
         "Output ONLY valid JSON (no markdown) with EXACTLY these keys: "
         "social_posts (array of EXACTLY 3 punchy social posts, each at most 280 "
         "characters), launch_tweet (one launch announcement tweet, at most 280 "
@@ -353,6 +364,471 @@ def growth_outbox_mark_published(
     ).rowcount
     if not changed:
         raise HTTPException(409, "draft is not approved")
+    session.commit()
+    session.refresh(draft)
+    return JSONResponse(_draft_view(draft), headers=_KIT_HEADERS)
+
+
+# ============================================================ performance (M17.2)
+# Read-only, owner-gated, pure-DB aggregates over data Tilla already holds — the
+# feedback input for the 17.3 content calendar. NO RPC, NO LLM, NO new writes, and
+# NO buyer PII (a referrer wallet is only ever emitted in a truncated display form).
+
+_MAX_PERFORMANCE_DAYS = 90
+_DEFAULT_PERFORMANCE_DAYS = 30
+
+
+def _display_addr(addr: str | None) -> str | None:
+    """Truncated display form of an EVM address (0x1234…cdef) — never the full
+    wallet, so the performance surface leaks no complete counterparty address."""
+    if not addr:
+        return None
+    return addr[:6] + "…" + addr[-4:] if len(addr) >= 12 else addr
+
+
+def store_performance(session: Session, store: Store, days: int) -> dict:
+    """First-party performance aggregates for ``store`` over the last ``days``:
+    delivered orders/revenue by day, affiliate-attributed sales + top referrers,
+    waitlist growth, and the kit/draft history. Pure DB reads — every number comes
+    from rows Tilla already persisted; no buyer email or full wallet is emitted."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Delivered orders + revenue, bucketed by calendar day (SQLite date()).
+    day_col = func.date(Order.created_at)
+    day_rows = session.execute(
+        select(
+            day_col.label("d"),
+            func.count(Order.id),
+            func.coalesce(func.sum(Order.expected_micro), 0),
+        )
+        .where(
+            Order.store_id == store.id,
+            Order.status.in_(checkout.TERMINAL_DELIVERED),
+            Order.created_at >= since,
+        )
+        .group_by(day_col)
+        .order_by(day_col)
+    ).all()
+    orders_by_day = [
+        {"date": d, "orders": int(c), "revenue_micro": int(rev)}
+        for d, c, rev in day_rows
+    ]
+    total_orders = sum(r["orders"] for r in orders_by_day)
+    total_revenue_micro = sum(r["revenue_micro"] for r in orders_by_day)
+
+    # Affiliate-attributed sales + top referrers (accrued OR paid, not voided).
+    aff_rows = session.execute(
+        select(
+            AffiliateAccrual.referrer_addr,
+            func.count(AffiliateAccrual.id),
+            func.coalesce(func.sum(AffiliateAccrual.accrued_micro), 0),
+        )
+        .where(
+            AffiliateAccrual.store_id == store.id,
+            AffiliateAccrual.status.in_(("accrued", "paid")),
+            AffiliateAccrual.created_at >= since,
+        )
+        .group_by(AffiliateAccrual.referrer_addr)
+        .order_by(func.sum(AffiliateAccrual.accrued_micro).desc())
+    ).all()
+    top_referrers = [
+        {
+            "referrer": _display_addr(addr),
+            "sales": int(cnt),
+            "accrued_micro": int(micro),
+        }
+        for addr, cnt, micro in aff_rows
+    ]
+
+    # Waitlist growth (active, non-removed): total held + new inside the window.
+    waitlist_total = int(
+        session.scalar(
+            select(func.count())
+            .select_from(EmailSubscriber)
+            .where(
+                EmailSubscriber.store_id == store.id,
+                EmailSubscriber.source == "waitlist",
+                EmailSubscriber.removed_at.is_(None),
+            )
+        )
+        or 0
+    )
+    waitlist_new = int(
+        session.scalar(
+            select(func.count())
+            .select_from(EmailSubscriber)
+            .where(
+                EmailSubscriber.store_id == store.id,
+                EmailSubscriber.source == "waitlist",
+                EmailSubscriber.removed_at.is_(None),
+                EmailSubscriber.created_at >= since,
+            )
+        )
+        or 0
+    )
+
+    # Kit/draft history: growth.* event_log rows in the window, counted by event.
+    event_rows = session.execute(
+        select(EventLog.event, func.count(EventLog.id))
+        .where(
+            EventLog.store_id == store.id,
+            EventLog.event.like("growth.%"),
+            EventLog.ts >= since,
+        )
+        .group_by(EventLog.event)
+    ).all()
+    kit_events = {event: int(cnt) for event, cnt in event_rows}
+
+    # Draft outbox counts by status (all-time — the outbox is the working queue).
+    draft_rows = session.execute(
+        select(GrowthDraft.status, func.count(GrowthDraft.id))
+        .where(GrowthDraft.store_id == store.id)
+        .group_by(GrowthDraft.status)
+    ).all()
+    drafts_by_status = {status: int(cnt) for status, cnt in draft_rows}
+
+    return {
+        "window_days": days,
+        "orders": {
+            "total": total_orders,
+            "revenue_micro": total_revenue_micro,
+            "by_day": orders_by_day,
+        },
+        "affiliates": {
+            "attributed_sales": sum(r["sales"] for r in top_referrers),
+            "accrued_micro": sum(r["accrued_micro"] for r in top_referrers),
+            "top_referrers": top_referrers,
+        },
+        "waitlist": {"total": waitlist_total, "new_in_window": waitlist_new},
+        "growth_activity": {
+            "events": kit_events,
+            "drafts_by_status": drafts_by_status,
+        },
+    }
+
+
+@router.get("/api/stores/{slug}/growth/performance")
+def growth_performance(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    days: int = Query(_DEFAULT_PERFORMANCE_DAYS, ge=1, le=_MAX_PERFORMANCE_DAYS),
+    session: Session = Depends(get_session),
+):
+    """Owner-gated, read-only performance readback over a bounded window (days≤90).
+    Same auth seam as the growth kit/outbox; no LLM, no RPC, no writes."""
+    store = _load_owned_live_store(request, slug, session)
+    return JSONResponse(store_performance(session, store, days), headers=_KIT_HEADERS)
+
+
+# ========================================================= content calendar (M17.3)
+# A merchant sets a cadence + channels; a flag-gated background scheduler drafts
+# performance-aware copy on that cadence, screens it fail-closed, and queues it in
+# the outbox (INV-1: it still sends NOTHING). The plan is the latest event_log row —
+# no new table. Scheduled generation reuses the exact _build_prompt/_generate_kit and
+# screening seams as the on-demand kit.
+
+# The channels a calendar may schedule. 17.4 widens the outbox channel set, but the
+# scheduler drafts only from the kit's own channels.
+SCHEDULED_CHANNELS = ("social", "email_subject")
+
+
+def _performance_block(perf: dict) -> str:
+    """A compact FIRST-PARTY performance line for the generation prompt — numbers
+    only, straight from 17.2's own-DB aggregates. No buyer text, no PII."""
+    orders = perf.get("orders", {})
+    waitlist = perf.get("waitlist", {})
+    affiliates = perf.get("affiliates", {})
+    revenue = int(orders.get("revenue_micro", 0)) / 1_000_000
+    return (
+        f"Recent performance (first-party, last {perf.get('window_days', 0)}d): "
+        f"{int(orders.get('total', 0))} orders, {revenue:g} USDT revenue; "
+        f"waitlist {int(waitlist.get('total', 0))} "
+        f"(+{int(waitlist.get('new_in_window', 0))} new); "
+        f"affiliate-attributed sales {int(affiliates.get('attributed_sales', 0))}. "
+        "Let these numbers inform the angle; do NOT quote them verbatim."
+    )
+
+
+class CalendarPlan(BaseModel):
+    """The merchant's content-calendar plan. Strict + tiny: a cadence, the channels
+    to schedule (a subset of the kit's channels), and an active switch. Stored as the
+    latest ``growth.calendar_set`` event_log row (no new table)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cadence: Literal["daily", "weekly"]
+    channels: Annotated[
+        list[Literal["social", "email_subject"]], Field(min_length=1, max_length=2)
+    ]
+    active: bool = True
+
+    @field_validator("channels")
+    @classmethod
+    def _dedupe(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("channels must be unique")
+        return v
+
+
+def latest_calendar(session: Session, store_id: int) -> dict | None:
+    """The store's current calendar plan (latest row wins), or None if never set."""
+    event = session.scalar(
+        select(EventLog)
+        .where(
+            EventLog.store_id == store_id,
+            EventLog.event == "growth.calendar_set",
+        )
+        .order_by(EventLog.id.desc())
+    )
+    return event.data if event is not None and event.data else None
+
+
+@router.post("/api/stores/{slug}/growth/calendar")
+def growth_calendar_set(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    plan: CalendarPlan = Body(...),
+    session: Session = Depends(get_session),
+):
+    """Owner-gated: set the store's content-calendar plan (latest row wins). Records
+    intent only — the scheduler stays dormant until TILLA_GROWTH_SCHED_ENABLED and
+    sends nothing regardless."""
+    store = _load_owned_live_store(request, slug, session)
+    data = plan.model_dump()
+    log_event(session, "growth", "growth.calendar_set", store_id=store.id, data=data)
+    session.commit()
+    return JSONResponse(data, headers=_KIT_HEADERS)
+
+
+@router.get("/api/stores/{slug}/growth/calendar")
+def growth_calendar_get(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Owner-gated: read back the store's current calendar plan (404 if unset)."""
+    store = _load_owned_live_store(request, slug, session)
+    plan = latest_calendar(session, store.id)
+    if plan is None:
+        raise HTTPException(404, "no calendar set")
+    return JSONResponse(plan, headers=_KIT_HEADERS)
+
+
+def _scheduled_drafts_from_kit(
+    kit: GrowthKit, channels: list[str]
+) -> list[tuple[str, str]]:
+    """Map a generated kit to (channel, body) drafts for the calendar's channels."""
+    drafts: list[tuple[str, str]] = []
+    if "social" in channels:
+        drafts.extend(("social", post) for post in kit.social_posts)
+    if "email_subject" in channels:
+        drafts.append(("email_subject", kit.email_subject))
+    return drafts
+
+
+def screen_and_store_scheduled(
+    session: Session, store: Store, channel: str, body: str
+) -> str:
+    """Screen one scheduled draft fail-closed, then persist it in the outbox with
+    ``source='scheduled'``. Returns the disposition:
+
+    - ``'allow'``   → a ``pending`` row (screened, readable);
+    - ``'blocked'`` → a ``blocked`` row IS written (the body is stored but withheld
+      from every read path by ``_draft_view``) — the M17.1-review binding that the
+      screening-BLOCK path actually persists state, not silently drop it;
+    - ``'unavailable'`` → NO row (screening was ambiguous/down): the M12 outage
+      contract — skip, retry next tick, never serve unscreened copy.
+    """
+    try:
+        outcome = screening.screen(body)
+    except screening.ScreeningBlocked:
+        session.add(
+            GrowthDraft(
+                store_id=store.id,
+                channel=channel,
+                body=body,
+                source="scheduled",
+                status="blocked",
+                content_sha256=hashlib.sha256(body.encode()).hexdigest(),
+                screening_status="blocked",
+            )
+        )
+        return "blocked"
+    if outcome.status != "allow":
+        return "unavailable"
+    session.add(
+        GrowthDraft(
+            store_id=store.id,
+            channel=channel,
+            body=body,
+            source="scheduled",
+            status="pending",
+            content_sha256=hashlib.sha256(body.encode()).hexdigest(),
+            screening_status="allow",
+        )
+    )
+    return "allow"
+
+
+# ================================================= multi-channel draft shapes (M17.4)
+# Two richer on-demand channels — a full email_body (subject + plain-text body) and a
+# product_update blurb — through the EXACT generate → screen → outbox pipeline as the
+# kit. Still nothing sends (INV-1). XSS-safe by construction: the shapes forbid HTML
+# ('<'/'>') at validation, so an LLM that emits a tag folds into GenerationUnavailable
+# → 503 (never a persisted draft), and the copy is only ever emitted as JSON.
+
+
+def _reject_html(v: str) -> str:
+    if "<" in v or ">" in v:
+        raise ValueError("HTML markup is not allowed")
+    return v
+
+
+class EmailBody(BaseModel):
+    """A full marketing email: a subject line + a plain-text body, no HTML."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: Annotated[str, Field(min_length=1, max_length=78)]
+    body: Annotated[str, Field(min_length=1, max_length=2000)]
+
+    _no_html = field_validator("subject", "body")(_reject_html)
+
+
+class ProductUpdate(BaseModel):
+    """A short product-update blurb, no HTML."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    blurb: Annotated[str, Field(min_length=1, max_length=500)]
+
+    _no_html = field_validator("blurb")(_reject_html)
+
+
+# The on-demand channels 17.4 adds (kit channels stay on the kit endpoint).
+_CHANNEL_INSTRUCTIONS = {
+    "email_body": (
+        "Output ONLY valid JSON (no markdown) with EXACTLY these keys: subject (an "
+        "email subject line, at most 78 characters) and body (the plain-text email "
+        "body, at most 2000 characters). Plain text ONLY — absolutely no HTML tags."
+    ),
+    "product_update": (
+        "Output ONLY valid JSON (no markdown) with EXACTLY this key: blurb (a short "
+        "product-update announcement, at most 500 characters). Plain text ONLY — "
+        "absolutely no HTML tags."
+    ),
+}
+
+
+def _channel_prompt(store: Store, slug: str, channel: str) -> str:
+    """Build a channel-specific prompt from the persisted, already-screened store
+    content only — the same injection-safe surface as ``_build_prompt``."""
+    c = _content(store)
+    url = f"{config.PUBLIC_BASE_URL.rstrip('/')}/s/{slug}/"
+    return (
+        "You are a growth marketer writing launch copy for a solo merchant's "
+        "one-product storefront. Using ONLY the store details below, write the "
+        "requested piece.\n\n"
+        f"Store name: {c.get('store_name', '')}\n"
+        f"Tagline: {c.get('tagline', '')}\n"
+        f"Headline: {c.get('hero_headline', '')}\n"
+        f"Subcopy: {c.get('hero_subcopy', '')}\n"
+        f"Product: {c.get('product_name', '')}\n"
+        f"Product description: {c.get('product_blurb', '')}\n"
+        f"Price: {c.get('price_usdt', '')} USDT\n"
+        f"Store URL: {url}\n\n" + _CHANNEL_INSTRUCTIONS[channel]
+    )
+
+
+def _generate_channel(channel: str, prompt: str) -> tuple[str, int, int]:
+    """Generate + validate one channel's draft. Any outage, malformed body, schema/
+    length violation, or HTML in the output raises GenerationUnavailable (→ 503) —
+    never a partial or unsafe draft. Returns the draft body text + token counts."""
+    resp = engine._post_generation(prompt)
+    try:
+        text = resp["content"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise GenerationUnavailable("growth LLM returned an unexpected shape") from exc
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise GenerationUnavailable("growth LLM did not return JSON: " + text[:200])
+    try:
+        raw = json.loads(m.group(0))
+        if channel == "email_body":
+            model = EmailBody.model_validate(raw)
+            body = f"{model.subject}\n\n{model.body}"
+        else:
+            body = ProductUpdate.model_validate(raw).blurb
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise GenerationUnavailable(
+            f"growth LLM returned unusable JSON: {exc}"
+        ) from exc
+    usage = resp.get("usage") or {}
+    return (
+        body,
+        int(usage.get("input_tokens", 0) or 0),
+        int(usage.get("output_tokens", 0) or 0),
+    )
+
+
+class ChannelDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel: Literal["email_body", "product_update"]
+
+
+@router.post("/api/stores/{slug}/growth/draft")
+@limiter.limit("6/hour")
+def growth_channel_draft(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    payload: ChannelDraftRequest = Body(...),
+    session: Session = Depends(get_session),
+):
+    """Generate one multi-channel draft (email_body | product_update) from the store's
+    persisted content, screen it fail-closed, and queue it in the outbox. Merchant-
+    gated, 6/hour, re-screened (BLOCK → 422, unavailable → 503). Sends nothing."""
+    store = _load_owned_live_store(request, slug, session)
+    channel = payload.channel
+    try:
+        body, _llm_in, _llm_out = _generate_channel(
+            channel, _channel_prompt(store, slug, channel)
+        )
+    except GenerationUnavailable as exc:
+        raise HTTPException(
+            503,
+            "growth draft generation temporarily unavailable — retry shortly",
+            headers={"Retry-After": "60"},
+        ) from exc
+    try:
+        outcome = screening.screen(body)
+    except screening.ScreeningBlocked as exc:
+        raise HTTPException(
+            422, "generated draft did not pass safety screening"
+        ) from exc
+    if outcome.status != "allow":
+        raise HTTPException(
+            503,
+            "content screening temporarily unavailable — retry shortly",
+            headers={"Retry-After": "60"},
+        )
+    draft = GrowthDraft(
+        store_id=store.id,
+        channel=channel,
+        body=body,
+        source="manual",
+        status="pending",
+        content_sha256=hashlib.sha256(body.encode()).hexdigest(),
+        screening_status="allow",
+    )
+    session.add(draft)
+    log_event(
+        session,
+        "growth",
+        "growth.channel_draft_generated",
+        store_id=store.id,
+        data={"channel": channel},
+    )
     session.commit()
     session.refresh(draft)
     return JSONResponse(_draft_view(draft), headers=_KIT_HEADERS)

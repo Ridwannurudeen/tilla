@@ -289,6 +289,21 @@ FEDERATION_FETCH_TIMEOUT = float(os.environ.get("TILLA_FEDERATION_FETCH_TIMEOUT"
 FEDERATION_MAX_BYTES = int(os.environ.get("TILLA_FEDERATION_MAX_BYTES", "262144"))
 # Cap the stores ingested per peer per tick (bounds a hostile peer's row count).
 FEDERATION_MAX_STORES = int(os.environ.get("TILLA_FEDERATION_MAX_STORES", "50"))
+# ---------- M17 growth agent: content-calendar scheduler — DORMANT by default ---
+# A background loop drafts marketing copy on a merchant's calendar cadence, screens
+# it fail-closed, and queues it in the growth outbox (INV-1: it NEVER sends). It is
+# double-gated OFF: GROWTH_SCHED_ENABLED default OFF (so zero LLM spend) AND it only
+# starts under SWEEP_ENABLED (never in tests). Enabling it is the demand receipt —
+# flipped ON in the VPS .env only once a real merchant asks for a calendar.
+GROWTH_SCHED_ENABLED = _flag("TILLA_GROWTH_SCHED_ENABLED")
+# Cadence of the scheduler loop (seconds). Default daily; the per-store cadence
+# (daily/weekly) is enforced on top of this tick inside the tick itself.
+GROWTH_SCHED_INTERVAL = float(os.environ.get("TILLA_GROWTH_SCHED_INTERVAL", "86400"))
+# Per-store hard cap on scheduled generations per day (abuse backstop on top of the
+# cadence pacing), and a global daily ceiling across every store (unattended-spend
+# guard). A generation = one LLM call producing one store's scheduled drafts.
+GROWTH_SCHED_STORE_DAILY_MAX = int(os.environ.get("TILLA_GROWTH_STORE_DAILY_MAX", "6"))
+GROWTH_DAILY_MAX = int(os.environ.get("TILLA_GROWTH_DAILY_MAX", "50"))
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
