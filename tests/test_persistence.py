@@ -378,6 +378,88 @@ def test_migration_0008_additive_and_index_survives(tmp_path):
     con.close()
 
 
+def test_migration_0009_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m13.db"
+    r = _alembic(db, "upgrade", "0008_onchain_receipts")
+    assert r.returncode == 0, r.stderr
+
+    # seed a delivered order against the 0008 schema (no referrer_addr yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, expected_micro,"
+        " paid_micro, overpaid_micro, status, created_at)"
+        " VALUES ('m13ord',1,'0xabc',9000000,9000123,9000123,0,'delivered','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    tables = _table_names(db)
+    assert {
+        "affiliate_accruals",
+        "affiliate_payouts",
+        "email_subscribers",
+        "acp_sessions",
+    } <= tables
+
+    con = sqlite3.connect(db)
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "referrer_addr" in ocols
+    # additive column backfills to NULL for the existing order (unreferred)
+    assert (
+        con.execute("SELECT referrer_addr FROM orders WHERE id='m13ord'").fetchone()[0]
+        is None
+    )
+    accr_ddl = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='affiliate_accruals'"
+    ).fetchone()[0]
+    assert "uq_affiliate_accruals_order_id" in accr_ddl
+    assert "ck_affiliate_accruals_status" in accr_ddl
+    pay_ddl = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='affiliate_payouts'"
+    ).fetchone()[0]
+    assert "uq_affiliate_payouts_tx_log" in pay_ddl  # one transfer -> one payout, ever
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    # native ADD COLUMN (no batch rebuild) — the M3 partial unique index survives
+    assert "ux_orders_active_amount" in idx
+    assert "ix_orders_referrer_addr" in idx
+    con.close()
+
+    # up-down-up: the partial index must survive the downgrade rebuild + re-upgrade
+    r = _alembic(db, "downgrade", "0008_onchain_receipts")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "referrer_addr" not in ocols
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx  # survives up-down-up
+    assert "ix_orders_referrer_addr" in idx
+    con.close()
+
+
 def test_fresh_schema_has_marketplace_and_receipts():
     # Fresh create_all (conftest) must match the migrated schema: the new column +
     # table exist on the in-process engine used by the app/tests.
@@ -392,6 +474,15 @@ def test_fresh_schema_has_marketplace_and_receipts():
     assert {"attestation_uid", "attest_tx", "attest_status"} <= ocols
     oidx = {i["name"] for i in insp.get_indexes("orders")}
     assert "ix_orders_attest_status" in oidx
+    # M13 growth tables + referrer_addr column present on the fresh schema too
+    assert {
+        "affiliate_accruals",
+        "affiliate_payouts",
+        "email_subscribers",
+        "acp_sessions",
+    } <= set(insp.get_table_names())
+    assert "referrer_addr" in ocols
+    assert "ix_orders_referrer_addr" in oidx
 
 
 def test_migration_0002_downgrade_backfills_null_baseline(tmp_path):
