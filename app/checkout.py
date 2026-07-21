@@ -154,8 +154,12 @@ def deliver(session: Session, order: Order):
     # M9 webhooks: enqueue in the winner branch only (the transition rowcount-1
     # guard above means exactly one caller reaches here per order). No-op unless the
     # merchant registered a webhook. In Tilla's flow confirm and deliver are the
-    # same instant, so order.paid and order.delivered fire together.
-    if store is not None:
+    # same instant, so order.paid and order.delivered fire together. Agent (x402)
+    # orders are the exception: they are held provisional 'settling' right after this
+    # deliver(), so paid/delivered must NOT fire until settle confirms on-chain — a
+    # failed settle voids the order. record_settlement enqueues both on the
+    # settling->delivered flip instead, and the void paths emit order.voided.
+    if store is not None and order.channel != "agent":
         session.refresh(order)
         webhooks.enqueue(session, store.merchant_id, "order.paid", order)
         webhooks.enqueue(session, store.merchant_id, "order.delivered", order)

@@ -172,9 +172,18 @@ def apply_refund(
             data={"kind": "full", "amount_micro": total},
         )
     else:  # overage: keep delivered status, just record the surplus returned
+        # Race-proof the read-modify-write: the compare-and-set on refunded_micro
+        # (mirroring the full-refund transition()) means two concurrent overage
+        # submissions with different tx hashes can't both land — the loser's stale
+        # base fails the WHERE and 409s, so the refunds ledger and refunded_micro
+        # never diverge.
         moved = session.execute(
             update(Order)
-            .where(Order.id == order.id, Order.status.in_(OVERAGE_STATES))
+            .where(
+                Order.id == order.id,
+                Order.status.in_(OVERAGE_STATES),
+                Order.refunded_micro == (order.refunded_micro or 0),
+            )
             .values(refunded_micro=new_refunded)
         ).rowcount
         if moved != 1:
@@ -192,7 +201,7 @@ def apply_refund(
     webhooks.enqueue(
         session,
         store.merchant_id,
-        "order.refunded",
+        "order.refunded" if kind == "full" else "order.overage_refunded",
         order,
         extra={"kind": kind, "refund_amount_micro": total},
     )

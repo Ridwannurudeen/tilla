@@ -17,7 +17,7 @@ import hashlib
 import io
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
@@ -525,9 +525,15 @@ def _parse_iso(value: str | None):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
     except ValueError as exc:
         raise HTTPException(422, "from/to must be ISO 8601 timestamps") from exc
+    # SQLAlchemy's SQLite DateTime drops tzinfo without converting, so a tz-aware
+    # bound would compare as offset-local against naive-UTC rows. Normalize to UTC
+    # and strip tzinfo so the export window matches the stored naive-UTC timestamps.
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _export_scope(session: Session, merchant: Merchant, store: str | None) -> list[int]:

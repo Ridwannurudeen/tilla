@@ -45,7 +45,7 @@ from x402.http.utils import (
 )
 from x402.schemas import AssetAmount
 
-from app import chain, checkout, config, delivery
+from app import chain, checkout, config, delivery, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -489,6 +489,10 @@ def settle_failed_core(nonce: str) -> dict:
                 store_id=order.store_id,
                 order_id=order.id,
             )
+            store = session.get(Store, order.store_id)
+            if store is not None:
+                session.refresh(order)
+                webhooks.enqueue(session, store.merchant_id, "order.voided", order)
             session.commit()
         return {"error": "settlement_failed"}
 
@@ -551,6 +555,10 @@ def reap_agent_orders(session: Session, now=None) -> int:
                     store_id=o.store_id,
                     order_id=o.id,
                 )
+                store = session.get(Store, o.store_id)
+                if store is not None:
+                    session.refresh(o)
+                    webhooks.enqueue(session, store.merchant_id, "order.voided", o)
                 reaped += 1
     return reaped
 
@@ -644,6 +652,14 @@ def record_settlement(
                 order_id=order_id,
                 data=None if tx else {"tx": "unparsed"},
             )
+            # Fire the paid/delivered webhooks here (suppressed in checkout.deliver
+            # for agent orders): the settle is now confirmed on-chain, so the
+            # merchant's consumer counts revenue only for a settled buy.
+            store = session.get(Store, order.store_id)
+            if store is not None:
+                session.refresh(order)
+                webhooks.enqueue(session, store.merchant_id, "order.paid", order)
+                webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
             session.commit()
 
 
