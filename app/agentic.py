@@ -452,6 +452,24 @@ def agent_buy(
     return JSONResponse(body)
 
 
+@router.get("/s/{slug}/buy")
+def agent_buy_get(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+):
+    """A GET on the buy path is registered on the x402 paywall so an UNPAID GET
+    returns the 402 challenge (marketplace listing-review robustness — the
+    onchainos x402-check probes GET). A PAID GET reaches here and is refused 405
+    BEFORE settle: a >=400 response makes the payment middleware skip settlement, so
+    zero funds can move on the GET method and no Order row is ever created. Buying is
+    POST-only."""
+    return JSONResponse(
+        {"error": "method not allowed; use POST to buy"},
+        status_code=405,
+        headers={"Allow": "POST", **_AGENT_HEADERS},
+    )
+
+
 # ============================================================================
 # Settlement-failed hook + reaper: void a provisional 'settling' when settle fails
 # ============================================================================
@@ -707,6 +725,13 @@ class _GetProductArgs(BaseModel):
     product_id: int
 
 
+class _CreateCheckoutArgs(BaseModel):
+    # Optional: which active product to check out. Omitted -> the store's primary
+    # product (lowest Product.id), byte-identical to the pre-M10 single-product
+    # behaviour. A store with several products (M10 add-product) can target any.
+    product_id: int | None = None
+
+
 class _PayArgs(BaseModel):
     checkout_id: str = Field(min_length=1, max_length=64)
     tx_hash: str
@@ -775,11 +800,13 @@ def _mcp_tools() -> list[dict]:
             "name": "create_checkout",
             "description": (
                 "Create a unique-amount on-chain checkout (for agents that pay the "
-                "merchant themselves and submit the tx hash via `pay`)."
+                "merchant themselves and submit the tx hash via `pay`). Pass an "
+                "optional product_id to check out a specific product; omit it for "
+                "the store's primary product."
             ),
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {"product_id": {"type": "integer"}},
                 "additionalProperties": False,
             },
         },
@@ -860,10 +887,23 @@ def _tool_get_product(
     }
 
 
-def _tool_create_checkout(session: Session, store: Store) -> dict:
-    product = _active_product(session, store.id)
-    if product is None:
-        raise _ToolError("store has no active product")
+def _tool_create_checkout(
+    session: Session, store: Store, product_id: int | None = None
+) -> dict:
+    if product_id is not None:
+        product = session.scalar(
+            select(Product).where(
+                Product.id == product_id,
+                Product.store_id == store.id,
+                Product.active.is_(True),
+            )
+        )
+        if product is None:
+            raise _ToolError("product not found")
+    else:
+        product = _active_product(session, store.id)
+        if product is None:
+            raise _ToolError("store has no active product")
     try:
         order = checkout.create_order(session, store, product)
     except checkout.AmountUnavailable as exc:
@@ -920,7 +960,8 @@ def _mcp_tools_call(session: Session, store: Store, slug: str, req_id, params) -
             args = _GetProductArgs.model_validate(raw_args)
             result = _tool_get_product(session, store, slug, args.product_id)
         elif name == "create_checkout":
-            result = _tool_create_checkout(session, store)
+            args = _CreateCheckoutArgs.model_validate(raw_args)
+            result = _tool_create_checkout(session, store, args.product_id)
         elif name == "pay":
             result = _tool_pay(session, store, _PayArgs.model_validate(raw_args))
         else:
