@@ -412,6 +412,7 @@ def fulfill_agent_order(
     nonce: str,
     referrer_addr: str | None = None,
     agent_id: int | None = None,
+    signed_micro: int | None = None,
 ) -> tuple[Order, dict]:
     """Idempotently create + deliver an agent order. The (store, payer, nonce)
     triple is the idempotency key (see :func:`_assert_nonce_owner`): an existing
@@ -436,7 +437,16 @@ def fulfill_agent_order(
     # on-chain owner of the presented agent id (INV-1, capped <= base at write).
     # Every other case returns product.price_micro — the order is born at the
     # exact amount the 402 challenge demanded and that settles.
-    price_micro, _ = b2b.effective_price_micro(product, agent_id, payer)
+    #
+    # Prefer the SIGNED authorization value (the amount the middleware matched to a
+    # verified requirement and actually settled) so the DB record can never drift
+    # from reality if the ownership cache expires between the price hook and here
+    # and an RPC read flips. Fall back to re-deriving only when no signed value is
+    # threaded through (internal callers / tests).
+    if signed_micro is not None and signed_micro > 0:
+        price_micro = signed_micro
+    else:
+        price_micro, _ = b2b.effective_price_micro(product, agent_id, payer)
     order = Order(
         id=uuid.uuid4().hex[:16],
         store_id=store.id,
@@ -534,6 +544,12 @@ def agent_buy(
     # same wallet the challenge's price hook verified — never a client-asserted
     # field. A malformed agent_id parses to None → base price, no discount.
     aid = b2b.parse_agent_id(agent_id) if agent_id else None
+    # The signed EIP-3009 `value` is the amount the middleware verified + settled;
+    # record the order at exactly that so the DB never drifts from what was paid.
+    try:
+        signed_micro = int(auth.get("value"))
+    except (TypeError, ValueError):
+        signed_micro = None
     order, body = fulfill_agent_order(
         session,
         store,
@@ -542,6 +558,7 @@ def agent_buy(
         auth["nonce"],
         referrer_addr,
         aid,
+        signed_micro,
     )
     session.commit()
     # Shared scope["state"] hands the order id (and the presented agent id) to the

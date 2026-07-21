@@ -157,9 +157,15 @@ def ingest_once() -> int:
             except WebhookURLError:
                 logger.warning("federation: peer %s failed url gate, skipped", peer)
                 continue
-            rows = ingest_peer(client, peer)
-            _replace_peer_rows(peer, rows)
-            total += len(rows)
+            try:
+                rows = ingest_peer(client, peer)
+                _replace_peer_rows(peer, rows)
+                total += len(rows)
+            except Exception:
+                # One hostile/broken peer must not abort ingest of the others.
+                # Its prior rows stay as-is until it serves a valid feed again.
+                logger.warning("federation: peer %s ingest failed, skipped", peer)
+                continue
     return total
 
 
