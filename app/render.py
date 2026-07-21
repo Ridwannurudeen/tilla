@@ -82,10 +82,11 @@ def _seo_ctx(content: Mapping, slug: str) -> dict:
     }
 
 
-def render(content: Mapping, addr: str, slug: str, theme: str = "original.html") -> str:
-    """Render a store theme from generator output. `content` is untrusted
-    (LLM-produced); `addr`/`slug` are our own already-validated values."""
-    ctx = {
+def _store_ctx(content: Mapping, addr: str, slug: str) -> dict:
+    """The full 15-token store-theme context (+ additive palette/SEO). Shared by
+    :func:`render` and the M15.2 install-time :func:`render_source` check so a
+    candidate theme is exercised with the exact context a live one receives."""
+    return {
         "SLUG": slug,
         "STORE_NAME": str(content.get("store_name", "My Store")),
         "TAGLINE": str(content.get("tagline", "")),
@@ -100,8 +101,22 @@ def render(content: Mapping, addr: str, slug: str, theme: str = "original.html")
         **_palette_ctx(content),
         **_seo_ctx(content, slug),
     }
+
+
+def render(content: Mapping, addr: str, slug: str, theme: str = "original.html") -> str:
+    """Render a store theme from generator output. `content` is untrusted
+    (LLM-produced); `addr`/`slug` are our own already-validated values."""
     template = _env.get_template(theme)
-    return template.render(**ctx)
+    return template.render(**_store_ctx(content, addr, slug))
+
+
+def render_source(source: str, content: Mapping, addr: str, slug: str) -> str:
+    """Render an UNTRUSTED candidate theme *source string* through the same
+    autoescaped env (M15.2 install-time XSS-corpus gate) — `{% include %}` still
+    resolves against the loader-owned ``themes/``, and string autoescape is on
+    (``default_for_string=True``), so a candidate theme never renders under
+    weaker escaping than a live one. Never used on the request path."""
+    return _env.from_string(source).render(**_store_ctx(content, addr, slug))
 
 
 def render_shell(template: str) -> str:

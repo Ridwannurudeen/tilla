@@ -269,6 +269,21 @@ def is_active(session: Session, kind: str, name: str) -> bool:
     return name in active_names(session, kind)
 
 
+def allowed_theme_names(session: Session | None = None) -> set[str]:
+    """The selectable theme set (M15.2): the built-in frozenset ∪ every ACTIVE
+    theme plugin. The union keeps the three built-ins selectable even before the
+    plugins table is seeded; an operator-approved external theme becomes
+    selectable the instant its row flips ``active``, and a still-``pending_review``
+    theme never appears here. Opens a short-lived session when none is supplied
+    (the create-store validators have no session in scope)."""
+    if session is not None:
+        return set(config.ALLOWED_THEMES) | active_names(session, "theme")
+    from app.db import SessionLocal
+
+    with SessionLocal() as s:
+        return set(config.ALLOWED_THEMES) | active_names(s, "theme")
+
+
 # ---------------------------------------------------------------- operator writes
 def register_external(
     session: Session,

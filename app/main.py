@@ -48,6 +48,7 @@ from app import (
     external_feeds,
     growth,
     mpp,
+    providers,
     subscriptions,
     webhooks,
 )
@@ -336,8 +337,8 @@ class CreateStoreBody(BaseModel):
     def _validate_theme(cls, v):
         if v is None or v == "":
             return None
-        if v not in config.ALLOWED_THEMES:
-            raise ValueError("theme must be one of: original, bold, editorial")
+        if v not in providers.allowed_theme_names():
+            raise ValueError("theme must be a built-in or an active installed theme")
         return v
 
 
@@ -419,8 +420,8 @@ class UpgradeStoreBody(_SlugBody):
     def _validate_theme(cls, v):
         if v is None or v == "":
             return None
-        if v not in config.ALLOWED_THEMES:
-            raise ValueError("theme must be one of: original, bold, editorial")
+        if v not in providers.allowed_theme_names():
+            raise ValueError("theme must be a built-in or an active installed theme")
         return v
 
 

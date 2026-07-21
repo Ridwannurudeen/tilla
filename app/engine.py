@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app import config, screening
+from app import config, providers, screening
 from app.db import SessionLocal
 from app.delivery import mint_manage_key
 from app.models import (
@@ -85,8 +85,13 @@ class GeneratedContent(BaseModel):
 
 def _resolve_theme(name: str | None) -> str:
     """Map a short theme name (API- or LLM-supplied) to its template filename,
-    falling back to the default for anything outside the allowed set."""
-    return f"{name}.html" if name in config.ALLOWED_THEMES else config.DEFAULT_THEME
+    falling back to the default for anything outside the allowed set (built-ins
+    ∪ active theme plugins, per M15.2)."""
+    return (
+        f"{name}.html"
+        if name in providers.allowed_theme_names()
+        else config.DEFAULT_THEME
+    )
 
 
 def _write_store_pages(d, content: dict, addr: str, slug: str, theme: str) -> None:
