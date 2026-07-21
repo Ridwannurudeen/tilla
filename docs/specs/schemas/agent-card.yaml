@@ -1,0 +1,77 @@
+# Pinned JSON Schema (Draft 2020-12) for the Tilla A2A agent card served at
+# GET /.well-known/agent-card.json. Frozen by tilla-protocol-v1: the card
+# advertises Tilla as a whole (skills, payment rail, ERC-8004 registration,
+# discovery entry points) and leaks no merchant wallet. Validated live by
+# tests/test_protocol_goldens.py so the protocol doc can never drift from reality.
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://tilla.gudman.xyz/schemas/agent-card.json"
+title: "Tilla A2A agent card"
+type: object
+additionalProperties: false
+required: [name, description, url, version, skills, payment, registrations, discovery]
+properties:
+  name:
+    type: string
+  description:
+    type: string
+  url:
+    type: string
+    format: uri
+  version:
+    type: string
+  skills:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, x402]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        x402:
+          type: object
+          additionalProperties: true
+          required: [endpoint]
+          properties:
+            endpoint:
+              type: string
+            price:
+              type: string
+  payment:
+    type: object
+    additionalProperties: false
+    required: [protocol, network, asset]
+    properties:
+      protocol:
+        type: string
+      network:
+        type: string
+        pattern: "^eip155:[0-9]+$"
+      asset:
+        type: string
+  registrations:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [standard, agentId, chain]
+      properties:
+        standard:
+          type: string
+        agentId:
+          type: integer
+        chain:
+          type: string
+  discovery:
+    type: object
+    additionalProperties: false
+    required: [resources, search]
+    properties:
+      resources:
+        type: string
+      search:
+        type: string

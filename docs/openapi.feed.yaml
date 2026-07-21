@@ -67,6 +67,11 @@ properties:
               enum: ["one_time", "batch", "metered", "subscription"]
             params:
               type: object
+            # M16 B2B (additive): an opt-in flag that the product offers wholesale
+            # tiers. The tier TABLE itself is never exposed here (INV-B) — only this
+            # boolean; a per-buyer price comes from GET /s/{slug}/quote per-request.
+            wholesale:
+              type: boolean
         x402:
           type: object
           additionalProperties: false

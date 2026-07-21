@@ -1,0 +1,39 @@
+# Pinned JSON Schema (Draft 2020-12) for the B2B wholesale quote served at
+# GET /s/{slug}/quote?agent_id=<id> (M16 tier extension). Frozen by
+# tilla-protocol-v1. The quote is ADVISORY: the tier fields appear only when a
+# tier matches AND the agent id's on-chain owner is verifiable; INV-1 still
+# governs the actual grant at settle (payer wallet == that owner). The tier
+# table itself is NEVER exposed here or in any feed — only the single price this
+# presented id would pay. Validated live by tests/test_protocol_goldens.py.
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://tilla.gudman.xyz/schemas/quote.json"
+title: "Tilla B2B wholesale quote"
+type: object
+additionalProperties: false
+required: [agent_id, base_price_micro, base_price, currency]
+properties:
+  agent_id:
+    type: integer
+    minimum: 0
+  base_price_micro:
+    type: integer
+    minimum: 1
+  base_price:
+    type: string
+  currency:
+    type: string
+  # The tier fields are present together or not at all (fail-to-base omits them).
+  tier_price_micro:
+    type: integer
+    minimum: 1
+  tier_price:
+    type: string
+  owner:
+    type: string
+    pattern: "^0x[0-9a-f]{40}$"
+  requires:
+    type: string
+dependentRequired:
+  tier_price_micro: [tier_price, owner, requires]
+  tier_price: [tier_price_micro, owner, requires]
+  owner: [tier_price_micro, tier_price, requires]
