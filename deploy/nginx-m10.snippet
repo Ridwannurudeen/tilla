@@ -1,0 +1,41 @@
+# M10 nginx routing — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# M10 adds two new top-level x402 platform endpoints. They are NOT under /api/ and
+# NOT under /s/, so nginx must be told to proxy each to the app; otherwise they fall
+# through to the static root and 404.
+#
+# Add TWO location blocks inside the tilla.gudman.xyz server{} block, using the SAME
+# proxy_set_header lines as the existing /api/ block:
+#
+#     location = /upgrade-store {
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... same proxy_set_header lines as the /api/ block ...
+#     }
+#     location = /add-product {
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... same proxy_set_header lines as the /api/ block ...
+#     }
+#
+# Notes:
+# - Exact-match (`location = ...`) is enough — each is a single endpoint that speaks
+#   both POST (do the work) and GET (x402 challenge / service-usage JSON). No
+#   sub-paths.
+# - The x402 paywall + the fee (1 USDT for /upgrade-store, 0.5 USDT for
+#   /add-product, payTo = Tilla's own wallet) are enforced in-app by the same
+#   PaymentMiddlewareASGI that gates /create-store. nginx only needs to route.
+# - GET /s/<slug>/buy now returns a 402 challenge (unpaid) — it rides the EXISTING
+#   /s/ proxy block (added in M7), so NO nginx change is needed for it.
+# - The /api/merchant/marketplace read endpoint rides the pre-existing /api/ block —
+#   no nginx change.
+# - Back up the vhost first: `cp <vhost> <vhost>.bak-m10`. Then `nginx -t` and
+#   `systemctl reload nginx` (NEVER restart). Touch no other vhost.
+#
+# POST-DEPLOY SMOKE (unpaid -> 402, service reachable, not static 404):
+#   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://tilla.gudman.xyz/upgrade-store   # 402
+#   curl -s -o /dev/null -w '%{http_code}\n'      https://tilla.gudman.xyz/upgrade-store       # 402
+#   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://tilla.gudman.xyz/add-product      # 402
+#   curl -s -o /dev/null -w '%{http_code}\n'      https://tilla.gudman.xyz/add-product          # 402
+#   curl -s -o /dev/null -w '%{http_code}\n'      https://tilla.gudman.xyz/s/<slug>/buy          # 402 (unpaid GET)
+#
+# ROLLBACK: remove the two location blocks (or restore <vhost>.bak-m10), `nginx -t`
+# + reload. App rollback = redeploy previous files + `alembic downgrade 0006_merchant_platform`.
