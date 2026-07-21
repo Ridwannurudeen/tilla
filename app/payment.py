@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
 import httpx
 from x402.http import OKXFacilitatorClient, PaymentOption
+from x402.http.types import HTTPRequestContext
 from x402.schemas import AssetAmount
 
 PAYMENT_PROTOCOL = "x402-v2"
@@ -145,5 +147,39 @@ def build_payment_option(rail: PaymentRail) -> PaymentOption:
         ),
         network=rail.network,
         pay_to=rail.pay_to,
+        max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
+    )
+
+
+def build_store_payment_option(rail: PaymentRail) -> PaymentOption:
+    """One WILDCARD PaymentOption for ``POST /s/:slug/buy`` whose pay_to and price
+    are resolved PER REQUEST from the DB (spike-8 dynamic accepts).
+
+    Both hooks are ASYNC (``asyncio.to_thread`` around a sync DB read) on purpose:
+    ``_resolve_value`` only applies ``RouteConfig.hook_timeout_seconds`` to
+    coroutines — a sync hook would be unbounded AND run the blocking read on the
+    event loop. The resolvers NEVER raise (a raising hook returns HTTP 500, not
+    404); on any unknown/invalid/pending/blocked store or DB error they return a
+    deterministic sentinel (pay_to = Tilla's own PAY_TO_ADDRESS, price = 1 micro).
+    The sentinel is safe because funds move only at settle, and settle can never
+    run for a dead store (the handler re-checks and returns >=400, which makes the
+    middleware skip settlement)."""
+    sentinel_pay_to = rail.pay_to
+
+    async def _pay_to(ctx: HTTPRequestContext) -> str:
+        from app.agentic import resolve_pay_to
+
+        return await asyncio.to_thread(resolve_pay_to, ctx.path, sentinel_pay_to)
+
+    async def _price(ctx: HTTPRequestContext) -> AssetAmount:
+        from app.agentic import resolve_price
+
+        return await asyncio.to_thread(resolve_price, ctx.path)
+
+    return PaymentOption(
+        scheme=rail.scheme,
+        price=_price,
+        network=rail.network,
+        pay_to=_pay_to,
         max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
     )
