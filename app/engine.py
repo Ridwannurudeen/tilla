@@ -14,7 +14,7 @@ import time
 import unicodedata
 
 import requests
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -199,8 +199,13 @@ def generate(desc):
         # Malformed output is an outage from the caller's view: fold into the same
         # 503 path as a real outage, never a 500 the buyer/agent can't act on.
         raise GenerationUnavailable("LLM did not return JSON: " + text[:200])
-    raw = json.loads(m.group(0))
-    data = GeneratedContent.model_validate(raw).model_dump()
+    try:
+        raw = json.loads(m.group(0))
+        data = GeneratedContent.model_validate(raw).model_dump()
+    except (json.JSONDecodeError, ValidationError) as exc:
+        # Braces present but unparseable / schema-invalid is still a bad-output
+        # outage from the caller's view — fold into the same 503 path, not a 500.
+        raise GenerationUnavailable(f"LLM returned unusable JSON: {exc}") from exc
     # A missing price_usdt defaults to 0 (pydantic doesn't validate defaults);
     # a 0 amount would make checkout auto-confirm with no payment. Clamp any
     # non-positive price up to a sane floor before it can reach a live store.
