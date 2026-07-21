@@ -95,13 +95,18 @@ def test_unique_slug_maxlen_collision_stays_within_pattern(tmp_path, monkeypatch
     assert re.fullmatch(config.SLUG_PATTERN, slug)
 
 
-def _fake_llm_response(monkeypatch, raw: dict):
+def _fake_llm_response(monkeypatch, raw: dict, usage: dict | None = None):
     class FakeResp:
+        status_code = 200
+
         def raise_for_status(self):
             pass
 
         def json(self):
-            return {"content": [{"text": json.dumps(raw)}]}
+            body = {"content": [{"text": json.dumps(raw)}]}
+            if usage is not None:
+                body["usage"] = usage
+            return body
 
     monkeypatch.setattr("app.engine.requests.post", lambda *a, **k: FakeResp())
 

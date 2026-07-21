@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import unicodedata
 
 import requests
@@ -39,6 +40,22 @@ STORES_DIR = config.STORES_DIR
 DEFAULT_ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"  # demo receive address
 # floor for a live store; a non-positive price would auto-confirm checkout
 MIN_PRICE_USDT = 1.0
+# One in-process retry on a transient Anthropic failure, spaced by this pause.
+LLM_RETRY_SLEEP_SEC = 2.0
+
+
+class GenerationUnavailable(RuntimeError):
+    """The LLM generation step could not complete: an Anthropic outage (connect /
+    timeout error, HTTP 429/5xx/529 after one retry), a non-transient 4xx (bad key),
+    or malformed output. Callers (``_run_create_store`` / ``_run_upgrade_store``) map
+    it to HTTP 503 + Retry-After, which is >= 400 so the x402 middleware skips
+    settlement — a paid create-store during an outage moves ZERO funds."""
+
+
+def _is_transient_status(code: int) -> bool:
+    """HTTP statuses worth one retry: rate limiting and any server-side 5xx
+    (429, 500-599 — covers Anthropic's 529 overloaded)."""
+    return code == 429 or 500 <= code <= 599
 
 
 class GeneratedContent(BaseModel):
@@ -118,6 +135,49 @@ def unique_slug(base: str) -> str:
     return candidate
 
 
+def _post_generation(prompt: str) -> dict:
+    """POST the generation prompt to Anthropic with exactly one retry on a transient
+    outage (connect/timeout error, HTTP 429/5xx/529), spaced by LLM_RETRY_SLEEP_SEC.
+    Returns the parsed 2xx response JSON. Raises GenerationUnavailable on a transient
+    failure that survives the retry, or immediately on a non-transient error (a 4xx
+    such as a bad key — retrying can't help). Never returns a non-2xx body."""
+    headers = {
+        "x-api-key": KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": MODEL,
+        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    for attempt in range(2):  # initial try + at most one retry
+        try:
+            r = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=90)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            if attempt == 0:
+                logger.warning("anthropic transient error, retrying once: %s", exc)
+                time.sleep(LLM_RETRY_SLEEP_SEC)
+                continue
+            raise GenerationUnavailable(f"anthropic unreachable: {exc}") from exc
+        except requests.RequestException as exc:
+            raise GenerationUnavailable(f"anthropic request failed: {exc}") from exc
+        if _is_transient_status(r.status_code):
+            if attempt == 0:
+                logger.warning("anthropic returned %d, retrying once", r.status_code)
+                time.sleep(LLM_RETRY_SLEEP_SEC)
+                continue
+            raise GenerationUnavailable(f"anthropic returned {r.status_code}")
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as exc:
+            logger.error("anthropic non-transient error %d", r.status_code)
+            raise GenerationUnavailable(f"anthropic returned {r.status_code}") from exc
+        return r.json()
+    # Both attempts on a transient path raise above; this guards the contract.
+    raise GenerationUnavailable("anthropic generation exhausted retries")
+
+
 def generate(desc):
     prompt = (
         "You are a world-class brand designer and DTC copywriter. A solo entrepreneur wants to sell "
@@ -132,25 +192,13 @@ def generate(desc):
         "original = sleek modern gradient, bold = high-energy uppercase, editorial = elegant serif). "
         "Make copy crisp and compelling, no placeholders."
     )
-    r = requests.post(
-        ANTHROPIC_URL,
-        headers={
-            "x-api-key": KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": MODEL,
-            "max_tokens": 1024,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=90,
-    )
-    r.raise_for_status()
-    text = r.json()["content"][0]["text"]
+    resp = _post_generation(prompt)
+    text = resp["content"][0]["text"]
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
-        raise ValueError("LLM did not return JSON: " + text[:200])
+        # Malformed output is an outage from the caller's view: fold into the same
+        # 503 path as a real outage, never a 500 the buyer/agent can't act on.
+        raise GenerationUnavailable("LLM did not return JSON: " + text[:200])
     raw = json.loads(m.group(0))
     data = GeneratedContent.model_validate(raw).model_dump()
     # A missing price_usdt defaults to 0 (pydantic doesn't validate defaults);
@@ -162,6 +210,18 @@ def generate(desc):
             MIN_PRICE_USDT,
         )
         data["price_usdt"] = MIN_PRICE_USDT
+    # Surface token spend to the caller (create_store/upgrade_store log it to
+    # event_log) and to journald, so llm cost is queryable per store. Under
+    # reserved keys the caller strips before persisting/rendering content.
+    usage = resp.get("usage") or {}
+    data["_llm_in"] = int(usage.get("input_tokens", 0) or 0)
+    data["_llm_out"] = int(usage.get("output_tokens", 0) or 0)
+    logger.info(
+        "llm usage: model=%s in=%d out=%d",
+        MODEL,
+        data["_llm_in"],
+        data["_llm_out"],
+    )
     return data
 
 
@@ -215,6 +275,10 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     """
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
+    # Strip the token-usage sidecar keys before content is persisted/rendered; they
+    # go into the store.created event instead so spend stays queryable from event_log.
+    llm_in = content.pop("_llm_in", 0)
+    llm_out = content.pop("_llm_out", 0)
     theme_file = _resolve_theme(theme or content.get("theme"))
     outcome = screening.screen(_screening_text(desc, content))
     price_micro = int(round(float(content.get("price_usdt", 0)) * 1e6))
@@ -308,7 +372,7 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                     "api",
                     "store.created",
                     store_id=store.id,
-                    data={"slug": slug},
+                    data={"slug": slug, "llm_in": llm_in, "llm_out": llm_out},
                 )
                 log_event(
                     session,
@@ -355,6 +419,8 @@ def upgrade_store(session, store, description=None, theme=None) -> dict:
     pricing route). Commits in the caller's txn."""
     desc = description if description is not None else (store.description or "")
     content = generate(desc)
+    llm_in = content.pop("_llm_in", 0)
+    llm_out = content.pop("_llm_out", 0)
     theme_file = _resolve_theme(theme) if theme else store.theme
     outcome = screening.screen(_screening_text(desc, content))
     if outcome.status != "allow":
@@ -372,7 +438,11 @@ def upgrade_store(session, store, description=None, theme=None) -> dict:
     _write_store_pages(d, content, store.pay_to, store.slug, theme_file)
     _persist_receipt(session, store.id, outcome.receipt)
     log_event(
-        session, "api", "store.upgraded", store_id=store.id, data={"slug": store.slug}
+        session,
+        "api",
+        "store.upgraded",
+        store_id=store.id,
+        data={"slug": store.slug, "llm_in": llm_in, "llm_out": llm_out},
     )
     session.commit()
     return {
