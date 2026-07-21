@@ -5,15 +5,15 @@
 Run: uvicorn app.main:app --host 127.0.0.1 --port 8040   (EnvironmentFile=/opt/tilla/.env)
 """
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
-import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
-import requests
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -23,7 +23,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
-from app import config
+from app import chain, checkout, config
+from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
 from app.engine import create_store as gen_store
 from app.engine import resume_pending
@@ -32,10 +33,8 @@ from app.screening import ScreeningBlocked
 
 logger = logging.getLogger("tilla")
 
-RPC = os.environ.get("TILLA_RPC", "https://rpc.xlayer.tech")
-USDT = "0x779ded0c9e1022225f8e0630b35a9b54be713736"  # USDT0 on X Layer, 6dp
-DEFAULT_DELIVERY = "Payment received — thank you!"
 _EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_TX_HASH = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 
 @asynccontextmanager
@@ -43,7 +42,18 @@ async def lifespan(app: FastAPI):
     # Retry any stores held in pending_screening from before this process
     # started, so a restart flips recovered ones live instead of stranding them.
     resume_pending()
-    yield
+    # In-process, restart-safe payment sweeper. Disabled via TILLA_SWEEP_ENABLED=0
+    # so the test suite never touches the network.
+    sweeper = None
+    if config.SWEEP_ENABLED:
+        sweeper = asyncio.create_task(checkout.sweeper_loop())
+    try:
+        yield
+    finally:
+        if sweeper is not None:
+            sweeper.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweeper
 
 
 app = FastAPI(
@@ -84,18 +94,6 @@ async def limit_body_size(request: Request, call_next):
                 )
         request._body = body
     return await call_next(request)
-
-
-def balance_of(addr: str) -> float:
-    data = "0x70a08231" + "0" * 24 + addr.lower().replace("0x", "")
-    body = {
-        "jsonrpc": "2.0",
-        "method": "eth_call",
-        "params": [{"to": USDT, "data": data}, "latest"],
-        "id": 1,
-    }
-    res = requests.post(RPC, json=body, timeout=12).json().get("result")
-    return int(res, 16) / 1e6 if res and res != "0x" else 0.0
 
 
 @app.get("/health")
@@ -160,6 +158,33 @@ def create_store_get(
     return _run_create_store(body.description, body.receive_address)
 
 
+class TxBody(BaseModel):
+    tx_hash: str
+
+    @field_validator("tx_hash")
+    @classmethod
+    def _validate_tx_hash(cls, v):
+        if not _TX_HASH.fullmatch(v or ""):
+            raise ValueError("tx_hash must be a 0x-prefixed 32-byte hash")
+        return v.lower()
+
+
+def _order_response(session: Session, order: Order) -> dict:
+    # Surface terminal (delivered / legacy paid) as "paid" so every already-
+    # rendered store's poll (`d.status === 'paid'`) keeps working unchanged.
+    terminal = order.status in checkout.TERMINAL_DELIVERED
+    out = {
+        "id": order.id,
+        "status": "paid" if terminal else order.status,
+        "amount": order.expected_micro / 1e6,
+        "pay_to": order.pay_to,
+    }
+    if terminal:
+        delivery = session.scalar(select(Delivery).where(Delivery.order_id == order.id))
+        out["delivery"] = delivery.payload if delivery else DEFAULT_DELIVERY
+    return out
+
+
 # ---------- store checkout: buyer pays the merchant ----------
 @app.post("/api/checkout/{slug}")
 @limiter.limit("20/minute")
@@ -180,25 +205,17 @@ def create_checkout(
         .where(Product.store_id == store.id, Product.active.is_(True))
         .order_by(Product.id)
     )
-    baseline_micro = round(balance_of(store.pay_to) * 1e6)
-    cid = uuid.uuid4().hex[:16]
-    session.add(
-        Order(
-            id=cid,
-            store_id=store.id,
-            product_id=product.id,
-            pay_to=store.pay_to,
-            amount_micro=product.price_micro,
-            baseline_micro=baseline_micro,
-            status="pending",
-        )
-    )
-    log_event(session, "api", "order.created", store_id=store.id, order_id=cid)
+    try:
+        order = checkout.create_order(session, store, product)
+    except checkout.AmountUnavailable as exc:
+        raise HTTPException(503, "checkout busy, retry") from exc
+    log_event(session, "api", "order.created", store_id=store.id, order_id=order.id)
     session.commit()
     return {
-        "id": cid,
+        "id": order.id,
         "pay_to": store.pay_to,
-        "amount": product.price_micro / 1e6,
+        "amount": order.expected_micro / 1e6,
+        "expires_at": order.expires_at.isoformat(),
         "network": "X Layer (chainId 196)",
         "token": "USDT",
     }
@@ -212,40 +229,34 @@ def checkout_status(
     order = session.get(Order, cid)
     if order is None:
         raise HTTPException(404, "checkout not found")
-    if order.status != "paid":
-        bal_micro = round(balance_of(order.pay_to) * 1e6)
-        # exact integer restatement of the old `bal >= baseline + amount - 1e-6`
-        if bal_micro >= order.baseline_micro + order.amount_micro - 1:
-            order.status = "paid"
-            order.paid_at = datetime.now(timezone.utc)
-            store = session.get(Store, order.store_id)
-            payload = store.delivery if store and store.delivery else DEFAULT_DELIVERY
-            session.add(Delivery(order_id=order.id, kind="text", payload=payload))
-            log_event(
-                session,
-                "engine",
-                "order.paid",
-                store_id=order.store_id,
-                order_id=order.id,
-            )
-            log_event(
-                session,
-                "engine",
-                "order.delivered",
-                store_id=order.store_id,
-                order_id=order.id,
-            )
-            session.commit()
-    out = {
-        "id": order.id,
-        "status": order.status,
-        "amount": order.amount_micro / 1e6,
-        "pay_to": order.pay_to,
-    }
-    if order.status == "paid":
-        delivery = session.scalar(select(Delivery).where(Delivery.order_id == order.id))
-        out["delivery"] = delivery.payload if delivery else DEFAULT_DELIVERY
-    return out
+    if order.status not in checkout.TERMINAL_DELIVERED and order.status != "refunded":
+        checkout.refresh_order(session, order)
+        session.expire(order)  # pick up any conditional-UPDATE transition
+    return _order_response(session, order)
+
+
+@app.post("/api/checkout/{cid}/tx")
+@limiter.limit("10/minute")
+def submit_txhash(
+    request: Request,
+    body: TxBody,
+    cid: str,
+    session: Session = Depends(get_session),
+):
+    order = session.get(Order, cid)
+    if order is None:
+        raise HTTPException(404, "checkout not found")
+    try:
+        checkout.verify_txhash(session, order, body.tx_hash)
+    except checkout.TxAlreadyUsed as exc:
+        raise HTTPException(409, "tx already used") from exc
+    except checkout.TxVerificationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (httpx.HTTPError, chain.ChainError) as exc:
+        raise HTTPException(502, "chain verification unavailable") from exc
+    session.commit()
+    session.expire(order)
+    return _order_response(session, order)
 
 
 # Test-only checkout confirmation shim. Registered ONLY when TILLA_TEST=1 so the
@@ -257,10 +268,18 @@ if os.environ.get("TILLA_TEST") == "1":
         order = session.get(Order, cid)
         if order is None:
             raise HTTPException(404, "no checkout")
-        # drop the baseline below balance so the next status poll confirms paid;
-        # -1000 micro (0.001 USDT) mirrors the old float shim's -0.001 nudge.
-        order.baseline_micro = (
-            round(balance_of(order.pay_to) * 1e6) - order.amount_micro - 1000
+        # Simulate an exact on-chain payment at confirmation depth without touching
+        # the network: confirm + deliver via the real state-machine path.
+        added = order.expected_micro - (order.paid_micro or 0)
+        checkout.apply_transfer(
+            session,
+            order,
+            added,
+            tx_hash="0x" + "9" * 64,
+            log_index=0,
+            block_number=1,
+            from_addr="0x" + "9" * 40,
+            head=10**9,
         )
         session.commit()
         return {"ok": True}
