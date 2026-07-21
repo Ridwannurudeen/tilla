@@ -13,7 +13,7 @@ import sys
 import unicodedata
 
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -22,6 +22,7 @@ from app.db import SessionLocal
 from app.delivery import mint_manage_key
 from app.models import Product, Store, get_or_create_merchant, log_event
 from app.render import render as render_theme
+from app.render import render_og
 
 logger = logging.getLogger("tilla")
 
@@ -32,7 +33,6 @@ STORES_DIR = config.STORES_DIR
 DEFAULT_ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"  # demo receive address
 # floor for a live store; a non-positive price would auto-confirm checkout
 MIN_PRICE_USDT = 1.0
-DEFAULT_THEME = "original.html"  # matches app.render.render's default
 
 
 class GeneratedContent(BaseModel):
@@ -49,6 +49,30 @@ class GeneratedContent(BaseModel):
     price_usdt: float = Field(default=0, ge=0.01, le=10000)
     emoji: str = Field(default="🛍️", max_length=8)
     palette: dict = Field(default_factory=dict)
+    # The LLM's theme suggestion (used only when the caller didn't pick one). A
+    # value outside the allowed set is coerced to the default so a stray
+    # suggestion can never fail generation.
+    theme: str = Field(default="original")
+
+    @field_validator("theme")
+    @classmethod
+    def _coerce_theme(cls, v):
+        return v if v in config.ALLOWED_THEMES else "original"
+
+
+def _resolve_theme(name: str | None) -> str:
+    """Map a short theme name (API- or LLM-supplied) to its template filename,
+    falling back to the default for anything outside the allowed set."""
+    return f"{name}.html" if name in config.ALLOWED_THEMES else config.DEFAULT_THEME
+
+
+def _write_store_pages(d, content: dict, addr: str, slug: str, theme: str) -> None:
+    """Write the two nginx-served static assets for a live store: index.html
+    (the chosen theme) and og.svg (the Open Graph card referenced from its head)."""
+    (d / "index.html").write_text(
+        render_theme(content, addr, slug, theme), encoding="utf-8"
+    )
+    (d / "og.svg").write_text(render_og(content, slug), encoding="utf-8")
 
 
 def slugify(s):
@@ -97,7 +121,9 @@ def generate(desc):
         "store_name (short brand), tagline (<=6 words), hero_headline (punchy, <=8 words), "
         "hero_subcopy (1 sentence), product_name, product_blurb (1-2 sentences, benefit-led), "
         "cta_text (<=4 words), price_usdt (number), emoji (single emoji for the brand), "
-        "palette (object: primary, accent, bg, text as hex colors — modern, high-contrast, premium). "
+        "palette (object: primary, accent, bg, text as hex colors — modern, high-contrast, premium), "
+        "theme (one of exactly: original, bold, editorial — pick the layout that best fits the brand: "
+        "original = sleek modern gradient, bold = high-energy uppercase, editorial = elegant serif). "
         "Make copy crisp and compelling, no placeholders."
     )
     r = requests.post(
@@ -149,11 +175,14 @@ def _screening_text(desc: str, content: dict) -> str:
     )
 
 
-def create_store(desc, addr=None, delivery=None):
+def create_store(desc, addr=None, delivery=None, theme=None):
     """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
     Returns dict; a screening-unavailable outcome returns a pending_screening
     dict with no live page deployed, instead of failing the request outright.
+
+    `theme` is the caller's explicit choice (short name, already validated); when
+    None the LLM's own suggestion is used. The store keeps the resolved theme.
 
     Writes to BOTH the DB (source of truth for checkout and resume) and disk:
     index.html so nginx keeps serving /s/<slug>/, and store.json as one-milestone
@@ -161,6 +190,7 @@ def create_store(desc, addr=None, delivery=None):
     """
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
+    theme_file = _resolve_theme(theme or content.get("theme"))
     status = screening.scan_with_retry(_screening_text(desc, content))
     price_micro = int(round(float(content.get("price_usdt", 0)) * 1e6))
     pending = status == "pending"
@@ -197,11 +227,10 @@ def create_store(desc, addr=None, delivery=None):
                 "delivery": store_delivery,
                 "description": desc,
                 "content": content,
-                "theme": DEFAULT_THEME,
+                "theme": theme_file,
             }
         else:
-            html = render_theme(content, addr, slug)
-            (d / "index.html").write_text(html, encoding="utf-8")
+            _write_store_pages(d, content, addr, slug, theme_file)
             meta = {
                 "slug": slug,
                 "status": "live",
@@ -212,7 +241,7 @@ def create_store(desc, addr=None, delivery=None):
                 # Render inputs, so an import + re-render can rebuild index.html.
                 "description": desc,
                 "content": content,
-                "theme": DEFAULT_THEME,
+                "theme": theme_file,
             }
         (d / "store.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -232,7 +261,7 @@ def create_store(desc, addr=None, delivery=None):
                     # Persist content for LIVE stores too (not just pending), so a
                     # later theme fix can re-render their static index.html.
                     content=content,
-                    theme=DEFAULT_THEME,
+                    theme=theme_file,
                 )
                 session.add(store)
                 session.flush()
@@ -318,8 +347,7 @@ def resume_pending():
                 continue
             d = STORES_DIR / store.slug
             d.mkdir(parents=True, exist_ok=True)
-            html = render_theme(content, store.pay_to, store.slug, store.theme)
-            (d / "index.html").write_text(html, encoding="utf-8")
+            _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
             _mark_store_json_live(d, store.slug)
             store.status = "live"
             log_event(session, "resume", "store.live", store_id=store.id)
@@ -348,8 +376,7 @@ def rerender_stores() -> dict:
                 continue
             d = STORES_DIR / store.slug
             d.mkdir(parents=True, exist_ok=True)
-            html = render_theme(content, store.pay_to, store.slug, store.theme)
-            (d / "index.html").write_text(html, encoding="utf-8")
+            _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
             rendered += 1
     logger.info("rerender_stores: rendered=%d skipped=%d", rendered, skipped)
     return {"rendered": rendered, "skipped": skipped}

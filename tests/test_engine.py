@@ -6,7 +6,13 @@ import respx
 
 from app import config
 from app.config import WARDEN_SCREEN_URL
-from app.engine import _screening_text, generate, slugify, unique_slug
+from app.engine import (
+    _resolve_theme,
+    _screening_text,
+    generate,
+    slugify,
+    unique_slug,
+)
 
 
 def test_slugify_unicode():
@@ -105,6 +111,30 @@ def test_generate_clamps_missing_price(monkeypatch):
     data = generate("i sell a thing")
     assert data["price_usdt"] >= 0.01
     assert data["price_usdt"] != 0
+
+
+def test_generate_returns_llm_theme_suggestion(monkeypatch):
+    _fake_llm_response(monkeypatch, {"store_name": "Loud Co", "theme": "bold"})
+    assert generate("i sell a thing")["theme"] == "bold"
+
+
+def test_generate_coerces_unknown_theme_to_default(monkeypatch):
+    # A stray theme the LLM invents must never fail generation — it's coerced to
+    # the default so create_store keeps working.
+    _fake_llm_response(monkeypatch, {"store_name": "X", "theme": "chartreuse"})
+    assert generate("i sell a thing")["theme"] == "original"
+
+
+def test_generate_defaults_theme_when_absent(monkeypatch):
+    _fake_llm_response(monkeypatch, {"store_name": "X"})
+    assert generate("i sell a thing")["theme"] == "original"
+
+
+def test_resolve_theme_maps_short_name_to_template():
+    assert _resolve_theme("bold") == "bold.html"
+    assert _resolve_theme("editorial") == "editorial.html"
+    assert _resolve_theme(None) == config.DEFAULT_THEME
+    assert _resolve_theme("nope") == config.DEFAULT_THEME
 
 
 @respx.mock

@@ -103,6 +103,13 @@ AMOUNT_OFFSET_MIN = 1
 AMOUNT_OFFSET_MAX = 4999
 AMOUNT_ALLOC_RETRIES = 10
 
+# ---------- M6 themes + SEO ----------
+# The storefront themes a merchant (or the LLM) may choose. The API and the LLM
+# speak the short name; the persisted stores.theme column and the renderer speak
+# the "<name>.html" template filename.
+ALLOWED_THEMES = frozenset({"original", "bold", "editorial"})
+DEFAULT_THEME = "original.html"
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
 

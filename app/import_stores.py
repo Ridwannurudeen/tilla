@@ -19,7 +19,6 @@ from sqlalchemy import select
 
 from app import config
 from app.db import SessionLocal
-from app.engine import DEFAULT_THEME
 from app.models import Product, Store, get_or_create_merchant, log_event
 
 logger = logging.getLogger("tilla")
@@ -79,7 +78,7 @@ def import_stores() -> dict:
                 delivery=meta.get("delivery"),
                 description=meta.get("description"),
                 content=meta.get("content"),
-                theme=meta.get("theme", DEFAULT_THEME),
+                theme=meta.get("theme", config.DEFAULT_THEME),
             )
             session.add(store)
             session.flush()
