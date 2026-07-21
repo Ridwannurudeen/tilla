@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from app import agentic, chain, checkout, config, delivery, mpp
+from app import agentic, chain, checkout, config, delivery, mpp, subscriptions
 from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
 from app.engine import create_store as gen_store
@@ -113,6 +113,9 @@ app.include_router(agentic.router)
 # MPP pay-as-you-go router: always mounted, every endpoint 503s until
 # TILLA_MPP_ENABLED + SA creds are set (fail-closed, no SDK import while dormant).
 app.include_router(mpp.router)
+# Subscription proxy router: always mounted, 503s until TILLA_SUBSCRIPTIONS_ENABLED
+# (fail-closed); even then it only settles via the sidecar when OKX creds exist.
+app.include_router(subscriptions.router)
 
 
 @app.middleware("http")

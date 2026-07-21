@@ -8,3 +8,4 @@ __pycache__/
 stores/
 tilla.db*
 .env
+node_modules/

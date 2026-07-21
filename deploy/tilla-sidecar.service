@@ -1,0 +1,31 @@
+# Tilla subscription sidecar (x402 "period" scheme, Node).
+#
+# Always-on rather than on-demand so the FastAPI proxy's failure mode is a clean
+# 503 (proxy -> httpx -> connection refused) instead of a cold-start race. Bound to
+# 127.0.0.1 only; nginx MUST NOT expose :8790. The unit shares /opt/tilla/.env
+# (chmod 600) with the API; without OKX creds the sidecar's /subscriptions/settle
+# and /health/creds hard-refuse (503) and never contact the facilitator.
+#
+# Install (VPS, one-time):
+#   cp deploy/tilla-sidecar.service /etc/systemd/system/tilla-sidecar.service
+#   cd /opt/tilla/sidecar && npm ci --omit=dev
+#   systemctl daemon-reload && systemctl enable --now tilla-sidecar
+[Unit]
+Description=Tilla subscription sidecar (x402 period, Node)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tilla/sidecar
+# Node 22+. ExecStart uses the absolute node path resolved at install time; adjust
+# if node lives elsewhere (`command -v node`).
+ExecStart=/usr/bin/node /opt/tilla/sidecar/server.js
+Environment=PORT=8790
+EnvironmentFile=/opt/tilla/.env
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

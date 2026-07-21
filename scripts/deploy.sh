@@ -26,6 +26,10 @@ FILES=(
   app/chain.py
   app/checkout.py
   app/delivery.py
+  app/limiter.py
+  app/agentic.py
+  app/mpp.py
+  app/subscriptions.py
   app/import_stores.py
   alembic.ini
   alembic/env.py
@@ -33,10 +37,23 @@ FILES=(
   alembic/versions/0001_persistence_core.py
   alembic/versions/0002_hardened_checkout.py
   alembic/versions/0003_gated_delivery.py
+  alembic/versions/0004_agent_commerce.py
+  alembic/versions/0005_payment_methods.py
   scripts/backup_db.sh
   themes/original.html
   themes/bold.html
   themes/editorial.html
+)
+
+# Subscription sidecar (Node). node_modules is server-owned (installed via
+# `npm ci --omit=dev`), never scp'd. The systemd unit is copied once by hand
+# (see deploy/tilla-sidecar.service header); here we only refresh the JS.
+SIDECAR_FILES=(
+  sidecar/server.js
+  sidecar/sample-buyer.js
+  sidecar/package.json
+  sidecar/package-lock.json
+  sidecar/README.md
 )
 
 cd "$(dirname "$0")/.."
@@ -56,6 +73,16 @@ fi
 # Import any on-disk stores that have no DB row yet (idempotent — re-runs are
 # no-ops). Runs before the restart so a live store's checkout never 404s.
 ssh "$VPS" "cd '$REMOTE' && '$VENV/bin/python' -m app.import_stores"
+
+# Refresh the subscription sidecar JS (dormant unless TILLA_SUBSCRIPTIONS_ENABLED
+# + OKX creds; bound to 127.0.0.1:8790, never nginx-exposed). Only restart it if
+# the unit is already installed — a missing unit is fine (subscribe proxy 503s).
+for f in "${SIDECAR_FILES[@]}"; do
+  ssh "$VPS" "mkdir -p '$REMOTE/$(dirname "$f")'"
+  scp "$f" "$VPS:$REMOTE/$f"
+done
+ssh "$VPS" "test -d '$REMOTE/sidecar/node_modules' || (cd '$REMOTE/sidecar' && npm ci --omit=dev)"
+ssh "$VPS" "systemctl is-enabled tilla-sidecar >/dev/null 2>&1 && systemctl restart tilla-sidecar || true"
 
 ssh "$VPS" "systemctl restart tilla-api"
 

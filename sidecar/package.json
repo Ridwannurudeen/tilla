@@ -1,0 +1,20 @@
+{
+  "name": "sidecar",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@okxweb3/app-x402-core": "^0.2.1",
+    "@okxweb3/app-x402-evm": "^0.2.0",
+    "@okxweb3/x402-express": "^0.1.1",
+    "express": "^4.22.2",
+    "viem": "^2.55.4"
+  }
+}
