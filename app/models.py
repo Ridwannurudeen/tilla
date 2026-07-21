@@ -653,6 +653,48 @@ class AcpSession(Base):
     )
 
 
+class Plugin(Base):
+    """M15.1 provider registry row — the metadata + review-state surface for the
+    three formalized extension points (delivery / payment_rail / theme). Built-ins
+    are seeded ``source='builtin', status='active'``; any external plugin defaults
+    to ``pending_review`` and only an operator act flips it ``active`` (INV-1 keeps
+    external installs to the 'theme' kind until the out-of-process runner ships).
+    UNIQUE(kind, name) makes the seed idempotent and a re-register a conflict.
+    ``artifact_sha256`` is NULL for built-ins (no on-disk artifact) and pins the
+    external artifact's hash otherwise."""
+
+    __tablename__ = "plugins"
+    __table_args__ = (
+        UniqueConstraint("kind", "name", name="uq_plugins_kind_name"),
+        CheckConstraint(
+            "kind IN ('delivery','payment_rail','theme')", name="ck_plugins_kind"
+        ),
+        CheckConstraint("source IN ('builtin','external')", name="ck_plugins_source"),
+        CheckConstraint(
+            "status IN ('pending_review','active','disabled')",
+            name="ck_plugins_status",
+        ),
+        Index("ix_plugins_kind_status", "kind", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    version: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str] = mapped_column(String(10), nullable=False)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending_review",
+        server_default="pending_review",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
 class EventLog(Base):
     __tablename__ = "event_log"
 
