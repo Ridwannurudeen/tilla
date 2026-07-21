@@ -263,6 +263,42 @@ def test_wrong_chain_receipt_never_confirms(make_store, monkeypatch):
 
 
 @respx.mock
+def test_unregistered_network_order_skipped_not_reorged(make_store):
+    """A detected order pinned to a network that has vanished from the registry
+    must be SKIPPED by the promote stage (stays detected — operator problem),
+    never marked reorged/canceled, and must not abort promotion of other orders."""
+    sid = make_store(slug="cc-orphan", pay_to=PAY_TO)
+    tx_good = "0x" + secrets.token_hex(32)
+    exp = 9_000_123
+    respx.post(config.RPC_URL).mock(
+        side_effect=_rpc_handler(
+            {
+                tx_good.lower(): _receipt(
+                    [_log(PAY_TO, exp, tx_good, CANONICAL_CHAIN.asset)]
+                )
+            }
+        )
+    )
+    with SessionLocal() as s:
+        orphan = _order_on(s, sid, "eip155:999999", exp)
+        orphan.status = "detected"
+        orphan.tx_hash = "0x" + secrets.token_hex(32)
+        orphan.block_number = 100
+        good = _order_on(s, sid, CANONICAL_CHAIN.caip2, exp + 1)
+        good.status = "detected"
+        good.tx_hash = tx_good
+        good.block_number = 100
+        good.paid_micro = exp + 1
+        s.commit()
+        checkout._promote_matured(s, head=100 + config.CONFIRMATIONS)
+        s.commit()
+        s.refresh(orphan)
+        s.refresh(good)
+        assert orphan.status == "detected"  # skipped, not reorged/canceled
+        assert good.status in ("confirmed", "delivered")  # promotion not aborted
+
+
+@respx.mock
 def test_wrong_asset_ignored(make_store):
     """Same chain, different token contract: a Transfer of the wrong asset to the
     right recipient for the exact amount is skipped, so it never confirms."""

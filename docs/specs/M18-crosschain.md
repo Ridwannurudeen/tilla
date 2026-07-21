@@ -52,6 +52,12 @@ migration up/down/up passes prod-shape, and new tests
 `test_single_chain_registry_default`, `test_open_order_pins_original_chain` pass.
 
 ### 18.2 — `/supported` probe gate + accepts-list abstraction (M)
+> **Carry-over from the 18.1 review:** the sweeper (`sweep_tick`/`_current_head`/
+> `_active_addresses`/`_match_order`) is pinned to `CANONICAL_CHAIN`, so the moment a
+> second chain can mint orders, 18.2 MUST make sweeping per-chain (own cursor + own
+> head for maturity) or non-canonical orders orphan (funds-received-no-goods unless
+> the buyer submits a txhash). `_promote_matured` already skips unregistered-network
+> rows without killing the tick (18.1 review fix) — keep that invariant.
 Startup (lifespan) read-only probe using the exact spikes.md client
 (`NoRedirectOKXFacilitatorClient(...).get_supported()`); snapshot cached with the
 process (probe failure ⇒ 196-only, never a crash — 196 is grandfathered as the

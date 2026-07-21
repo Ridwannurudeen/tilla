@@ -700,7 +700,18 @@ def _promote_matured(session: Session, head: int):
             Order.block_number <= threshold,
         )
     ).all():
-        if not _receipt_still_valid(o):
+        try:
+            still_valid = _receipt_still_valid(o)
+        except KeyError:
+            # Order pinned to a network no longer in the registry: skip it (it
+            # stays detected until an operator resolves it) instead of letting
+            # one bad row kill the promote stage — and ALL confirmations — every
+            # tick. NOT a reorg: never cancel on a registry gap.
+            logger.warning(
+                "order %s pinned to unregistered network %r — skipped", o.id, o.network
+            )
+            continue
+        if not still_valid:
             _mark_reorged(session, o)
             continue
         over = (o.paid_micro or 0) - o.expected_micro
@@ -718,7 +729,14 @@ def _promote_matured(session: Session, head: int):
             Order.block_number <= threshold,
         )
     ).all():
-        if not _receipt_still_valid(o):
+        try:
+            still_valid = _receipt_still_valid(o)
+        except KeyError:
+            logger.warning(
+                "order %s pinned to unregistered network %r — skipped", o.id, o.network
+            )
+            continue
+        if not still_valid:
             _mark_reorged(session, o)
             continue
         deliver(session, o)
