@@ -16,7 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import affiliates, chain, config, delivery, webhooks
+from app import affiliates, chain, config, delivery, payment, webhooks
 from app.checkout import transition
 from app.models import Order, Refund, Store, log_event
 
@@ -86,7 +86,11 @@ def apply_refund(
     if not order.from_addr:
         raise RefundError(409, "order has no on-chain buyer address to refund")
 
-    receipt = chain.get_transaction_receipt(tx_hash)
+    # Pin refund verification to the order's own chain (its RPC + asset only),
+    # mirroring checkout.verify_txhash: a refund tx on any other chain is never
+    # fetched and a non-``cfg.asset`` transfer is skipped.
+    cfg = payment.chain_for(order.network)
+    receipt = chain.get_transaction_receipt(cfg, tx_hash)
     if receipt is None:
         raise RefundError(400, "transaction not found")
     if str(receipt.get("status", "")).lower() != "0x1":
@@ -98,7 +102,7 @@ def apply_refund(
     new_logs: list[dict] = []
     total = 0
     for lg in receipt.get("logs", []):
-        if (lg.get("address", "") or "").lower() != config.USDT0:
+        if (lg.get("address", "") or "").lower() != cfg.asset:
             continue
         topics = lg.get("topics", [])
         if len(topics) < 3 or topics[0].lower() != config.TRANSFER_TOPIC:

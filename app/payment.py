@@ -12,6 +12,8 @@ from x402.http import OKXFacilitatorClient, PaymentOption
 from x402.http.types import HTTPRequestContext
 from x402.schemas import AssetAmount
 
+from app import config
+
 PAYMENT_PROTOCOL = "x402-v2"
 PAYMENT_FACILITATOR = "okx"
 PAYMENT_SCHEME = "exact"
@@ -29,6 +31,75 @@ PAYMENT_DECIMALS = 6
 PAYMENT_DISPLAY_PRICE = "1 USDT"
 PAYMENT_TIMEOUT_SECONDS = 300
 DEFAULT_FACILITATOR_URL = "https://web3.okx.com"
+
+
+@dataclass(frozen=True)
+class ChainConfig:
+    """One settlement chain's pinned constants. The registry below is the single
+    source every rail/verification path reads instead of scattered module +
+    ``config`` constants, so an order's chain is fixed at creation and a receipt
+    from any other chain can never confirm it."""
+
+    chain_id: int
+    caip2: str
+    rpc_url: str
+    ws_url: str
+    asset: str
+    asset_symbol: str
+    decimals: int
+    eip712_name: str
+    eip712_version: str
+    explorer_tx_base: str
+    canonical: bool
+
+
+# EXACTLY ONE entry — X Layer 196, the canonical USDT0 settlement ledger (INV-2),
+# built from today's constants (``PAYMENT_*`` + ``config.RPC_URL/USDT0/
+# OKLINK_TX_BASE``; ``PAYMENT_ASSET`` and ``config.USDT0`` are the same address).
+# A SECOND chain is 18.2 — gated on the read-only ``/supported`` probe listing
+# ``(exact, <caip2>)`` before an entry is added (never advertise an unsettleable
+# rail, the M8 lesson / INV-1). The commented shape below documents the schema for
+# that future entry; it MUST stay commented until the probe confirms the chain.
+CHAINS: dict[str, ChainConfig] = {
+    PAYMENT_NETWORK: ChainConfig(
+        chain_id=196,
+        caip2=PAYMENT_NETWORK,
+        rpc_url=config.RPC_URL,
+        ws_url="wss://ws.xlayer.tech",
+        asset=PAYMENT_ASSET,
+        asset_symbol=PAYMENT_SYMBOL,
+        decimals=PAYMENT_DECIMALS,
+        eip712_name=PAYMENT_EIP712_NAME,
+        eip712_version=PAYMENT_EIP712_VERSION,
+        explorer_tx_base=config.OKLINK_TX_BASE,
+        canonical=True,
+    ),
+    # "eip155:8453": ChainConfig(
+    #     chain_id=8453,
+    #     caip2="eip155:8453",
+    #     rpc_url="https://…",
+    #     ws_url="wss://…",
+    #     asset="0x…",
+    #     asset_symbol="USDC",
+    #     decimals=6,
+    #     eip712_name="USD Coin",
+    #     eip712_version="2",
+    #     explorer_tx_base="https://…/tx/",
+    #     canonical=False,
+    # ),
+}
+
+CANONICAL_CHAIN: ChainConfig = CHAINS[PAYMENT_NETWORK]
+
+
+def chain_for(network: str) -> ChainConfig:
+    """The pinned :class:`ChainConfig` an order was created on, resolved from its
+    recorded ``network``. Verification uses ONLY this chain's RPC + asset. Raises
+    ``KeyError`` for an unknown network — never falls back to the canonical chain,
+    because silently re-pointing an order to a different ledger is exactly the
+    wrong-chain fund loss the registry exists to prevent."""
+    return CHAINS[network]
+
 
 _FIXED_CONFIGURATION = {
     "TILLA_PAYMENT_FACILITATOR": PAYMENT_FACILITATOR,
@@ -125,13 +196,13 @@ def load_payment_rail(environment: Mapping[str, str]) -> PaymentRail:
         facilitator=PAYMENT_FACILITATOR,
         facilitator_url=facilitator_url,
         scheme=PAYMENT_SCHEME,
-        network=PAYMENT_NETWORK,
-        asset=PAYMENT_ASSET,
+        network=CANONICAL_CHAIN.caip2,
+        asset=CANONICAL_CHAIN.asset,
         amount=PAYMENT_AMOUNT,
-        eip712_name=PAYMENT_EIP712_NAME,
-        eip712_version=PAYMENT_EIP712_VERSION,
-        symbol=PAYMENT_SYMBOL,
-        decimals=PAYMENT_DECIMALS,
+        eip712_name=CANONICAL_CHAIN.eip712_name,
+        eip712_version=CANONICAL_CHAIN.eip712_version,
+        symbol=CANONICAL_CHAIN.asset_symbol,
+        decimals=CANONICAL_CHAIN.decimals,
         display_price=PAYMENT_DISPLAY_PRICE,
         pay_to=pay_to,
     )
@@ -225,7 +296,6 @@ def build_store_payment_options(rail: PaymentRail) -> list[PaymentOption]:
     middleware strips it from the 402 for non-batch stores, and the buy handler
     hard-gates a non-batch aggr payment with a 409 BEFORE settle — so no dishonest
     challenge is served and zero funds move on a mis-scheme."""
-    from app import config
 
     options = [build_store_payment_option(rail)]
     if config.AGGR_DEFERRED_ENABLED:
