@@ -14,9 +14,17 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 import app.main as main
-from app import chain, checkout, config
+from app import chain, checkout, config, delivery
 from app.db import SessionLocal
-from app.models import ChainCursor, Delivery, EventLog, Order, ProcessedTransfer
+from app.models import (
+    ChainCursor,
+    Deliverable,
+    Delivery,
+    Entitlement,
+    EventLog,
+    Order,
+    ProcessedTransfer,
+)
 
 client = TestClient(main.app)
 
@@ -679,3 +687,95 @@ def test_tx_hash_validation_422(make_store, bad):
     assert (
         client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": bad}).status_code == 422
     )
+
+
+# ---------------------------------------- M4: deliver() with a deliverable
+def _confirm_ready(cid, exp, **fields):
+    with SessionLocal() as s:
+        assert checkout.transition(
+            s, cid, ("pending",), "confirmed", paid_micro=exp, **fields
+        )
+        s.commit()
+
+
+def _run_deliver(cid):
+    with SessionLocal() as s:
+        checkout.deliver(s, s.get(Order, cid))
+        s.commit()
+
+
+def test_deliver_without_deliverable_uses_store_text_legacy(make_store):
+    # LEGACY REGRESSION: a store with no deliverable row delivers store.delivery
+    # text exactly as before, and writes no entitlement.
+    _mk(make_store, "legfb", "0x" + "a" * 40, delivery="STORE-TEXT")
+    cid, exp = _order("legfb")
+    _confirm_ready(cid, exp)
+    _run_deliver(cid)
+    with SessionLocal() as s:
+        d = s.scalar(select(Delivery).where(Delivery.order_id == cid))
+        assert d.kind == "text" and d.payload == "STORE-TEXT"
+        assert s.scalar(select(Entitlement).where(Entitlement.order_id == cid)) is None
+
+
+def test_deliver_with_file_deliverable_creates_entitlement(make_store):
+    _mk(make_store, "fdel", "0x" + "a" * 40, delivery="LEGACY")
+    cid, exp = _order("fdel")
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        s.add(
+            Deliverable(
+                store_id=o.store_id,
+                kind="file",
+                file_sha256="ab" * 32,
+                file_name="x.pdf",
+                file_size=10,
+                active=True,
+            )
+        )
+        s.commit()
+    _confirm_ready(cid, exp, from_addr="0x" + "c" * 40)
+    _run_deliver(cid)
+    with SessionLocal() as s:
+        d = s.scalar(select(Delivery).where(Delivery.order_id == cid))
+        assert d.kind == "file" and d.payload == delivery.FILE_READY_MESSAGE
+        ent = s.scalar(select(Entitlement).where(Entitlement.order_id == cid))
+        assert ent is not None
+        assert ent.buyer_addr == "0x" + "c" * 40 and ent.license_key is None
+
+
+def test_deliver_with_text_deliverable_delivers_secret_not_store_text(make_store):
+    _mk(make_store, "txtd", "0x" + "a" * 40, delivery="IGNORED-STORE-TEXT")
+    cid, exp = _order("txtd")
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        s.add(
+            Deliverable(
+                store_id=o.store_id, kind="text", payload="THE-SECRET", active=True
+            )
+        )
+        s.commit()
+    _confirm_ready(cid, exp)
+    _run_deliver(cid)
+    with SessionLocal() as s:
+        d = s.scalar(select(Delivery).where(Delivery.order_id == cid))
+        assert d.kind == "text" and d.payload == "THE-SECRET"
+
+
+def test_deliver_with_license_deliverable_issues_unique_key(make_store):
+    _mk(make_store, "licd", "0x" + "a" * 40)
+    cid, exp = _order("licd")
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        s.add(
+            Deliverable(
+                store_id=o.store_id, kind="license", max_activations=3, active=True
+            )
+        )
+        s.commit()
+    _confirm_ready(cid, exp)
+    _run_deliver(cid)
+    with SessionLocal() as s:
+        ent = s.scalar(select(Entitlement).where(Entitlement.order_id == cid))
+        d = s.scalar(select(Delivery).where(Delivery.order_id == cid))
+        assert ent.license_key.startswith("TILLA-")
+        assert d.kind == "license" and d.payload == ent.license_key

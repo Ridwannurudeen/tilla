@@ -87,6 +87,30 @@ def test_body_at_cap_is_not_rejected_by_size():
     assert r.status_code != 413
 
 
+# ---------- M4 upload: middleware exemption is scoped to multipart only ----------
+def test_deliverable_json_body_still_capped_at_64kb():
+    # The upload-path exemption is ONLY for multipart; a JSON body to the same
+    # path is still buffered and capped at 64KB (regression for the body-cap hole).
+    big = json.dumps({"kind": "text", "payload": "a" * (MAX_BODY_BYTES + 5000)})
+    r = client.post(
+        "/api/stores/whatever/deliverable",
+        content=big,
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 413
+
+
+def test_deliverable_upload_requires_manage_key(make_store):
+    # A store with no manage key (NULL hash) rejects any bearer -> 401, never 500.
+    make_store(slug="upauth", pay_to="0x" + "a" * 40)
+    r = client.post(
+        "/api/stores/upauth/deliverable",
+        headers={"Authorization": "Bearer anything"},
+        files={"file": ("g.pdf", b"data", "application/pdf")},
+    )
+    assert r.status_code == 401
+
+
 def test_malformed_content_length_returns_400():
     # the test client recomputes Content-Length, so exercise the guard directly:
     # a non-numeric header must yield 400, not a 500 from int() blowing up.

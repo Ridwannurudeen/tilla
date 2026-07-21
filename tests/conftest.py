@@ -11,6 +11,10 @@ import pytest
 _TMP = pathlib.Path(tempfile.mkdtemp(prefix="tilla-tests-"))
 os.environ["TILLA_DB_PATH"] = str(_TMP / "test.db")
 os.environ["TILLA_STORES_DIR"] = str(_TMP / "stores")
+# M4 gated delivery: a throwaway files dir + a signing key so the gated endpoints
+# are enabled by default (a fail-closed test monkeypatches config.SIGNING_KEY="").
+os.environ["TILLA_FILES_DIR"] = str(_TMP / "deliverables")
+os.environ["TILLA_SIGNING_KEY"] = "test-signing-key-0123456789abcdef0123456789abcdef"
 # Never start the background sweeper / hit the RPC network from tests; the M3
 # tests drive chain.py directly through respx-mocked httpx instead.
 os.environ["TILLA_SWEEP_ENABLED"] = "0"
