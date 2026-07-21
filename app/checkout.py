@@ -575,20 +575,22 @@ def refresh_order(session: Session, order: Order):
 
 
 # ----------------------------------------------------------- the sweeper
-def _get_or_init_cursor(session: Session, safe_head: int) -> int:
-    row = session.get(ChainCursor, 1)
+def _get_or_init_cursor(session: Session, chain_id: int, safe_head: int) -> int:
+    """The last fully-swept block for ``chain_id`` (cursor keyed per-chain, so a
+    second chain's progress can never rewind the canonical one)."""
+    row = session.get(ChainCursor, chain_id)
     if row is None:
         # First boot: start at the current safe head — no historical backfill storm.
-        session.add(ChainCursor(id=1, last_block=safe_head, updated_at=_now()))
+        session.add(ChainCursor(id=chain_id, last_block=safe_head, updated_at=_now()))
         session.flush()
         return safe_head
     return row.last_block
 
 
-def _set_cursor(session: Session, block: int):
-    row = session.get(ChainCursor, 1)
+def _set_cursor(session: Session, chain_id: int, block: int):
+    row = session.get(ChainCursor, chain_id)
     if row is None:
-        session.add(ChainCursor(id=1, last_block=block, updated_at=_now()))
+        session.add(ChainCursor(id=chain_id, last_block=block, updated_at=_now()))
     else:
         row.last_block = block
         row.updated_at = _now()
@@ -690,11 +692,17 @@ def _process_log(session: Session, network: str, log: dict, head: int, now: date
     )
 
 
-def _promote_matured(session: Session, head: int):
-    """Deliver detected/late_paid orders whose depth has reached CONFIRMATIONS."""
+def _promote_matured(session: Session, network: str, head: int):
+    """Deliver detected/late_paid orders on ``network`` whose depth has reached
+    CONFIRMATIONS. Filtering by ``network`` is required once a second chain can mint
+    orders: ``head`` and ``block_number`` are only comparable WITHIN one chain, so a
+    chain-B order must never be matured against chain-A's head. The unregistered-
+    network skip (KeyError guard below) stays as defence-in-depth for a row whose
+    network vanishes from the registry mid-loop."""
     threshold = head - config.CONFIRMATIONS
     for o in session.scalars(
         select(Order).where(
+            Order.network == network,
             Order.status == "detected",
             Order.block_number.isnot(None),
             Order.block_number <= threshold,
@@ -724,6 +732,7 @@ def _promote_matured(session: Session, head: int):
         deliver(session, o)
     for o in session.scalars(
         select(Order).where(
+            Order.network == network,
             Order.status == "late_paid",
             Order.block_number.isnot(None),
             Order.block_number <= threshold,
@@ -742,23 +751,12 @@ def _promote_matured(session: Session, head: int):
         deliver(session, o)
 
 
-def sweep_tick():
-    """One synchronous sweep: flip expiries, read head, sweep new blocks in
-    <=101-block windows (capped per tick), match transfers, promote matured
-    orders. Every RPC call is time-boxed; the cursor persists per window so a
-    crash mid-tick resumes gap-free."""
-    global LAST_TICK_MONO, LAST_HEAD_MONO
-    LAST_TICK_MONO = time.monotonic()
-    now = _now()
-    # The sweeper scans ONLY the canonical settlement ledger (INV-2); every RPC read
-    # and match below is pinned to it, so a transfer here can never credit an order
-    # created on a different chain.
-    cfg = payment.CANONICAL_CHAIN
-    with SessionLocal() as session:
-        flip_expired(session)
-        release_expired(session)
-        session.commit()
-
+def _sweep_chain(cfg, now: datetime):
+    """One chain's slice of a sweep tick: read ITS head, sweep ITS new blocks against
+    ITS own cursor, match transfers pinned to ITS network, promote ITS matured orders.
+    Own cursor + own head per chain (the 18.2 carry-over): a second chain minting
+    orders can never orphan them, and its head can never mature a canonical order."""
+    global LAST_HEAD_MONO
     head = chain.block_number(cfg)
     LAST_HEAD_MONO = time.monotonic()
     safe_head = head - config.CONFIRMATIONS
@@ -766,7 +764,7 @@ def sweep_tick():
         return
 
     with SessionLocal() as session:
-        cursor = _get_or_init_cursor(session, safe_head)
+        cursor = _get_or_init_cursor(session, cfg.chain_id, safe_head)
         session.commit()
 
     if cursor < safe_head:
@@ -774,7 +772,7 @@ def sweep_tick():
             addresses = _active_addresses(session, cfg.caip2, now)
         if not addresses:
             with SessionLocal() as session:
-                _set_cursor(session, safe_head)
+                _set_cursor(session, cfg.chain_id, safe_head)
                 session.commit()
         else:
             from_block = cursor + 1
@@ -785,14 +783,33 @@ def sweep_tick():
                 with SessionLocal() as session:
                     for log in logs:
                         _process_log(session, cfg.caip2, log, head, now)
-                    _set_cursor(session, to_block)
+                    _set_cursor(session, cfg.chain_id, to_block)
                     session.commit()
                 from_block = to_block + 1
                 windows += 1
 
     with SessionLocal() as session:
-        _promote_matured(session, head)
+        _promote_matured(session, cfg.caip2, head)
         session.commit()
+
+
+def sweep_tick():
+    """One synchronous sweep: flip expiries once, then sweep each enabled chain in
+    turn (own cursor + own head — see :func:`_sweep_chain`), matching transfers and
+    promoting matured orders per-chain. Every RPC call is time-boxed; each chain's
+    cursor persists per window so a crash mid-tick resumes gap-free. With all
+    TILLA_CHAIN_* flags OFF, ``enabled_chains()`` is exactly ``[CANONICAL_CHAIN]``
+    (INV-2), so this is byte-identical to the single-chain sweep."""
+    global LAST_TICK_MONO
+    LAST_TICK_MONO = time.monotonic()
+    now = _now()
+    with SessionLocal() as session:
+        flip_expired(session)
+        release_expired(session)
+        session.commit()
+
+    for cfg in payment.enabled_chains():
+        _sweep_chain(cfg, now)
 
 
 async def sweeper_loop():
