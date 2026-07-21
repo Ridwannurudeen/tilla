@@ -19,7 +19,14 @@ from xml.sax.saxutils import escape
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from itsdangerous import BadSignature, SignatureExpired
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+)
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select, text, update
@@ -890,15 +897,50 @@ class _SubscriptionParams(BaseModel):
     plan_name: str = Field(min_length=1, max_length=120)
 
 
+class _WholesaleTier(BaseModel):
+    # M16 B2B: one buyer-identity-keyed wholesale price. price_micro is a StrictInt
+    # (no float amounts) bounded to the M1 product price range. buyer is either the
+    # sentinel 'any_agent' or 'erc8004:<id>' — validated below.
+    model_config = ConfigDict(extra="forbid")
+    buyer: str
+    price_micro: StrictInt = Field(
+        ge=config.TIER_PRICE_MICRO_MIN, le=config.TIER_PRICE_MICRO_MAX
+    )
+
+    @field_validator("buyer")
+    @classmethod
+    def _v_buyer(cls, v: str) -> str:
+        if v == "any_agent" or re.fullmatch(r"erc8004:\d{1,20}", v):
+            return v
+        raise ValueError("buyer must be 'any_agent' or 'erc8004:<id>'")
+
+
 class PricingBody(BaseModel):
     pricing_model: Literal["one_time", "batch", "metered", "subscription"]
     params: dict | None = None
+    # M16 B2B wholesale tiers — additive on the SAME pricing_params JSON column, no
+    # migration. A pricing call rewrites the product's wholesale terms wholesale:
+    # omitted/None clears any prior tiers (the same replace semantics as params).
+    tiers: list[_WholesaleTier] | None = None
 
 
 _PRICING_PARAM_MODELS = {
     "metered": _MeteredParams,
     "subscription": _SubscriptionParams,
 }
+
+
+def _validate_tiers(tiers: list[_WholesaleTier] | None) -> list[dict] | None:
+    """Normalize wholesale tiers or raise 422: at most TIERS_MAX, no duplicate
+    buyers. Per-tier shape/bounds are already enforced by the pydantic model."""
+    if not tiers:
+        return None
+    if len(tiers) > config.TIERS_MAX:
+        raise HTTPException(422, f"at most {config.TIERS_MAX} wholesale tiers")
+    buyers = [t.buyer for t in tiers]
+    if len(set(buyers)) != len(buyers):
+        raise HTTPException(422, "duplicate tier buyer")
+    return [t.model_dump() for t in tiers]
 
 
 def _validate_pricing_params(model: str, params: dict | None) -> dict | None:
@@ -942,12 +984,15 @@ async def set_pricing(
         raise HTTPException(422, "invalid JSON body") from None
     try:
         parsed = PricingBody.model_validate(body)
-    except ValidationError:
+    except ValidationError as exc:
+        first = exc.errors(include_url=False)[0]
+        loc = ".".join(str(p) for p in first.get("loc", ()))
         raise HTTPException(
             422,
-            "pricing_model must be one of: one_time, batch, metered, subscription",
+            f"invalid pricing body ({loc or 'pricing_model'}): {first.get('msg')}",
         ) from None
     params = _validate_pricing_params(parsed.pricing_model, parsed.params)
+    tiers = _validate_tiers(parsed.tiers)
     product = session.scalar(
         select(Product)
         .where(Product.store_id == store.id, Product.active.is_(True))
@@ -955,8 +1000,12 @@ async def set_pricing(
     )
     if product is None:
         raise HTTPException(409, "store has no active product")
+    # Tiers ride the SAME JSON column under a 'tiers' key alongside any model params.
+    merged = dict(params) if params else {}
+    if tiers:
+        merged["tiers"] = tiers
     product.pricing_model = parsed.pricing_model
-    product.pricing_params = params
+    product.pricing_params = merged or None
     log_event(
         session,
         "api",
@@ -969,6 +1018,7 @@ async def set_pricing(
         "product_id": product.id,
         "pricing_model": parsed.pricing_model,
         "params": params,
+        "tiers": tiers,
     }
 
 

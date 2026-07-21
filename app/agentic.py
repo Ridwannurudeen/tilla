@@ -30,7 +30,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -45,7 +45,7 @@ from x402.http.utils import (
 )
 from x402.schemas import AssetAmount
 
-from app import affiliates, chain, checkout, config, delivery, webhooks
+from app import affiliates, b2b, chain, checkout, config, delivery, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -226,8 +226,14 @@ def enabled_schemes(product: Product) -> list[str]:
 
 
 def _pricing_block(product: Product) -> dict:
-    params = product.pricing_params if isinstance(product.pricing_params, dict) else {}
-    return {"model": _pricing_model(product), "params": params}
+    raw = product.pricing_params if isinstance(product.pricing_params, dict) else {}
+    # M16: wholesale tier tables NEVER leak on a public surface (feed/MCP) — only an
+    # opt-in ``wholesale: true`` flag. Per-buyer prices come from /quote, per-request.
+    params = {k: v for k, v in raw.items() if k != "tiers"}
+    block: dict = {"model": _pricing_model(product), "params": params}
+    if raw.get("tiers"):
+        block["wholesale"] = True
+    return block
 
 
 # ============================================================================
@@ -1108,6 +1114,49 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
             "schemes": enabled_schemes(product),
         },
     }
+
+
+@router.get("/s/{slug}/quote")
+@limiter.limit("30/minute")
+def quote(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    agent_id: str = Query(..., max_length=40),
+    session: Session = Depends(get_session),
+):
+    """M16 B2B: an advisory wholesale quote for a presented ERC-8004 agent id. The
+    tier price is returned ONLY when a tier matches AND the agent id's on-chain
+    owner is verifiable (read-only registry eth_call) — the quote also states that
+    the discount is GRANTED at settle only if the payer wallet equals that owner
+    (INV-1). Any unverifiable claim / RPC outage / no matching tier => base price
+    only (fail-to-base). Public + rate-limited; reveals no other buyer's terms."""
+    store = _live_store(session, slug)
+    if store is None:
+        raise HTTPException(404, "store not found")
+    product = _active_product(session, store.id)
+    if product is None:
+        raise HTTPException(404, "no active product")
+    aid = b2b.parse_agent_id(agent_id)
+    if aid is None:
+        raise HTTPException(422, "agent_id must be a numeric ERC-8004 id")
+    base = product.price_micro
+    body: dict = {
+        "agent_id": aid,
+        "base_price_micro": base,
+        "base_price": _usdt_str(base),
+        "currency": CURRENCY,
+    }
+    tier_price = b2b.match_tier(product, aid)
+    owner = b2b.verify_agent_owner(aid) if tier_price is not None else None
+    if tier_price is not None and owner is not None:
+        body["tier_price_micro"] = tier_price
+        body["tier_price"] = _usdt_str(tier_price)
+        body["owner"] = owner
+        body["requires"] = (
+            "settle payer wallet must equal the agent owner wallet; "
+            "otherwise the base price applies"
+        )
+    return JSONResponse(body, headers=_AGENT_HEADERS)
 
 
 @router.get("/s/{slug}/feed.json")

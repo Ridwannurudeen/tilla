@@ -55,6 +55,12 @@ def block_number(timeout: float | None = None) -> int:
     return int(_rpc("eth_blockNumber", [], timeout), 16)
 
 
+def eth_call(to: str, data: str, timeout: float | None = None) -> str | None:
+    """Read-only contract call against the latest block. Returns the raw hex result
+    (or None). Time-boxed + sema-capped like every other RPC (ChainBusy on cap)."""
+    return _rpc("eth_call", [{"to": to, "data": data}, "latest"], timeout)
+
+
 def pad_address(addr: str) -> str:
     """Left-pad a 20-byte address to a 32-byte log topic."""
     return "0x" + "0" * 24 + addr.lower().replace("0x", "")
