@@ -479,3 +479,76 @@ def test_sentinel_skips_settle_per_chain(clean_snapshot, monkeypatch):
         assert pay_to == PAY_TO  # sentinel = Tilla's own rail payTo, not a merchant
         assert price.amount == "1"  # sentinel price
         assert price.asset == cfg.asset  # each chain names its own settle asset
+
+
+# ==================================================================== 18.4
+# Wrong-chain refusal hardening: a valid-but-nonexistent hash returns the "not
+# found" path with a buyer-facing hint naming the pinned chain, and NEVER triggers
+# a lookup on any other RPC (a cross-chain search would legitimize wrong-chain sends).
+
+
+@respx.mock
+def test_not_found_hint_names_pinned_chain(make_store):
+    """A syntactically valid hash that does not resolve on the order's own chain
+    returns 'not found' with a hint naming the pinned chainId — so the buyer learns
+    they may have paid on the wrong network, without any cross-chain lookup."""
+    sid = make_store(slug="cc-hint", pay_to=PAY_TO)
+    tx = "0x" + secrets.token_hex(32)
+    respx.post(config.RPC_URL).mock(side_effect=_rpc_handler({}))  # tx unknown here
+    with SessionLocal() as s:
+        order = _order_on(s, sid, CANONICAL_CHAIN.caip2, 9_000_123)
+        s.commit()
+        try:
+            checkout.verify_txhash(s, order, tx)
+        except checkout.TxVerificationError as e:
+            assert "not found" in str(e)
+            assert str(CANONICAL_CHAIN.chain_id) in str(e)  # names the pinned chain
+        else:
+            raise AssertionError("a nonexistent tx must not confirm the order")
+
+
+@respx.mock
+def test_no_cross_chain_rpc_search(make_store, monkeypatch):
+    """Only the order's OWN chain RPC host is ever contacted for verification. A
+    second chain's RPC is wired up but must receive ZERO requests — verification
+    never fans out across chains looking for the hash."""
+    monkeypatch.setitem(CHAINS, CHAIN_B.caip2, CHAIN_B)
+    sid = make_store(slug="cc-nofanout", pay_to=PAY_TO)
+    tx = "0x" + secrets.token_hex(32)
+    route_own = respx.post(config.RPC_URL).mock(side_effect=_rpc_handler({}))
+    route_other = respx.post(CHAIN_B.rpc_url).mock(side_effect=_rpc_handler({}))
+    with SessionLocal() as s:
+        order = _order_on(s, sid, CANONICAL_CHAIN.caip2, 9_000_123)
+        s.commit()
+        try:
+            checkout.verify_txhash(s, order, tx)
+        except checkout.TxVerificationError:
+            pass
+    assert route_own.call_count == 1  # exactly one RPC host, one lookup
+    assert not route_other.called
+
+
+@respx.mock
+def test_wrong_recipient_same_chain_ignored(make_store):
+    """A USDT0 transfer of the exact amount on the right chain but to a DIFFERENT
+    recipient never confirms the order (the topic-2 recipient pin)."""
+    sid = make_store(slug="cc-wrongto", pay_to=PAY_TO)
+    tx = "0x" + secrets.token_hex(32)
+    exp = 9_000_123
+    other_to = "0x" + "a" * 40
+    respx.post(config.RPC_URL).mock(
+        side_effect=_rpc_handler(
+            {tx.lower(): _receipt([_log(other_to, exp, tx, CANONICAL_CHAIN.asset)])}
+        )
+    )
+    with SessionLocal() as s:
+        order = _order_on(s, sid, CANONICAL_CHAIN.caip2, exp)
+        s.commit()
+        try:
+            checkout.verify_txhash(s, order, tx)
+        except checkout.TxVerificationError as e:
+            assert "no USDT0 transfer" in str(e)
+        else:
+            raise AssertionError("a transfer to another recipient must not confirm")
+        s.refresh(order)
+        assert order.status == "pending"

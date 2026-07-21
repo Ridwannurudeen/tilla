@@ -423,7 +423,14 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
     cfg = payment.chain_for(order.network)
     receipt = chain.get_transaction_receipt(cfg, tx_hash, config.RPC_TIMEOUT_REQUEST)
     if receipt is None:
-        raise TxVerificationError("transaction not found")
+        # A syntactically valid hash that does not resolve on THIS order's pinned RPC.
+        # We never search any other chain's RPC for it — a cross-chain lookup would
+        # legitimize (and appear to reward) a wrong-chain send, the exact fund-loss
+        # this pin prevents. The buyer-facing hint names the one chain we watch.
+        raise TxVerificationError(
+            f"transaction not found — was it sent on chainId {cfg.chain_id}? "
+            f"Tilla only detects this order's payment on that chain."
+        )
     if str(receipt.get("status", "")).lower() != "0x1":
         raise TxVerificationError("transaction did not succeed on-chain")
 
