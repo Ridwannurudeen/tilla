@@ -33,3 +33,21 @@ jobs:
       - run: ruff format --check sdk/python
       - run: pytest -q
         working-directory: sdk/python
+
+  ts-sdk:
+    # The TypeScript port of tilla-sdk — a self-contained npm package, never part of
+    # the app deploy; it gets its own isolated install + typecheck + test job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - run: npm ci
+        working-directory: sdk/typescript
+      - run: npm run typecheck
+        working-directory: sdk/typescript
+      - run: npm test
+        working-directory: sdk/typescript
