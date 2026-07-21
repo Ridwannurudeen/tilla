@@ -10,6 +10,8 @@ import contextlib
 import logging
 import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Literal
 from xml.sax.saxutils import escape
@@ -20,7 +22,7 @@ from itsdangerous import BadSignature, SignatureExpired
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import FileResponse, JSONResponse, Response
@@ -38,7 +40,13 @@ from app import (
     webhooks,
 )
 from app.checkout import DEFAULT_DELIVERY
-from app.db import get_session
+from app.db import (
+    SessionLocal,
+    current_migration_head,
+    expected_migration_head,
+    get_session,
+)
+from app.engine import GenerationUnavailable
 from app.engine import create_store as gen_store
 from app.engine import rerender_stores, resume_pending, upgrade_store
 from app.limiter import limiter
@@ -66,6 +74,13 @@ _UPLOAD_PATH_RE = re.compile(r"^/api/stores/[^/]+/deliverable$")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Give the default threadpool executor deterministic capacity (16 workers). The
+    # asyncio default is min(32, cpu+4) (~8 on this VPS) and is shared by every
+    # asyncio.to_thread caller — the sweeper/webhook/attest/reaper ticks AND the M7
+    # x402 resolver hooks — so under a burst the buy route's 5s hook_timeout could
+    # trip on queueing alone. Sizing it explicitly is transparent to all callers.
+    worker_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="tilla-worker")
+    asyncio.get_running_loop().set_default_executor(worker_pool)
     # Retry any stores held in pending_screening from before this process
     # started, so a restart flips recovered ones live instead of stranding them.
     resume_pending()
@@ -105,6 +120,9 @@ async def lifespan(app: FastAPI):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        # Don't block shutdown on in-flight worker threads (RPC/hook calls are
+        # already time-boxed); let them drain as the process exits.
+        worker_pool.shutdown(wait=False)
 
 
 async def _prewarm_facilitator() -> None:
@@ -190,6 +208,65 @@ def health():
     return {"ok": True, "service": "tilla", "chain": "X Layer (196)"}
 
 
+@app.get("/ready")
+def ready():
+    """Readiness probe (unauthenticated, unthrottled, never raises — always JSON,
+    200 ready / 503 not). The watchdog polls it every minute. Cost per probe: one
+    sqlite SELECT plus in-memory heartbeat reads; NO network call — an RPC blip
+    surfaces via the sweeper's piggybacked head heartbeat, not a per-probe RPC."""
+    checks: dict[str, str] = {}
+    ready_ok = True
+
+    # (1) DB reachable.
+    try:
+        with SessionLocal() as session:
+            session.execute(text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception:
+        checks["db"] = "error"
+        ready_ok = False
+
+    # (2) Schema at the expected migration head.
+    expected = expected_migration_head()
+    if expected == "unknown":
+        # Could not compute the expected head (alembic.ini absent) — non-fatal.
+        checks["migrations"] = "unknown"
+    else:
+        try:
+            with SessionLocal() as session:
+                current = current_migration_head(session)
+        except Exception:
+            current = None
+        if current == expected:
+            checks["migrations"] = current
+        else:
+            checks["migrations"] = f"expected {expected}, got {current}"
+            ready_ok = False
+
+    # (3) Sweeper heartbeat + (4) RPC head heartbeat — only meaningful with the
+    # sweeper enabled; disabled (tests/dev) reports both as such and never fails.
+    if not config.SWEEP_ENABLED:
+        checks["sweeper"] = "disabled"
+        checks["rpc"] = "disabled"
+    else:
+        tick_age = time.monotonic() - checkout.LAST_TICK_MONO
+        if checkout.LAST_TICK_MONO > 0 and tick_age < config.READY_SWEEP_STALE_SEC:
+            checks["sweeper"] = "ok"
+        else:
+            checks["sweeper"] = "stale"
+            ready_ok = False
+        head_age = time.monotonic() - checkout.LAST_HEAD_MONO
+        if checkout.LAST_HEAD_MONO > 0 and head_age < config.READY_RPC_STALE_SEC:
+            checks["rpc"] = "ok"
+        else:
+            checks["rpc"] = "stale"
+            ready_ok = False
+
+    return JSONResponse(
+        {"ready": ready_ok, "checks": checks}, status_code=200 if ready_ok else 503
+    )
+
+
 @app.get("/sitemap.xml")
 @limiter.limit("60/minute")
 def sitemap(request: Request, session: Session = Depends(get_session)):
@@ -252,6 +329,16 @@ def _run_create_store(
             exc.verdict.get("risk_level"),
         )
         raise HTTPException(422, "content did not pass safety screening") from exc
+    except GenerationUnavailable as exc:
+        # An Anthropic outage (or malformed output) is a 503, not a 500. 503 >= 400,
+        # so the x402 middleware skips settlement — a paid create-store during an
+        # outage moves ZERO funds. No canned/cached fallback store, ever.
+        logger.warning("store generation unavailable: %s", exc)
+        raise HTTPException(
+            503,
+            "store generation temporarily unavailable — retry shortly",
+            headers={"Retry-After": "60"},
+        ) from exc
 
 
 @app.post("/create-store")
@@ -356,6 +443,15 @@ def _run_upgrade_store(
         raise HTTPException(422, "content did not pass safety screening") from exc
     except ScreeningUnavailable as exc:
         raise HTTPException(503, "content screening temporarily unavailable") from exc
+    except GenerationUnavailable as exc:
+        # Same seam as screening-unavailable: 503 (>=400) keeps the old live content
+        # serving and moves zero funds during an Anthropic outage.
+        logger.warning("store upgrade generation unavailable: %s", exc)
+        raise HTTPException(
+            503,
+            "store generation temporarily unavailable — retry shortly",
+            headers={"Retry-After": "60"},
+        ) from exc
 
 
 @app.post("/upgrade-store")

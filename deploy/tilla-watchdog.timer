@@ -1,0 +1,13 @@
+# Runs tilla-watchdog.service ~every 60s (first run 2min after boot). Install steps
+# are in the header of tilla-watchdog.service.
+[Unit]
+Description=Run the Tilla watchdog every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=60s
+AccuracySec=10s
+Unit=tilla-watchdog.service
+
+[Install]
+WantedBy=timers.target

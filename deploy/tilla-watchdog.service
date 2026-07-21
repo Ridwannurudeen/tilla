@@ -1,0 +1,20 @@
+# Tilla watchdog (oneshot; driven by tilla-watchdog.timer). All output -> journald.
+#
+# Install (VPS, one-time):
+#   cp deploy/tilla-watchdog.service /etc/systemd/system/tilla-watchdog.service
+#   cp deploy/tilla-watchdog.timer   /etc/systemd/system/tilla-watchdog.timer
+#   systemctl daemon-reload
+#   systemctl start tilla-watchdog.service   # run once, read the journal (healthy: no restart, no alert)
+#   systemctl enable --now tilla-watchdog.timer
+# Rollback: systemctl disable --now tilla-watchdog.timer; rm the two unit files; daemon-reload.
+[Unit]
+Description=Tilla liveness + readiness watchdog
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/tilla/scripts/watchdog.sh
+# Same proven sandboxing as tilla-sidecar.service. The script only needs curl,
+# systemctl restart tilla-api, and read access to the two marker files under /opt.
+NoNewPrivileges=true
+PrivateTmp=true

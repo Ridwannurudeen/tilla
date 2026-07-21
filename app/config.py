@@ -115,6 +115,16 @@ TRANSFER_TOPIC = (
 # Oversized/hung eth_getLogs calls HANG rather than error on rpc.xlayer.tech, so
 # every RPC call is time-boxed with this client timeout.
 RPC_TIMEOUT = float(os.environ.get("TILLA_RPC_TIMEOUT", "10"))
+# Buyer-facing request paths (refresh_order, verify_txhash) use a SHORTER timeout so
+# a slow RPC can't pin a request thread for the full backfill window; the sweeper
+# keeps RPC_TIMEOUT for its catch-up getLogs windows.
+RPC_TIMEOUT_REQUEST = float(os.environ.get("TILLA_RPC_TIMEOUT_REQUEST", "5"))
+# Concurrency cap on outbound JSON-RPC: a BoundedSemaphore in app.chain lets at most
+# this many threads be in an RPC call at once, so a slow endpoint can't pin the whole
+# anyio threadpool. Excess callers wait up to RPC_ACQUIRE_TIMEOUT then fail fast with
+# ChainBusy (mapped to the existing ChainError paths), instead of queueing for 10s.
+RPC_MAX_CONCURRENT = int(os.environ.get("TILLA_RPC_MAX_CONCURRENT", "8"))
+RPC_ACQUIRE_TIMEOUT = float(os.environ.get("TILLA_RPC_ACQUIRE_TIMEOUT", "2"))
 
 CONFIRMATIONS = int(os.environ.get("TILLA_CONFIRMATIONS", "3"))
 ORDER_TTL_MIN = int(os.environ.get("TILLA_ORDER_TTL_MIN", "30"))
@@ -139,6 +149,16 @@ SWEEP_ENABLED = os.environ.get("TILLA_SWEEP_ENABLED", "1").strip().lower() in (
 AMOUNT_OFFSET_MIN = 1
 AMOUNT_OFFSET_MAX = 4999
 AMOUNT_ALLOC_RETRIES = 10
+
+# ---------- M12 readiness heartbeats (/ready freshness thresholds) ----------
+# /ready reports the sweeper stale if no tick started within this many seconds. The
+# worst healthy catch-up tick is SWEEP_MAX_WINDOWS(10) x RPC_TIMEOUT(10s) ~= 100s, so
+# 180s never false-alarms. Only meaningful with SWEEP_ENABLED (else reported disabled).
+READY_SWEEP_STALE_SEC = float(os.environ.get("TILLA_READY_SWEEP_STALE_SEC", "180"))
+# /ready reports RPC stale if the sweeper hasn't read a chain head within this window.
+# Read as a piggyback heartbeat (no per-probe RPC call), so an RPC outage surfaces on
+# /ready without the watchdog ever burning eth_blockNumber quota.
+READY_RPC_STALE_SEC = float(os.environ.get("TILLA_READY_RPC_STALE_SEC", "300"))
 
 # ---------- M6 themes + SEO ----------
 # The storefront themes a merchant (or the LLM) may choose. The API and the LLM

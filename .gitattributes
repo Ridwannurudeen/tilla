@@ -1,1 +1,5 @@
 *.sh text eol=lf
+deploy/tilla-watchdog.service text eol=lf
+deploy/tilla-watchdog.timer text eol=lf
+deploy/tilla-api-override.conf text eol=lf
+deploy/logrotate-tilla text eol=lf

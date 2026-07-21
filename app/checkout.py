@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -38,6 +39,13 @@ from app.models import (
 logger = logging.getLogger("tilla")
 
 DEFAULT_DELIVERY = "Payment received — thank you!"
+
+# M12 readiness heartbeats: sweep_tick stamps these (time.monotonic) at tick start
+# and right after a successful chain head read, so /ready can flag a dead sweeper or
+# stalled RPC from in-memory reads alone — no per-probe RPC call. Left at 0.0 while
+# the sweeper is disabled (tests/dev), where /ready reports both checks as "disabled".
+LAST_TICK_MONO = 0.0
+LAST_HEAD_MONO = 0.0
 
 # In-flight reservations (unpaid or partially paid): always hold their amount.
 IN_FLIGHT = ("pending", "detected", "underpaid")
@@ -386,7 +394,7 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
         quarantine = timedelta(hours=config.QUARANTINE_HOURS)
         if exp is None or exp + quarantine <= _now():
             raise TxVerificationError("order expired past the payment window")
-    receipt = chain.get_transaction_receipt(tx_hash)
+    receipt = chain.get_transaction_receipt(tx_hash, config.RPC_TIMEOUT_REQUEST)
     if receipt is None:
         raise TxVerificationError("transaction not found")
     if str(receipt.get("status", "")).lower() != "0x1":
@@ -432,7 +440,7 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
         # the transfer's true owner order can still consume it.
         raise TxVerificationError("transfer amount does not match the exact total due")
 
-    head = chain.block_number()
+    head = chain.block_number(config.RPC_TIMEOUT_REQUEST)
     for d in new_logs:
         _record_transfer(
             session,
@@ -512,7 +520,7 @@ def refresh_order(session: Session, order: Order):
 
     if order.status in ("detected", "late_paid") and order.block_number is not None:
         try:
-            head = chain.block_number()
+            head = chain.block_number(config.RPC_TIMEOUT_REQUEST)
         except (httpx.HTTPError, chain.ChainError, ValueError):
             logger.warning("refresh_order: block_number unavailable for %s", order.id)
             return
@@ -690,6 +698,8 @@ def sweep_tick():
     <=101-block windows (capped per tick), match transfers, promote matured
     orders. Every RPC call is time-boxed; the cursor persists per window so a
     crash mid-tick resumes gap-free."""
+    global LAST_TICK_MONO, LAST_HEAD_MONO
+    LAST_TICK_MONO = time.monotonic()
     now = _now()
     with SessionLocal() as session:
         flip_expired(session)
@@ -697,6 +707,7 @@ def sweep_tick():
         session.commit()
 
     head = chain.block_number()
+    LAST_HEAD_MONO = time.monotonic()
     safe_head = head - config.CONFIRMATIONS
     if safe_head < 0:
         return
