@@ -36,6 +36,11 @@ FILES=(
   app/refunds.py
   app/attest.py
   app/warden_hire.py
+  app/affiliates.py
+  app/external_feeds.py
+  app/embed.py
+  app/acp.py
+  assets/embed.js
   alembic.ini
   alembic/env.py
   alembic/script.py.mako
@@ -47,6 +52,7 @@ FILES=(
   alembic/versions/0006_merchant_platform.py
   alembic/versions/0007_marketplace_citizenship.py
   alembic/versions/0008_onchain_receipts.py
+  alembic/versions/0009_growth.py
   scripts/backup_db.sh
   scripts/backup_offsite.sh
   scripts/restore_drill.sh
@@ -127,4 +133,26 @@ if [ "$code" != "402" ]; then
   echo "smoke failed: unpaid POST /create-store returned $code, expected 402" >&2
   exit 1
 fi
+
+# M13 growth smoke. External feeds + embed.js are read-only/static and must 200
+# (these routes require the nginx-growth.snippet locations to be applied first —
+# the orchestrator applies nginx, so on a pre-nginx deploy they may 404 at the edge
+# while answering 200 directly on 127.0.0.1:8040). Waitlist stores an email (silent
+# {ok:true}). ACP create must 503 while TILLA_ACP_ENABLED is unset (dormant mount);
+# flip the flag in .env and re-run only after smoking the tx-hash complete path.
+smoke_code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+for path in "s/invoice-flow/feed/openai.json" "s/invoice-flow/feed/google.xml" \
+            "embed.js" "feeds/openai.json"; do
+  c=$(smoke_code "$BASE/$path")
+  if [ "$c" != "200" ]; then
+    echo "smoke WARN: GET /$path returned $c (expected 200; check nginx-growth.snippet)" >&2
+  fi
+done
+wl=$(smoke_code -X POST "$BASE/api/stores/invoice-flow/waitlist" \
+  -H 'content-type: application/json' -d '{"email":"deploy-smoke@example.com"}')
+[ "$wl" = "200" ] || echo "smoke WARN: waitlist returned $wl (expected 200)" >&2
+acp=$(smoke_code -X POST "$BASE/s/invoice-flow/checkout_sessions" \
+  -H 'content-type: application/json' -d '{}')
+[ "$acp" = "503" ] || echo "smoke WARN: ACP create returned $acp (expected 503 while dormant)" >&2
+
 echo "deploy ok: health up, ready 200, live stores render, create-store gated (402)"

@@ -1,0 +1,74 @@
+# M13 growth nginx routing — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# Additive to the M7 routing (nginx-m7.snippet). Same discipline: orchestrator
+# applies it, build agents never ssh; `nginx -t` then `systemctl reload nginx`
+# (NEVER restart); touch no other vhost (the VPS is shared with live services).
+#
+# Four edits:
+#
+# 1) EXTEND the existing M7 per-store regex alternation to add the two external
+#    feed shapes (both are exact, single-terminal paths — the alternation group may
+#    contain a '/', so `feed/openai\.json` matches `/s/{slug}/feed/openai.json`):
+#
+#        location ~ ^/s/[a-z0-9][a-z0-9-]{0,39}/(buy|mcp|feed\.json|llms\.txt|feed/openai\.json|feed/google\.xml)$ {
+#            limit_req zone=tilla_api burst=10 nodelay;
+#            client_max_body_size 128k;
+#            proxy_pass http://127.0.0.1:8040;
+#            # ... same proxy_set_header lines as the /api/ block ...
+#        }
+#
+# 2) ADD a per-store regex for the ACP checkout_sessions surface (multi-segment:
+#    create, retrieve/update by id, and the /complete + /cancel sub-actions). Kept
+#    separate from the single-segment M7 block because of the deeper path; the two
+#    regexes are disjoint so ordering does not matter:
+#
+#        location ~ ^/s/[a-z0-9][a-z0-9-]{0,39}/checkout_sessions(/[A-Za-z0-9_-]+(/(complete|cancel))?)?$ {
+#            limit_req zone=tilla_api burst=10 nodelay;
+#            client_max_body_size 128k;
+#            proxy_pass http://127.0.0.1:8040;
+#            # ... same proxy_set_header lines as the /api/ block ...
+#        }
+#
+# 3) ADD the Tilla-wide aggregate feed prefix and the embed asset route:
+#
+#        location /feeds/ {
+#            limit_req zone=tilla_api burst=10 nodelay;
+#            proxy_pass http://127.0.0.1:8040;
+#            # ... same proxy_set_header lines as the /api/ block ...
+#        }
+#
+#        location = /embed.js {
+#            proxy_pass http://127.0.0.1:8040;
+#            # ... same proxy_set_header lines as the /api/ block ...
+#        }
+#
+# 4) HARDEN the static store pages against framing (clickjacking). In the EXISTING
+#    `location /s/ {` static-alias block, add:
+#
+#        add_header X-Content-Type-Options "nosniff" always;
+#        add_header X-Frame-Options "SAMEORIGIN" always;
+#
+#    The embed button opens the hosted checkout in a POPUP (never an iframe), so
+#    SAMEORIGIN never blocks a legitimate buy — it only kills the framing class.
+#
+# Notes:
+# - proxy_pass WITHOUT a URI suffix preserves the request path (the app's route +
+#   slug Path pattern do the rest), exactly as the M7 block.
+# - The ACP surface answers 503 until TILLA_ACP_ENABLED is set in /opt/tilla/.env;
+#   the nginx route is still required so the app can return that 503 (and the 201s
+#   after the flag flips). Flip the flag only after smoking the tx-hash complete.
+# - No new upstream, no new zone: reuse tilla_api limit_req and the /api/ headers.
+#
+# POST-DEPLOY SMOKE (answer from the app, not the static alias):
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/s/invoice-flow/feed/openai.json  # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/s/invoice-flow/feed/google.xml   # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/feeds/openai.json                # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/embed.js                         # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://tilla.gudman.xyz/s/invoice-flow/checkout_sessions \
+#        -H 'content-type: application/json' -d '{}'                                                    # 503 (dormant)
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/s/invoice-flow/                  # 200 (still STATIC)
+#   curl -sI https://tilla.gudman.xyz/s/invoice-flow/ | grep -i x-frame-options                        # SAMEORIGIN
+#
+# ROLLBACK: revert the alternation to the M7 form, remove the checkout_sessions /
+# /feeds/ / /embed.js blocks and the two add_header lines, `nginx -t` + reload.
+# No app rollback is coupled to this (unused routes simply 404 at the edge).
