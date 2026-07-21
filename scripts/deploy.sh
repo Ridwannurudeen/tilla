@@ -40,6 +40,7 @@ FILES=(
   app/external_feeds.py
   app/embed.py
   app/acp.py
+  app/growth.py
   assets/embed.js
   alembic.ini
   alembic/env.py
@@ -154,5 +155,12 @@ wl=$(smoke_code -X POST "$BASE/api/stores/invoice-flow/waitlist" \
 acp=$(smoke_code -X POST "$BASE/s/invoice-flow/checkout_sessions" \
   -H 'content-type: application/json' -d '{}')
 [ "$acp" = "503" ] || echo "smoke WARN: ACP create returned $acp (expected 503 while dormant)" >&2
+
+# Growth-kit is merchant-gated: an UNAUTH POST must 401 (proves the route is mounted
+# and gated without spending an LLM call or moving funds). /api/ is already proxied by
+# nginx (no new location needed). Generating a real kit needs the store's manage key
+# and is a user-gated smoke step (one haiku call), not run here.
+gk=$(smoke_code -X POST "$BASE/api/stores/invoice-flow/growth-kit")
+[ "$gk" = "401" ] || echo "smoke WARN: growth-kit unauth POST returned $gk (expected 401)" >&2
 
 echo "deploy ok: health up, ready 200, live stores render, create-store gated (402)"
