@@ -147,13 +147,14 @@ def _subscription_idem_key(sig: str) -> str:
     return "0x" + hashlib.sha256(basis.encode()).hexdigest()
 
 
-def _recovered_payer(sig: str) -> str | None:
-    """The subscription's payer wallet — ``terms.payer`` from the buyer's decoded
-    PAYMENT-SIGNATURE, lowercased. This is the signer ``verifySubscribe`` binds the
-    termsSignature to; it is recorded on the Order at first settle and required to
-    match on every same-store replay, so a captured (public) terms-signature can
-    never hand another wallet this store's goods. None when the envelope carries no
-    decodable payer (the replay guard then fail-closes on any mismatch)."""
+def _payer_from_terms(sig: str) -> str | None:
+    """``terms.payer`` from the buyer's decoded PAYMENT-SIGNATURE, lowercased — used
+    only to RECORD from_addr at first settle, where the on-chain facilitator settle
+    has already bound termsSignature -> terms.payer (EIP-712 SubscriptionTerms
+    includes ``payer``), so the recorded value is authentic. This field is NOT an
+    authenticator on replay: it is plaintext in a public envelope and anyone can
+    resubmit it, so replay never trusts it (goods are gated behind the wallet
+    session instead — see ``_subscription_body(include_gated=...)``)."""
     try:
         decoded = json.loads(base64.b64decode(sig))
         inner = decoded.get("payload") if isinstance(decoded, dict) else None
@@ -162,15 +163,6 @@ def _recovered_payer(sig: str) -> str | None:
         return payer.lower() if isinstance(payer, str) and payer else None
     except Exception:
         return None
-
-
-def _require_payer(order: Order, payer: str | None) -> None:
-    """Fail-closed payer binding: the replaying request's recovered signer MUST equal
-    the payer recorded on the order at first settle (both lowercased, checksum-
-    agnostic). Any mismatch -> 403 BEFORE any delivery, so a non-signer replaying a
-    public terms-signature gets goods refused, not handed over."""
-    if (order.from_addr or "").lower() != (payer or "").lower():
-        raise HTTPException(403, "subscription payer mismatch")
 
 
 async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
@@ -182,7 +174,7 @@ async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
     a facilitator settle failure / 503 -> the same status, NO Order; only a
     facilitator success creates the Order + delivers."""
     idem_key = _subscription_idem_key(sig)
-    payer = _recovered_payer(sig)
+    payer = _payer_from_terms(sig)
     replay = await asyncio.to_thread(_subscription_replay, ctx, idem_key, payer)
     if replay is not None:
         return JSONResponse(replay, headers=_SUB_HEADERS)
@@ -223,9 +215,20 @@ async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
     return JSONResponse(body_out, headers=_SUB_HEADERS)
 
 
-def _subscription_body(session, order: Order, ctx: dict) -> dict:
-    """Build the subscribe response body for an order, delivering through the exact
-    M3/M4 ``checkout.deliver`` path (idempotent, so it is identical on a replay)."""
+def _subscription_body(session, order: Order, ctx: dict, include_gated: bool) -> dict:
+    """Build the subscribe response body, delivering through the exact M3/M4
+    ``checkout.deliver`` path (idempotent).
+
+    ``include_gated`` mirrors ``main._order_response``: the FIRST settle is
+    authenticated by the on-chain facilitator settle (termsSignature bound to the
+    payer), so it may return the gated goods inline. A REPLAY carries only a public,
+    re-submittable envelope — it is NOT re-authenticated, so for an entitlement-
+    backed deliverable the payload is withheld and replaced by the neutral claim
+    message; the real payer retrieves the goods via the wallet-session ``/api/library``
+    (personal_sign as ``from_addr``), which an envelope-replayer cannot forge. A
+    legacy text order (no entitlement) passes through unchanged."""
+    from app.models import Entitlement
+
     product = session.get(Product, ctx["product_id"])
     delivery_row = checkout.deliver(session, order)
     body = {
@@ -235,9 +238,25 @@ def _subscription_body(session, order: Order, ctx: dict) -> dict:
         "amount_micro": ctx["amount_per_period_micro"],
         "period_sec": ctx["period_sec"],
         "kind": delivery_row.kind if delivery_row else "text",
-        "delivery": delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY,
     }
-    agentic._augment_agent_gated(session, order, body)
+    ent = session.scalar(select(Entitlement).where(Entitlement.order_id == order.id))
+    if include_gated:
+        body["delivery"] = (
+            delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY
+        )
+        agentic._augment_agent_gated(session, order, body)
+    elif ent is not None:
+        # Unauthenticated replay + entitlement-backed goods: gate behind the wallet
+        # session. Delivery.payload IS the license key / text secret, so never echo
+        # it and never mint a download token here.
+        from app.main import CLAIM_DELIVERY_MESSAGE
+
+        body["delivery"] = CLAIM_DELIVERY_MESSAGE
+        body["claim"] = True
+    else:
+        body["delivery"] = (
+            delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY
+        )
     return body
 
 
@@ -256,11 +275,10 @@ def _subscription_replay(ctx: dict, idem_key: str, payer: str | None) -> dict | 
         )
         if order is None:
             return None
-        # Same-store payer binding: refuse to deliver unless the replaying request's
-        # recovered signer equals the payer recorded at first settle. Checked BEFORE
-        # _subscription_body (which delivers), so a mismatch delivers nothing.
-        _require_payer(order, payer)
-        body = _subscription_body(session, order, ctx)
+        # A replay is NOT re-authenticated (the envelope is public and re-submittable),
+        # so entitlement-backed goods are withheld here — the real payer claims them via
+        # the wallet-session /api/library. include_gated=False.
+        body = _subscription_body(session, order, ctx, include_gated=False)
         session.commit()
         return body
 
@@ -300,8 +318,10 @@ def _fulfill_subscription(
             )
             if existing is None:
                 raise
-            _require_payer(existing, payer)
-            body = _subscription_body(session, existing, ctx)
+            # Lost the settle race to a concurrent request: the winner already
+            # delivered. Treat like a replay — withhold gated goods (claim via
+            # wallet session). include_gated=False.
+            body = _subscription_body(session, existing, ctx, include_gated=False)
             session.commit()
             return body
         log_event(
@@ -312,7 +332,9 @@ def _fulfill_subscription(
             order_id=order.id,
             data={"reference": reference} if isinstance(reference, dict) else None,
         )
-        body = _subscription_body(session, order, ctx)
+        # First settle: the on-chain facilitator settle authenticated the payer, so
+        # the gated goods may be returned inline. include_gated=True.
+        body = _subscription_body(session, order, ctx, include_gated=True)
         session.commit()
         return body
 

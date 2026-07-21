@@ -6,6 +6,7 @@ verify/settle path — only a mocked facilitator settle SUCCESS creates an Order
 verify reject, a settle failure, or an unreachable sidecar creates NOTHING.
 """
 
+import json
 import httpx
 import respx
 from fastapi.testclient import TestClient
@@ -272,12 +273,24 @@ ATTACKER = "0x" + "e" * 40
 TERMS_SIG = "0xdeadbeef"
 
 
+def _add_license_deliverable(store_id: int) -> None:
+    from app.models import Deliverable
+
+    with SessionLocal() as s:
+        s.add(Deliverable(store_id=store_id, kind="license", active=True))
+        s.commit()
+
+
 @respx.mock
-def test_replay_by_nonsigner_refused(monkeypatch):
-    # Attacker replays PAYER's public terms-signature but with their own payer field:
-    # same idem_key (termsSignature) hits PAYER's order, recovered signer != bound
-    # payer -> 403, goods refused, no duplicate order, no re-settle.
-    _sub_store("sb1")
+def test_replay_withholds_entitlement_goods(monkeypatch):
+    # The real defense: an entitlement-backed subscription (license key) is delivered
+    # INLINE only on first settle (authenticated by the on-chain facilitator settle).
+    # A replay of the PUBLIC envelope — by ANYONE, incl. an attacker swapping the
+    # plaintext payer field — is NOT re-authenticated, so the secret is withheld and
+    # replaced by the claim message; the real payer retrieves it via the wallet-session
+    # /api/library (personal_sign as from_addr), which a replayer cannot forge.
+    sid = _sub_store("sb1")
+    _add_license_deliverable(sid)
     _enable(monkeypatch)
     _mock_challenge()
     respx.post(f"{SIDECAR}/subscriptions/verify").mock(
@@ -291,17 +304,26 @@ def test_replay_by_nonsigner_refused(monkeypatch):
         json=reqs,
     )
     assert r1.status_code == 200
-    assert _orders()[0].from_addr == PAYER  # bound at first settle, lowercased
+    first = r1.json()
+    assert first.get("license_key")  # first settle delivers the secret inline
+    secret = first["license_key"]
+    assert _orders()[0].from_addr == PAYER  # recorded from the on-chain-bound settle
 
+    # Attacker replays with their own payer field swapped in — still same order (idem
+    # on termsSignature), but the secret is gone.
     r2 = client.post(
         "/s/sb1/subscribe",
         headers={"PAYMENT-SIGNATURE": _sub_sig(ATTACKER, TERMS_SIG)},
         json=reqs,
     )
-    assert r2.status_code == 403
-    assert "delivery" not in r2.json()  # wrong signer never gets goods
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert "license_key" not in body2  # secret withheld on replay
+    assert body2.get("claim") is True
+    assert secret not in json.dumps(body2)  # the key never leaks anywhere in the body
+    assert body2["order_id"] == first["order_id"]  # same order, no duplicate
     assert len(_orders()) == 1
-    assert settle.call_count == 1  # the refused replay never re-hit the facilitator
+    assert settle.call_count == 1  # replay never re-hit the facilitator
 
 
 @respx.mock
