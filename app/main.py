@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from app import agentic, chain, checkout, config, delivery
+from app import agentic, chain, checkout, config, delivery, mpp
 from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
 from app.engine import create_store as gen_store
@@ -110,6 +110,9 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(agentic.router)
+# MPP pay-as-you-go router: always mounted, every endpoint 503s until
+# TILLA_MPP_ENABLED + SA creds are set (fail-closed, no SDK import while dormant).
+app.include_router(mpp.router)
 
 
 @app.middleware("http")

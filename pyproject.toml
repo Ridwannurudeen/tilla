@@ -15,6 +15,13 @@ dependencies = [
     "jinja2==3.1.6",
     "pydantic==2.13.4",
     "okxweb3-app-x402==0.1.0",
+    # MPP pay-as-you-go (M8). RUNTIME deps: the SA client (okxweb3-app-mpp, which
+    # installs module `mpp_evm`) and its base (pympp -> module `mpp`) are imported
+    # LAZILY inside app/mpp.py only when TILLA_MPP_ENABLED + SA creds are set, so
+    # they never load while the rail is dormant — but they must be installed for
+    # that live path to exist. Pinned to the verified versions.
+    "pympp==0.9.1",
+    "okxweb3-app-mpp==0.1.0",
     "slowapi==0.1.10",
     "sqlalchemy==2.0.51",
     "alembic==1.18.5",
