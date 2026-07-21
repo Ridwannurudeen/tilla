@@ -52,6 +52,30 @@ describe("x402 codec", () => {
     expect(challenge?.acceptedRaw.payTo).toBe(challenge?.payTo);
   });
 
+  it("rejects non-canonical integer amounts outright (parity with Python int())", () => {
+    for (const bad of ["1e7", "100junk", "-1", "1.5", ""]) {
+      const doctored = {
+        x402Version: 2,
+        accepts: [
+          {
+            scheme: "exact",
+            network: "eip155:196",
+            asset: USDT0_ASSET,
+            amount: bad,
+            payTo: "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51",
+            maxTimeoutSeconds: 300,
+            extra: { name: "USD₮0", version: "1" },
+          },
+        ],
+      };
+      const header = Buffer.from(JSON.stringify(doctored)).toString("base64");
+      const required = decodePaymentRequired(header);
+      expect(() =>
+        selectRequirement(required, EXACT_SCHEME, X_LAYER_NETWORK),
+      ).toThrow(/non-integer amount/);
+    }
+  });
+
   it("returns null on scheme or network mismatch", () => {
     const required = decodePaymentRequired(PAYMENT_REQUIRED_FIXTURE);
     expect(

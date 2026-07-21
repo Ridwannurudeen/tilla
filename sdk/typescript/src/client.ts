@@ -403,6 +403,8 @@ export class TillaClient {
       maxAmountMicro: number;
       receiveAddress?: string;
       theme?: string;
+      /** Refuse (before signing) unless the 402 challenge's payTo matches. */
+      pinPayTo?: string;
     },
   ): Promise<StoreCreated> {
     const body: JsonObject = { description };
@@ -412,6 +414,7 @@ export class TillaClient {
       signer: opts.signer,
       maxAmountMicro: opts.maxAmountMicro,
       json: body,
+      pinPayTo: opts.pinPayTo,
     });
     return storeCreatedFromJson(data, settleTx);
   }

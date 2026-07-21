@@ -83,12 +83,13 @@ export function selectRequirement(
       continue;
     }
     const extra = isObject(accept.extra) ? accept.extra : {};
-    const amount = Number.parseInt(String(accept.amount), 10);
-    if (!Number.isInteger(amount)) {
+    const amountStr = String(accept.amount);
+    if (!/^\d+$/.test(amountStr)) {
       throw new Error(
-        `x402 requirement carried a non-integer amount: ${String(accept.amount)}`,
+        `x402 requirement carried a non-integer amount: ${amountStr}`,
       );
     }
+    const amount = Number.parseInt(amountStr, 10);
     const timeout = Number.parseInt(String(accept.maxTimeoutSeconds ?? 0), 10);
     return {
       scheme: typeof accept.scheme === "string" ? accept.scheme : "",

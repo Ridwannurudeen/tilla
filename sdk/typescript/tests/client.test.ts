@@ -400,6 +400,26 @@ describe("x402 funds-safety", () => {
     });
   }
 
+  it("createStore refuses before signing when pinPayTo mismatches the challenge", async () => {
+    const m = mockFetch(
+      () =>
+        new Response(null, {
+          status: 402,
+          headers: { [PAYMENT_REQUIRED_HEADER]: required(accept({})) },
+        }),
+    );
+    const signer = new FakeSigner();
+    await expect(
+      client(m.fetch).createStore("a coffee shop", {
+        signer,
+        maxAmountMicro: 2000000,
+        pinPayTo: `0x${"ab".repeat(20)}`,
+      }),
+    ).rejects.toBeInstanceOf(PaymentRefused);
+    expect(signer.calls).toEqual([]);
+    expect(m.calls()).toBe(1);
+  });
+
   it("refuses a 402 with no PAYMENT-REQUIRED header", async () => {
     const m = mockFetch(() => new Response(null, { status: 402 }));
     const signer = new FakeSigner();
