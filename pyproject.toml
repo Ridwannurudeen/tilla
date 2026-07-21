@@ -29,6 +29,8 @@ dev = [
     "respx==0.23.1",
     "coverage==7.15.2",
     "ruff==0.15.22",
+    "jsonschema==4.26.0",
+    "pyyaml==6.0.3",
 ]
 
 [tool.setuptools]
