@@ -132,3 +132,40 @@ def test_scan_with_retry_never_swallows_block():
     )
     with pytest.raises(screening.ScreeningBlocked):
         screening.scan_with_retry("text", attempts=2)
+
+
+# ---------- M10 screen() dispatch (demo path — paid path is in test_warden_hire) ----
+@respx.mock
+def test_screen_demo_allow_returns_demo_receipt():
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"verdict": "ALLOW", "risk_level": "none"}
+        )
+    )
+    outcome = screening.screen("safe")
+    assert outcome.status == "allow"
+    assert outcome.receipt is not None
+    assert outcome.receipt.mode == "demo"
+    assert outcome.receipt.verdict == "ALLOW"
+    assert outcome.receipt.endpoint == WARDEN_SCREEN_URL
+    assert outcome.receipt.amount_micro is None
+    assert outcome.receipt.tx_hash is None
+
+
+@respx.mock
+def test_screen_demo_pending_has_no_receipt():
+    respx.post(WARDEN_SCREEN_URL).mock(return_value=httpx.Response(503))
+    outcome = screening.screen("text", attempts=2)
+    assert outcome.status == "pending"
+    assert outcome.receipt is None
+
+
+@respx.mock
+def test_screen_demo_block_propagates():
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"verdict": "BLOCK", "risk_level": "high"}
+        )
+    )
+    with pytest.raises(screening.ScreeningBlocked):
+        screening.screen("bad")

@@ -252,6 +252,77 @@ def test_migration_0006_additive_and_index_survives(tmp_path):
     con.close()
 
 
+def test_migration_0007_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m10.db"
+    r = _alembic(db, "upgrade", "0006_merchant_platform")
+    assert r.returncode == 0, r.stderr
+
+    # seed a live store against the 0006 schema (no marketplace_* columns yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    assert "screening_receipts" in _table_names(db)
+
+    con = sqlite3.connect(db)
+    scols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert {"marketplace_status", "marketplace_listed_at"} <= scols
+    # additive column backfills to 'unlisted' for the existing store
+    assert (
+        con.execute("SELECT marketplace_status FROM stores WHERE id=1").fetchone()[0]
+        == "unlisted"
+    )
+    sddl = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='stores'"
+    ).fetchone()[0]
+    assert "ck_stores_marketplace_status" in sddl  # CHECK survives the batch rebuild
+    assert "UNIQUE" in sddl.upper()  # slug uniqueness preserved
+    rddl = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='screening_receipts'"
+    ).fetchone()[0]
+    assert "ck_screening_receipts_mode" in rddl
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    # stores rebuild must not touch the M3 partial unique index on orders
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "downgrade", "0006_merchant_platform")
+    assert r.returncode == 0, r.stderr
+    assert "screening_receipts" not in _table_names(db)
+    con = sqlite3.connect(db)
+    scols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert "marketplace_status" not in scols
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx  # untouched by the downgrade too
+    con.close()
+
+
+def test_fresh_schema_has_marketplace_and_receipts():
+    # Fresh create_all (conftest) must match the migrated schema: the new column +
+    # table exist on the in-process engine used by the app/tests.
+    from sqlalchemy import inspect as _inspect
+
+    insp = _inspect(engine)
+    scols = {c["name"] for c in insp.get_columns("stores")}
+    assert {"marketplace_status", "marketplace_listed_at"} <= scols
+    assert "screening_receipts" in insp.get_table_names()
+
+
 def test_migration_0002_downgrade_backfills_null_baseline(tmp_path):
     import sqlite3
 

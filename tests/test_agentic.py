@@ -301,6 +301,41 @@ def test_mcp_create_checkout_then_pay():
         assert s.get(Order, checkout_id).status in ("delivered", "paid")
 
 
+def test_mcp_create_checkout_optional_product_id(make_store):
+    # M10: a store with multiple products can target one via product_id; omitting it
+    # keeps the primary-product behaviour byte-identical.
+    sid = make_store(slug="mcp-multi", price_micro=9_000_000)
+    with SessionLocal() as s:
+        s.add(Product(store_id=sid, name="Second", price_micro=2_000_000, active=True))
+        s.commit()
+        pid2 = s.scalar(
+            select(Product.id).where(
+                Product.store_id == sid, Product.price_micro == 2_000_000
+            )
+        )
+    targeted = _mcp(
+        "mcp-multi",
+        "tools/call",
+        {"name": "create_checkout", "arguments": {"product_id": pid2}},
+    ).json()["result"]["structuredContent"]
+    assert 2_000_001 <= targeted["amount_micro"] <= 2_004_999
+    default = _mcp("mcp-multi", "tools/call", {"name": "create_checkout"}).json()[
+        "result"
+    ]["structuredContent"]
+    assert 9_000_001 <= default["amount_micro"] <= 9_004_999
+
+
+def test_mcp_create_checkout_unknown_product_id_is_tool_error(make_store):
+    make_store(slug="mcp-nope", price_micro=1_000_000)
+    r = _mcp(
+        "mcp-nope",
+        "tools/call",
+        {"name": "create_checkout", "arguments": {"product_id": 999999}},
+    ).json()["result"]
+    assert r["isError"] is True
+    assert "not found" in r["structuredContent"]["error"]
+
+
 # ------------------------------------------------------------ discovery
 def test_discovery_resources_live_only_and_caps():
     _seed(slug="live-a")
