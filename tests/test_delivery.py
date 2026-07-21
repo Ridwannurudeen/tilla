@@ -102,7 +102,10 @@ def _buy_file(
     )
     cid = _order(slug)
     _confirm(cid, buyer, tx)
-    body = client.get(f"/api/checkout/{cid}").json()
+    # download_url is gated off the unauth poll (M5 cid-bearer fix); the magic-link
+    # capability path re-mints it identically to the M4 shape.
+    token = delivery.mint_redeliver_token(cid)
+    body = client.get(f"/api/redeliver/{token}").json()
     return cid, body.get("download_url")
 
 
@@ -574,7 +577,10 @@ def _license_key(make_store, slug) -> str:
     )
     cid = _order(slug)
     _confirm(cid, "0x" + "b" * 40, "0x" + "5" * 64)
-    body = client.get(f"/api/checkout/{cid}").json()
+    # license_key is gated off the unauth poll (M5 cid-bearer fix); read it from
+    # the magic-link capability path instead.
+    token = delivery.mint_redeliver_token(cid)
+    body = client.get(f"/api/redeliver/{token}").json()
     assert body["license_key"].startswith("TILLA-")
     return body["license_key"]
 
@@ -720,3 +726,135 @@ def test_gated_endpoints_503_when_signing_key_unset(make_store, monkeypatch):
     _confirm(cid, "0x" + "b" * 40, "0x" + "6" * 64)
     body = client.get(f"/api/checkout/{cid}").json()
     assert body["status"] == "paid" and body["delivery"] == "LEGACY-STILL-WORKS"
+
+
+# ------------------------------------------------- M5 cid-bearer gating
+def test_unauth_poll_hides_file_download_url_and_gates_delivery(make_store):
+    # The 64-bit cid leaks via history/logs/Referer, so the unauth GET poll must
+    # never surface a download link and must gate `delivery` itself, replacing it
+    # with the neutral claim message + kind/claim so the page shows sign-to-claim.
+    make_store(slug="filehide", pay_to="0x" + "a" * 40, delivery="LEGACY")
+    key = _give_key("filehide")
+    assert _upload_file("filehide", key).status_code == 200
+    cid = _order("filehide")
+    _confirm(cid, "0x" + "b" * 40, "0x" + "1" * 64)
+
+    poll = client.get(f"/api/checkout/{cid}").json()
+    assert poll["status"] == "paid"
+    assert "download_url" not in poll
+    assert "license_key" not in poll
+    assert poll["delivery"] == main.CLAIM_DELIVERY_MESSAGE
+    assert poll["kind"] == "file" and poll["claim"] is True
+    assert poll["tx_hash"] == "0x" + "1" * 64
+    assert isinstance(poll["amount_micro"], int) and poll["amount_micro"] > 0
+
+
+def test_unauth_poll_hides_license_key_everywhere(make_store):
+    # The license key IS the Delivery payload — the pre-M5 leak was through the
+    # `delivery` field. Assert it appears in NO value of the unauth poll.
+    make_store(slug="lichide", pay_to="0x" + "a" * 40, delivery="LEGACY")
+    key = _give_key("lichide")
+    assert (
+        client.post(
+            "/api/stores/lichide/deliverable",
+            headers=_auth(key),
+            json={"kind": "license", "max_activations": 2},
+        ).status_code
+        == 200
+    )
+    cid = _order("lichide")
+    _confirm(cid, "0x" + "b" * 40, "0x" + "5" * 64)
+
+    poll = client.get(f"/api/checkout/{cid}").json()
+    assert "license_key" not in poll
+    assert poll["delivery"] == main.CLAIM_DELIVERY_MESSAGE
+    assert poll["kind"] == "license" and poll["claim"] is True
+    with SessionLocal() as s:
+        real = s.scalar(select(Entitlement)).license_key
+    assert real and real.startswith("TILLA-")
+    assert all(real not in str(v) for v in poll.values())
+
+
+def test_unauth_poll_hides_text_secret_but_library_reveals(make_store):
+    # Deliverable-backed text is a secret (M4: "text secrets"): gated off the poll,
+    # reachable only by signing with the paying wallet -> library (the ONLY
+    # post-gating path to an entitlement-backed text secret).
+    make_store(slug="txtsecret", pay_to="0x" + "a" * 40, delivery="LEGACY")
+    key = _give_key("txtsecret")
+    assert (
+        client.post(
+            "/api/stores/txtsecret/deliverable",
+            headers=_auth(key),
+            json={"kind": "text", "payload": "SECRET-COUPON-XYZ"},
+        ).status_code
+        == 200
+    )
+    acct = Account.create()
+    cid = _order("txtsecret")
+    _confirm(cid, acct.address.lower(), "0x" + "8" * 64)
+
+    poll = client.get(f"/api/checkout/{cid}").json()
+    assert poll["status"] == "paid"
+    assert poll["delivery"] == main.CLAIM_DELIVERY_MESSAGE
+    assert "SECRET-COUPON-XYZ" not in poll["delivery"]
+    assert poll["kind"] == "text" and poll["claim"] is True
+
+    lib = client.get("/api/library", headers=_auth(_session_token(acct))).json()
+    item = next(p for p in lib["purchases"] if p["order_id"] == cid)
+    assert item["delivery"] == "SECRET-COUPON-XYZ"
+
+
+def test_tx_endpoint_excludes_gated_keys(make_store):
+    # POST /api/checkout/{cid}/tx is also an unauth surface (a public tx hash proves
+    # nothing about being the payer): it applies the same gating as the GET poll.
+    make_store(slug="txgate", pay_to="0x" + "a" * 40, delivery="LEGACY")
+    key = _give_key("txgate")
+    assert _upload_file("txgate", key).status_code == 200
+    cid = _order("txgate")
+    _confirm(cid, "0x" + "b" * 40, "0x" + "1" * 64)
+    # order is already terminal, so verify_txhash returns early (no network) and the
+    # route returns the gated _order_response.
+    r = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": "0x" + "1" * 64})
+    assert r.status_code == 200
+    body = r.json()
+    assert "download_url" not in body and "license_key" not in body
+    assert body["delivery"] == main.CLAIM_DELIVERY_MESSAGE
+    assert body["claim"] is True
+
+
+def test_redeliver_includes_full_license_payload(make_store):
+    # The capability path (magic link) is unchanged: it serves the full payload +
+    # gated keys, so the M4 exchange-buyer flow keeps working after gating.
+    make_store(slug="redlic", pay_to="0x" + "a" * 40, delivery="LEGACY")
+    key = _give_key("redlic")
+    assert (
+        client.post(
+            "/api/stores/redlic/deliverable",
+            headers=_auth(key),
+            json={"kind": "license"},
+        ).status_code
+        == 200
+    )
+    cid = _order("redlic")
+    _confirm(cid, "0x" + "b" * 40, "0x" + "9" * 64)
+    token = delivery.mint_redeliver_token(cid)
+    r = client.get(f"/api/redeliver/{token}").json()
+    assert r["status"] == "paid"
+    assert r["license_key"].startswith("TILLA-")
+    assert r["delivery"] == r["license_key"]  # full payload, not the neutral message
+
+
+def test_legacy_text_delivery_unauth_poll_unchanged(make_store):
+    # A store with no deliverable (both live demo stores) keeps its merchant-authored
+    # completion text on the unauth poll verbatim — gating only touches
+    # entitlement-backed orders, so every already-deployed static page keeps working.
+    make_store(
+        slug="legacytext", pay_to="0x" + "a" * 40, delivery="Here is your link: x"
+    )
+    cid = _order("legacytext")
+    _confirm(cid, "0x" + "b" * 40, "0x" + "2" * 64)
+    poll = client.get(f"/api/checkout/{cid}").json()
+    assert poll["status"] == "paid"
+    assert poll["delivery"] == "Here is your link: x"
+    assert "kind" not in poll and "claim" not in poll
+    assert "download_url" not in poll and "license_key" not in poll

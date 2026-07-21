@@ -162,10 +162,12 @@ def test_rerender_stores_rewrites_live_index_from_content(tmp_path, monkeypatch)
     assert out == {"rendered": 1, "skipped": 0}
 
     html = (tmp_path / "rr" / "index.html").read_text(encoding="utf-8")
-    # the redeployed page carries the exact-amount checkout fix
+    # the redeployed page carries the current M5 checkout partial (wallet-connect +
+    # QR + sign-to-claim), proving a theme change reaches already-deployed pages.
     assert 'id="coAmount"' in html
     assert 'id="coAddr"' in html
-    assert "d.amount + ' USDT'" in html
+    assert 'id="payWalletBtn"' in html
+    assert "qrMatrix" in html
 
 
 def test_rerender_stores_skips_contentless_store(tmp_path, monkeypatch):

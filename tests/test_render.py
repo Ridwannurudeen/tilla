@@ -114,3 +114,30 @@ def test_invalid_palette_falls_back_to_defaults(theme):
 def test_slug_in_script_uses_tojson(theme):
     html = render({"store_name": "X"}, ADDR, "weird-slug", theme)
     assert 'const SLUG = "weird-slug";' in html
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_checkout_partial_included_with_ids_and_constants(theme):
+    # The shared M5 partial is included in every theme via {% include %}; its
+    # markup ids + hardcoded JS constants must be present in the rendered page.
+    html = render({"store_name": "X"}, ADDR, SLUG, theme)
+    for el_id in (
+        "co",
+        "coAmount",
+        "coAddr",
+        "coStatus",
+        "coDelivery",
+        "payWalletBtn",
+        "coQR",
+        "coCountdown",
+        "coReceipt",
+        "claimBtn",
+        "coClaim",
+    ):
+        assert f'id="{el_id}"' in html, el_id
+    # USDT0 contract, X Layer chain 0xc4, and the ERC-20 transfer selector
+    assert "0x779ded0c9e1022225f8e0630b35a9b54be713736" in html
+    assert '"0xc4"' in html
+    assert "0xa9059cbb" in html
+    # SLUG still enters the script through tojson (autoescape discipline preserved)
+    assert f'const SLUG = "{SLUG}";' in html

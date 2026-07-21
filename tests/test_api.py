@@ -283,3 +283,41 @@ def test_checkout_returns_pay_to_unique_amount_and_expiry(make_store):
     assert gb["pay_to"] == "0x" + "b" * 40
     assert gb["amount"] == pb["amount"]
     assert gb["status"] == "pending"
+
+
+def test_checkout_post_returns_amount_micro_and_z_expiry(make_store):
+    # M5 additive keys the wallet JS needs: amount_micro (exact int base units, so
+    # calldata is built with BigInt only, never float) and a 'Z'-suffixed expiry so
+    # JS Date parses it as UTC, not local time.
+    from app.db import SessionLocal
+    from app.models import Order
+
+    make_store(slug="micro-store", pay_to="0x" + "c" * 40, price_micro=9_000_000)
+    post = client.post("/api/checkout/micro-store").json()
+    assert isinstance(post["amount_micro"], int)
+    assert post["amount_micro"] == round(post["amount"] * 1e6)
+    assert 9_000_001 <= post["amount_micro"] <= 9_004_999
+    assert post["expires_at"].endswith("Z")
+    with SessionLocal() as s:
+        assert post["amount_micro"] == s.get(Order, post["id"]).expected_micro
+
+
+def test_erc20_transfer_calldata_parity_vector():
+    # The exact ERC-20 transfer() calldata the browser's buildTransferData(payTo,
+    # micro) MUST reproduce byte-for-byte: selector + pad32(to) + pad32(amount).
+    # Pinned as a documented vector and cross-checked against chain.pad_address, so
+    # a drift on either side is caught here; the JS is verified against it in the
+    # browser smoke (docs/SMOKE-M5.md).
+    from app import chain
+
+    pay_to = "0x779ded0c9e1022225f8e0630b35a9b54be713736"
+    micro = 9_004_999
+    expected = (
+        "0xa9059cbb"
+        "000000000000000000000000779ded0c9e1022225f8e0630b35a9b54be713736"
+        "00000000000000000000000000000000000000000000000000000000008967c7"
+    )
+    built = "0xa9059cbb" + chain.pad_address(pay_to)[2:] + format(micro, "064x")
+    assert built == expected
+    assert len(built) == 2 + 8 + 64 + 64  # 0x + selector + to word + amount word
+    assert format(micro, "x") == "8967c7"
