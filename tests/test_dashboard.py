@@ -5,7 +5,9 @@ surface / refund / export routes are exercised. All chain access is mocked; no
 network, no funds.
 """
 
+import csv
 import hashlib
+import io
 import secrets
 
 from eth_account import Account
@@ -16,7 +18,7 @@ from sqlalchemy import select
 import app.main as main
 from app import checkout
 from app.db import SessionLocal
-from app.models import Merchant, Order
+from app.models import Merchant, Order, Product
 
 client = TestClient(main.app)
 
@@ -356,3 +358,93 @@ def test_dashboard_shell_renders_without_data():
     assert r.status_code == 200
     assert "personal_sign" in r.text
     assert "{{" not in r.text  # no Jinja leak; shell carries no server data
+
+
+# --------------------------------------------------------------------- CSV export
+def _rename_product(store_id: int, name: str) -> None:
+    with SessionLocal() as s:
+        p = s.scalar(select(Product).where(Product.store_id == store_id))
+        p.name = name
+        s.commit()
+
+
+def test_orders_csv_header_and_row_scoped(make_store):
+    acct = Account.create()
+    _owned_store(acct, "csvstore", make_store)
+    cid, exp = _seed_sale("csvstore")
+    token = _merchant_token(acct)
+    r = client.get("/api/merchant/export/orders.csv", headers=_auth(token))
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "attachment" in r.headers["content-disposition"]
+    rows = list(csv.reader(io.StringIO(r.text)))
+    assert rows[0][0] == "order_id" and "paid_usdt" in rows[0]
+    body = [row for row in rows[1:] if row]
+    assert len(body) == 1 and body[0][0] == cid
+
+
+def test_orders_csv_formula_injection_escaped(make_store):
+    acct = Account.create()
+    sid = make_store(slug="evilstore", pay_to=acct.address.lower())
+    _rename_product(sid, '=HYPERLINK("http://evil","x")')
+    _seed_sale("evilstore")
+    token = _merchant_token(acct)
+    r = client.get("/api/merchant/export/orders.csv", headers=_auth(token))
+    rows = list(csv.reader(io.StringIO(r.text)))
+    idx = rows[0].index("product_name")
+    cell = rows[1][idx]
+    assert cell.startswith("'=")  # neutralised for spreadsheets
+
+
+def test_orders_csv_date_filter(make_store):
+    acct = Account.create()
+    _owned_store(acct, "datestore", make_store)
+    _seed_sale("datestore")
+    token = _merchant_token(acct)
+    # a future `from` excludes the sale; a past `from` includes it
+    future = client.get(
+        "/api/merchant/export/orders.csv?from=2099-01-01", headers=_auth(token)
+    )
+    assert len([row for row in csv.reader(io.StringIO(future.text))][1:]) == 0
+    past = client.get(
+        "/api/merchant/export/orders.csv?from=2020-01-01", headers=_auth(token)
+    )
+    assert len([row for row in csv.reader(io.StringIO(past.text)) if row][1:]) == 1
+    # a malformed date is a 422
+    bad = client.get(
+        "/api/merchant/export/orders.csv?from=notadate", headers=_auth(token)
+    )
+    assert bad.status_code == 422
+
+
+def test_customers_csv_groups_by_buyer(make_store):
+    acct = Account.create()
+    _owned_store(acct, "custstore", make_store)
+    _seed_sale("custstore", from_addr="0x" + "5" * 40)
+    _seed_sale("custstore", from_addr="0x" + "5" * 40)  # same buyer, 2 orders
+    _seed_sale("custstore", from_addr="0x" + "6" * 40)
+    token = _merchant_token(acct)
+    r = client.get("/api/merchant/export/customers.csv", headers=_auth(token))
+    rows = list(csv.reader(io.StringIO(r.text)))
+    assert rows[0][0] == "from_addr"
+    body = {row[0]: row for row in rows[1:] if row}
+    assert body["0x" + "5" * 40][1] == "2"  # orders_count
+    assert body["0x" + "6" * 40][1] == "1"
+
+
+def test_export_store_param_must_be_owned(make_store):
+    a, b = Account.create(), Account.create()
+    _owned_store(a, "exp-a", make_store)
+    _owned_store(b, "exp-b", make_store)
+    tok_b = _merchant_token(b)
+    # B asking to export A's store by slug → 404
+    r = client.get("/api/merchant/export/orders.csv?store=exp-a", headers=_auth(tok_b))
+    assert r.status_code == 404
+    # B's own store scopes fine
+    ok = client.get("/api/merchant/export/orders.csv?store=exp-b", headers=_auth(tok_b))
+    assert ok.status_code == 200
+
+
+def test_export_requires_merchant_auth():
+    assert client.get("/api/merchant/export/orders.csv").status_code == 401
+    assert client.get("/api/merchant/export/customers.csv").status_code == 401

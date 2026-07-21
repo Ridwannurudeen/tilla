@@ -12,9 +12,12 @@ one canonical IDOR gate. Non-owned or unknown resources uniformly 404.
 from __future__ import annotations
 
 import contextlib
+import csv
 import hashlib
+import io
 import re
 import secrets
+from datetime import datetime
 from typing import Literal
 
 import httpx
@@ -24,10 +27,10 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from starlette.responses import HTMLResponse
+from starlette.responses import HTMLResponse, StreamingResponse
 
 from app import chain, checkout, config, delivery, refunds, render
-from app.db import get_session
+from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
     EventLog,
@@ -498,6 +501,192 @@ def merchant_refund(
         "refunded_micro": result["refunded_micro"],
         "refunded_usdt": usdt(result["refunded_micro"]),
     }
+
+
+# ------------------------------------------------------------------ CSV export
+_CSV_INJECT = ("=", "+", "-", "@")
+
+
+def _csv_cell(value) -> str:
+    """Formula-injection defense: a cell that Excel/Sheets would treat as a formula
+    (leading = + - @) is prefixed with a single quote. Product names are merchant/
+    LLM text the merchant opens in a spreadsheet, so this runs on every data cell."""
+    s = "" if value is None else str(value)
+    if s and s[0] in _CSV_INJECT:
+        return "'" + s
+    return s
+
+
+def _iso(dt) -> str:
+    return dt.isoformat() if dt else ""
+
+
+def _parse_iso(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(422, "from/to must be ISO 8601 timestamps") from exc
+
+
+def _export_scope(session: Session, merchant: Merchant, store: str | None) -> list[int]:
+    """Store ids in scope for an export: one owned store (404 if not owned) or all
+    of the caller's stores. The export IDOR gate."""
+    if store:
+        return [_owned_store(session, merchant, store).id]
+    return list(
+        session.scalars(select(Store.id).where(Store.merchant_id == merchant.id))
+    )
+
+
+def _csv_response(generator, filename: str) -> StreamingResponse:
+    return StreamingResponse(
+        generator,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _orders_csv_gen(store_ids, from_dt, to_dt):
+    """Stream orders.csv through its own session (a StreamingResponse body runs
+    after the route returns, so it cannot use the request-scoped session)."""
+    header = [
+        "order_id",
+        "store_slug",
+        "product_name",
+        "status",
+        "channel",
+        "amount_usdt",
+        "paid_usdt",
+        "overpaid_usdt",
+        "refunded_usdt",
+        "tx_hash",
+        "from_addr",
+        "buyer_email",
+        "created_at",
+        "paid_at",
+    ]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    def flush():
+        val = buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        return val
+
+    writer.writerow(header)
+    yield flush()
+    if not store_ids:
+        return
+    with SessionLocal() as session:
+        slug_by_id = dict(
+            session.execute(
+                select(Store.id, Store.slug).where(Store.id.in_(store_ids))
+            ).all()
+        )
+        name_by_pid = dict(
+            session.execute(
+                select(Product.id, Product.name).where(Product.store_id.in_(store_ids))
+            ).all()
+        )
+        stmt = select(Order).where(Order.store_id.in_(store_ids))
+        if from_dt is not None:
+            stmt = stmt.where(Order.created_at >= from_dt)
+        if to_dt is not None:
+            stmt = stmt.where(Order.created_at <= to_dt)
+        for o in session.scalars(
+            stmt.order_by(Order.created_at).execution_options(yield_per=500)
+        ):
+            writer.writerow(
+                _csv_cell(c)
+                for c in [
+                    o.id,
+                    slug_by_id.get(o.store_id),
+                    name_by_pid.get(o.product_id),
+                    o.status,
+                    o.channel,
+                    usdt(o.amount_micro),
+                    usdt(o.paid_micro),
+                    usdt(o.overpaid_micro),
+                    usdt(o.refunded_micro),
+                    o.tx_hash or "",
+                    o.from_addr or "",
+                    o.buyer_email or "",
+                    _iso(o.created_at),
+                    _iso(o.paid_at),
+                ]
+            )
+            yield flush()
+
+
+def _customers_csv_gen(store_ids):
+    header = [
+        "from_addr",
+        "orders_count",
+        "total_paid_usdt",
+        "first_purchase",
+        "last_purchase",
+    ]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    def flush():
+        val = buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        return val
+
+    writer.writerow(header)
+    yield flush()
+    if not store_ids:
+        return
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(
+                Order.from_addr,
+                func.count(),
+                func.coalesce(func.sum(Order.paid_micro), 0),
+                func.min(Order.created_at),
+                func.max(Order.created_at),
+            )
+            .where(Order.store_id.in_(store_ids), Order.from_addr.isnot(None))
+            .group_by(Order.from_addr)
+            .order_by(func.max(Order.created_at).desc())
+        ).all()
+        for addr, count, paid, first, last in rows:
+            writer.writerow(
+                _csv_cell(c) for c in [addr, count, usdt(paid), _iso(first), _iso(last)]
+            )
+            yield flush()
+
+
+@router.get("/api/merchant/export/orders.csv")
+@limiter.limit("20/minute")
+def export_orders_csv(
+    request: Request,
+    store: str | None = Query(None, max_length=config.SLUG_MAX_LEN),
+    from_: str | None = Query(None, alias="from", max_length=40),
+    to: str | None = Query(None, max_length=40),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store_ids = _export_scope(session, merchant, store)
+    from_dt, to_dt = _parse_iso(from_), _parse_iso(to)
+    return _csv_response(_orders_csv_gen(store_ids, from_dt, to_dt), "orders.csv")
+
+
+@router.get("/api/merchant/export/customers.csv")
+@limiter.limit("20/minute")
+def export_customers_csv(
+    request: Request,
+    store: str | None = Query(None, max_length=config.SLUG_MAX_LEN),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store_ids = _export_scope(session, merchant, store)
+    return _csv_response(_customers_csv_gen(store_ids), "customers.csv")
 
 
 @router.get("/dashboard")
