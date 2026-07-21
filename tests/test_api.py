@@ -258,6 +258,80 @@ def test_pending_store_resumes_live_and_checkout_works(tmp_path, monkeypatch):
     assert client.post(f"/api/checkout/{slug}").status_code == 200
 
 
+def _store_theme(slug):
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    with SessionLocal() as s:
+        return s.scalar(select(Store.theme).where(Store.slug == slug))
+
+
+@respx.mock
+def test_create_store_explicit_theme_persists_and_renders(tmp_path, monkeypatch):
+    # Caller picks the theme: it wins over the LLM's suggestion, is persisted, and
+    # the store renders on it (bold's `.bolt` backdrop). og.svg is written too.
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    _mock_llm(
+        monkeypatch, {"store_name": "Chosen", "price_usdt": 9, "theme": "original"}
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    r = client.post(
+        "/create-store", json={"description": "loud brand", "theme": "bold"}
+    )
+    assert r.status_code == 200
+    slug = r.json()["slug"]
+    assert _store_theme(slug) == "bold.html"
+    slug_dir = tmp_path / slug
+    html = (slug_dir / "index.html").read_text(encoding="utf-8")
+    assert 'class="bolt"' in html
+    assert (slug_dir / "og.svg").exists()
+    meta = json.loads((slug_dir / "store.json").read_text(encoding="utf-8"))
+    assert meta["theme"] == "bold.html"
+
+
+@respx.mock
+def test_create_store_uses_llm_theme_when_unspecified(tmp_path, monkeypatch):
+    # No caller theme -> the LLM's suggestion (editorial) is used and persisted.
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    _mock_llm(
+        monkeypatch, {"store_name": "Elegant", "price_usdt": 9, "theme": "editorial"}
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    r = client.post("/create-store", json={"description": "a refined journal"})
+    assert r.status_code == 200
+    slug = r.json()["slug"]
+    assert _store_theme(slug) == "editorial.html"
+    html = (tmp_path / slug / "index.html").read_text(encoding="utf-8")
+    assert 'class="rule"' in html
+
+
+def test_create_store_invalid_theme_422():
+    # Body validation rejects an unknown theme before the endpoint body runs, so
+    # no LLM key / mock is needed.
+    r = client.post("/create-store", json={"description": "socks", "theme": "neon"})
+    assert r.status_code == 422
+
+
+def test_sitemap_lists_live_stores_excludes_pending_and_blocked(make_store):
+    make_store(slug="live-a", pay_to="0x" + "a" * 40)
+    make_store(slug="live-b", pay_to="0x" + "b" * 40)
+    make_store(slug="pending-x", pay_to="0x" + "c" * 40, status="pending_screening")
+    make_store(slug="blocked-y", pay_to="0x" + "d" * 40, status="blocked")
+    r = client.get("/sitemap.xml")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/xml")
+    body = r.text
+    assert "https://tilla.gudman.xyz/s/live-a/" in body
+    assert "https://tilla.gudman.xyz/s/live-b/" in body
+    assert "pending-x" not in body
+    assert "blocked-y" not in body
+
+
 def test_checkout_409_on_pending_screening_store(make_store):
     make_store(slug="pending-store", status="pending_screening")
     r = client.post("/api/checkout/pending-store")

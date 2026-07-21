@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from xml.sax.saxutils import escape
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
@@ -23,7 +24,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 
 from app import chain, checkout, config, delivery
 from app.checkout import DEFAULT_DELIVERY
@@ -131,10 +132,33 @@ def health():
     return {"ok": True, "service": "tilla", "chain": "X Layer (196)"}
 
 
+@app.get("/sitemap.xml")
+@limiter.limit("60/minute")
+def sitemap(request: Request, session: Session = Depends(get_session)):
+    """XML sitemap of every LIVE store URL (pending/blocked stores are excluded —
+    their pages aren't served). Slugs are a restricted charset, but the <loc>
+    text is XML-escaped regardless."""
+    base = config.PUBLIC_BASE_URL.rstrip("/")
+    slugs = session.scalars(
+        select(Store.slug).where(Store.status == "live").order_by(Store.slug)
+    ).all()
+    urls = "".join(
+        f"<url><loc>{escape(base)}/s/{escape(slug)}/</loc></url>" for slug in slugs
+    )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{urls}</urlset>"
+    )
+    return Response(content=xml, media_type="application/xml")
+
+
 # ---------- ASP endpoint: create a store (x402-paid) ----------
 class CreateStoreBody(BaseModel):
     description: str = Field(min_length=1, max_length=config.MAX_DESCRIPTION_LEN)
     receive_address: str | None = None
+    # Optional theme choice; None lets the LLM pick. An unknown value is a 422.
+    theme: str | None = None
 
     @field_validator("receive_address")
     @classmethod
@@ -149,10 +173,21 @@ class CreateStoreBody(BaseModel):
             raise ValueError("receive_address must not be the zero address")
         return v
 
+    @field_validator("theme")
+    @classmethod
+    def _validate_theme(cls, v):
+        if v is None or v == "":
+            return None
+        if v not in config.ALLOWED_THEMES:
+            raise ValueError("theme must be one of: original, bold, editorial")
+        return v
 
-def _run_create_store(description: str, receive_address: str | None):
+
+def _run_create_store(
+    description: str, receive_address: str | None, theme: str | None = None
+):
     try:
-        return gen_store(description, receive_address)
+        return gen_store(description, receive_address, theme=theme)
     except ScreeningBlocked as exc:
         logger.warning(
             "store creation blocked by screening: risk_level=%s",
@@ -166,26 +201,28 @@ def _run_create_store(description: str, receive_address: str | None):
 def create_store_post(request: Request, body: CreateStoreBody):
     if not os.environ.get("TILLA_LLM_KEY"):
         raise HTTPException(503, "generation unavailable")
-    return _run_create_store(body.description, body.receive_address)
+    return _run_create_store(body.description, body.receive_address, body.theme)
 
 
 @app.get("/create-store")
 @limiter.limit("6/minute")
 def create_store_get(
-    request: Request, description: str = "", receive_address: str = ""
+    request: Request, description: str = "", receive_address: str = "", theme: str = ""
 ):
     # unpaid GET is intercepted by the x402 paywall (402). A paid GET reaches here.
     if not description:
         return {
             "service": "Tilla · create-store",
-            "how": "POST {description, receive_address} (x402-paid) → returns a live store URL",
+            "how": "POST {description, receive_address, theme?} (x402-paid) → returns a live store URL",
             "network": "eip155:196",
         }
     try:
-        body = CreateStoreBody(description=description, receive_address=receive_address)
+        body = CreateStoreBody(
+            description=description, receive_address=receive_address, theme=theme
+        )
     except ValidationError as exc:
         raise HTTPException(422, json.loads(exc.json())) from exc
-    return _run_create_store(body.description, body.receive_address)
+    return _run_create_store(body.description, body.receive_address, body.theme)
 
 
 class TxBody(BaseModel):
