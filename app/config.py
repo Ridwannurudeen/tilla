@@ -16,6 +16,30 @@ WARDEN_SCREEN_URL = os.environ.get(
 )
 WARDEN_SCREEN_TIMEOUT = float(os.environ.get("TILLA_SCREEN_TIMEOUT", "10"))
 
+# ---------- M10 Warden PAID hire (agents-hiring-agents) — DORMANT by default ----
+# Screening upgrades from the FREE demo endpoint above to a PAID x402 hire of
+# Warden #3808's listed scan service only when TILLA_WARDEN_PAID is on AND a payer
+# key is present. Flag OFF or key unset => screening.screen() hits the free demo
+# endpoint byte-identically to today and app.warden_hire's signing path is never
+# constructed, so no funds can move. Enabling it = funds movement = user-gated
+# runbook step D (fund the payer wallet, set the flag+key in /opt/tilla/.env).
+WARDEN_PAID_SCAN_URL = os.environ.get(
+    "TILLA_WARDEN_SCAN_URL", "https://warden.gudman.xyz/scan"
+)
+# The signing key for Tilla's payer wallet. VPS .env only, NEVER in the repo; when
+# unset the paid path is unreachable regardless of the flag.
+TILLA_WARDEN_PAYER_KEY = os.environ.get("TILLA_WARDEN_PAYER_KEY", "")
+# Hard cap on what a single paid scan may commit (micro-USDT). A changed/hostile
+# 402 challenge asking for more than this is REFUSED before signing. Default 10000
+# = 0.01 USDT, Warden's listed scan price.
+TILLA_WARDEN_MAX_MICRO = int(os.environ.get("TILLA_WARDEN_MAX_MICRO", "10000"))
+# The payTo the paid challenge MUST resolve to (Warden #3808's wallet). Pinned so a
+# hostile 402 can never redirect the fee. Empty => the paid path stays dormant even
+# with the flag on (payTo cannot be verified, so we never sign).
+WARDEN_PAID_PAYTO = os.environ.get(
+    "TILLA_WARDEN_PAYTO", "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"
+)
+
 MAX_DESCRIPTION_LEN = 2000
 MAX_BODY_BYTES = 64 * 1024  # generous over MAX_DESCRIPTION_LEN, well under abuse range
 
@@ -141,6 +165,10 @@ AGGR_DEFERRED_ENABLED = _flag("TILLA_AGGR_DEFERRED")
 MPP_ENABLED = _flag("TILLA_MPP_ENABLED")
 # Subscriptions (x402 period, JS sidecar): /s/{slug}/subscribe. OFF -> 503.
 SUBSCRIPTIONS_ENABLED = _flag("TILLA_SUBSCRIPTIONS_ENABLED")
+# M10 Warden PAID hire: OFF (default) -> screening uses the free demo endpoint and
+# app.warden_hire never signs. Flipped ON only in runbook step D, after the payer
+# wallet is funded and TILLA_WARDEN_PAYER_KEY is set on the VPS.
+WARDEN_PAID_ENABLED = _flag("TILLA_WARDEN_PAID")
 # The always-on localhost Node sidecar the subscribe proxy talks to (never nginx-
 # exposed). The proxy 503s if it is unreachable, never a false 402/200.
 SUBSCRIPTION_SIDECAR_URL = os.environ.get("TILLA_SIDECAR_URL", "http://127.0.0.1:8790")

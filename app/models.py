@@ -48,12 +48,31 @@ class Merchant(Base):
 
 class Store(Base):
     __tablename__ = "stores"
+    __table_args__ = (
+        # M10 marketplace listing lifecycle. The runbook's mark_listed command is
+        # the only writer; the CHECK is defense-in-depth against a bad value.
+        CheckConstraint(
+            "marketplace_status IN "
+            "('unlisted','prepared','submitted','listed','rejected')",
+            name="ck_stores_marketplace_status",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     slug: Mapped[str] = mapped_column(String(40), nullable=False, unique=True)
     merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="live")
     pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
+    # M10 marketplace citizenship: where this store stands on the #6961 listing.
+    # 'unlisted' (default, every existing store) until the user-gated runbook lists
+    # it and the mark_listed command records the transition. Read-only in the app —
+    # no HTTP route mutates it (the on-chain listing is out-of-band + approval-gated).
+    marketplace_status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="unlisted", server_default="unlisted"
+    )
+    marketplace_listed_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     # sha256 hex of the per-store manage key (capability secret handed to the
     # paid create-store caller once). NULL for legacy stores until minted.
     manage_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -355,6 +374,33 @@ class Refund(Base):
     log_index: Mapped[int] = mapped_column(Integer, nullable=False)
     amount_micro: Mapped[int] = mapped_column(Integer, nullable=False)
     block_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
+class ScreeningReceipt(Base):
+    """One content-screening event for a store — the typed, queryable money-record
+    surface for M10 (the Refund-table precedent). EventLog stays the append-only
+    audit spine (screening events still log there); this table is what the dashboard
+    marketplace panel reads. ``mode='demo'`` rows carry no amount/tx (the free
+    Warden demo endpoint); ``mode='paid'`` rows record the x402 hire amount and the
+    on-chain settle ``tx_hash`` — real evidence of the agents-hiring-agents flow."""
+
+    __tablename__ = "screening_receipts"
+    __table_args__ = (
+        CheckConstraint("mode IN ('demo','paid')", name="ck_screening_receipts_mode"),
+        Index("ix_screening_receipts_store_id", "store_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    mode: Mapped[str] = mapped_column(String(10), nullable=False)
+    verdict: Mapped[str] = mapped_column(String(10), nullable=False)
+    risk_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    endpoint: Mapped[str] = mapped_column(String(200), nullable=False)
+    amount_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
