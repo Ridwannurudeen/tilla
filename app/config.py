@@ -270,6 +270,26 @@ TIER_PRICE_MICRO_MIN = 10_000
 TIER_PRICE_MICRO_MAX = 10_000_000_000
 TIERS_MAX = 20
 
+# ---------- M16.4 federation ingest (mirror-of-mirrors) ----------------------
+# Operator-configured peer base URLs (comma-separated https origins), NEVER
+# user-submitted. Empty (the default) => the feature is DORMANT: the loop never
+# starts, zero network. The ingest fetches each peer's /discovery/resources +
+# per-store feed.json, schema-validates against the frozen 16.3 contract, and
+# caches read-only rows in ``federated_listings`` that link OUT to the peer's own
+# checkout. Tilla NEVER proxies, quotes, or settles a peer's sale.
+FEDERATION_PEERS = [
+    p.strip()
+    for p in os.environ.get("TILLA_FEDERATION_PEERS", "").split(",")
+    if p.strip()
+]
+FEDERATION_INTERVAL = float(os.environ.get("TILLA_FEDERATION_INTERVAL", "300"))
+FEDERATION_FETCH_TIMEOUT = float(os.environ.get("TILLA_FEDERATION_FETCH_TIMEOUT", "5"))
+# Hard body cap per fetched document (bytes) — a poisoned/oversized peer feed is
+# rejected before it is parsed (256 KiB).
+FEDERATION_MAX_BYTES = int(os.environ.get("TILLA_FEDERATION_MAX_BYTES", "262144"))
+# Cap the stores ingested per peer per tick (bounds a hostile peer's row count).
+FEDERATION_MAX_STORES = int(os.environ.get("TILLA_FEDERATION_MAX_STORES", "50"))
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
 

@@ -46,6 +46,7 @@ from app import (
     delivery,
     embed,
     external_feeds,
+    federation,
     growth,
     mpp,
     subscriptions,
@@ -106,6 +107,7 @@ async def lifespan(app: FastAPI):
     sweeper = None
     webhook_task = None
     attest_task = None
+    federation_task = None
     if config.SWEEP_ENABLED:
         sweeper = asyncio.create_task(checkout.sweeper_loop())
         # M9 outbound webhook dispatcher — shares the sweeper's background-loop gate
@@ -118,6 +120,12 @@ async def lifespan(app: FastAPI):
         # + flag on the VPS) is an explicit user-gated runbook step.
         if config.ATTEST_ENABLED and config.TILLA_ATTESTER_KEY:
             attest_task = asyncio.create_task(attest.attest_loop())
+        # M16.4 federation ingest — shares the background-loop gate so tests never
+        # start it. DOUBLY dormant: also a no-op unless TILLA_FEDERATION_PEERS is
+        # set (empty => the loop idles with zero network). Read-only discovery
+        # mirror; never moves funds.
+        if config.FEDERATION_PEERS:
+            federation_task = asyncio.create_task(federation.federation_loop())
     # x402 agent commerce (prod only): pre-warm the facilitator /supported off-loop
     # so the first protected request doesn't do the blocking sync GET, and run the
     # reaper that voids agent orders stuck delivered-without-settle.
@@ -128,7 +136,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (sweeper, webhook_task, attest_task, reaper):
+        for task in (sweeper, webhook_task, attest_task, reaper, federation_task):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

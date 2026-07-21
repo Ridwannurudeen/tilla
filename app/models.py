@@ -749,6 +749,41 @@ class GrowthDraft(Base):
     performance_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
+class FederatedListing(Base):
+    """M16.4 federation ingest — one cached, READ-ONLY row per peer store,
+    discovered by fetching an operator-configured peer's /discovery/resources +
+    feed.json and schema-validating them against the frozen v1 protocol contract.
+    Peer content is DATA: it is never rendered as HTML, only re-emitted json-
+    encoded in the ``?include=federated`` discovery echo, and every ``url`` links
+    OUT to the PEER's own checkout — Tilla never proxies, quotes, or settles a
+    peer's sale (no fund-moving code touches this table). UNIQUE(origin, slug)
+    makes a re-ingest an idempotent upsert. Dormant by default (no peers => this
+    table stays empty)."""
+
+    __tablename__ = "federated_listings"
+    __table_args__ = (
+        UniqueConstraint("origin", "slug", name="uq_federated_listings_origin_slug"),
+        Index("ix_federated_listings_origin", "origin"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # The peer base URL this row came from (operator-configured origin).
+    origin: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Absolute OUTBOUND links into the peer's own surfaces (never a Tilla route).
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    feed_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    price_min_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price_max_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    network: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
 class EventLog(Base):
     __tablename__ = "event_log"
 

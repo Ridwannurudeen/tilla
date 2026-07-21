@@ -45,7 +45,7 @@ from x402.http.utils import (
 )
 from x402.schemas import AssetAmount
 
-from app import affiliates, b2b, chain, checkout, config, delivery, webhooks
+from app import affiliates, b2b, chain, checkout, config, delivery, federation, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -1468,6 +1468,7 @@ def discovery_resources(
     request: Request,
     limit: int = 20,
     offset: int = 0,
+    include: str = "",
     session: Session = Depends(get_session),
 ):
     limit = max(1, min(limit, 50))
@@ -1476,17 +1477,22 @@ def discovery_resources(
         select(func.count()).select_from(Store).where(Store.status == "live")
     )
     resources = _discovery_rows(session, [], limit, offset)
-    return JSONResponse(
-        {
-            "service": SERVICE,
-            "agent_card": "/.well-known/agent-card.json",
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "resources": resources,
-        },
-        headers=_AGENT_HEADERS,
-    )
+    body: dict = {
+        "service": SERVICE,
+        "agent_card": "/.well-known/agent-card.json",
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "resources": resources,
+    }
+    # M16.4: opt-in federated peer listings. Each row is labeled
+    # {"origin", "federated": true} and links OUT to the peer's own checkout —
+    # Tilla never proxies, quotes, or settles a peer's sale. Dormant (empty) when
+    # no peers are configured. Peer content is re-emitted json-encoded, never
+    # rendered, so there is no HTML context to escape.
+    if include == "federated":
+        body["federated"] = federation.federated_rows(session, limit)
+    return JSONResponse(body, headers=_AGENT_HEADERS)
 
 
 @router.get("/discovery/search")
