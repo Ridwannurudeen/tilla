@@ -16,7 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config, delivery, webhooks
+from app import affiliates, chain, config, delivery, webhooks
 from app.checkout import transition
 from app.models import Order, Refund, Store, log_event
 
@@ -163,6 +163,11 @@ def apply_refund(
         if not moved:
             raise RefundError(409, "order is no longer refundable")
         delivery.revoke_entitlement(session, order)
+        # M13: a full refund voids the affiliate accrual (accrued -> void) in the same
+        # transaction — no rev-share is owed on a reversed sale. A payout already made
+        # on-chain (status 'paid') is left untouched (the money already left the
+        # operator's wallet); void_accrual only touches a still-'accrued' row.
+        affiliates.void_accrual(session, order)
         log_event(
             session,
             "refunds",

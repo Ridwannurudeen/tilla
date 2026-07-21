@@ -22,7 +22,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config, delivery, webhooks
+from app import affiliates, chain, config, delivery, webhooks
 from app.db import SessionLocal
 from app.models import (
     ChainCursor,
@@ -180,6 +180,13 @@ def deliver(session: Session, order: Order):
             order.attest_status = "pending"
         webhooks.enqueue(session, store.merchant_id, "order.paid", order)
         webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
+        # M13 affiliate accrual: a pure DB ledger row for a referred web sale, at
+        # this delivered commit seam. No-op (returns None) with no referrer, on a
+        # self-referral, or with a zero computed accrual. Agent (x402) orders are
+        # the exception — they go provisional 'settling' here and accrue only on
+        # agentic.record_settlement's settling->delivered flip, so a voided/reaped
+        # order never accrues (the same guarantee as EAS queueing above).
+        affiliates.accrue(session, order, store)
     return session.scalar(select(Delivery).where(Delivery.order_id == order.id))
 
 
@@ -218,10 +225,19 @@ def _current_head() -> int | None:
         return None
 
 
-def create_order(session: Session, store: Store, product: Product) -> Order:
+def create_order(
+    session: Session,
+    store: Store,
+    product: Product,
+    referrer_addr: str | None = None,
+) -> Order:
     """Insert a pending order with a unique per-address expected_micro. Redraws
     the offset on collision (app check) or IntegrityError (index backstop);
-    raises AmountUnavailable after config.AMOUNT_ALLOC_RETRIES draws."""
+    raises AmountUnavailable after config.AMOUNT_ALLOC_RETRIES draws.
+
+    ``referrer_addr`` (M13, additive) is the referring agent's payout wallet, already
+    validated + lowercased by the caller. First-write-wins: it is set once here and
+    never mutated, so attribution is immutable after order creation."""
     now = _now()
     created_block = _current_head()
     for _ in range(config.AMOUNT_ALLOC_RETRIES):
@@ -237,6 +253,7 @@ def create_order(session: Session, store: Store, product: Product) -> Order:
             amount_micro=product.price_micro,
             expected_micro=expected,
             status="pending",
+            referrer_addr=referrer_addr,
             created_block=created_block,
             expires_at=now + timedelta(minutes=config.ORDER_TTL_MIN),
         )

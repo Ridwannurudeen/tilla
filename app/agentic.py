@@ -45,7 +45,7 @@ from x402.http.utils import (
 )
 from x402.schemas import AssetAmount
 
-from app import chain, checkout, config, delivery, webhooks
+from app import affiliates, chain, checkout, config, delivery, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -344,7 +344,12 @@ def _assert_nonce_owner(order: Order, store: Store, payer: str) -> None:
 
 
 def fulfill_agent_order(
-    session: Session, store: Store, product: Product, payer: str, nonce: str
+    session: Session,
+    store: Store,
+    product: Product,
+    payer: str,
+    nonce: str,
+    referrer_addr: str | None = None,
 ) -> tuple[Order, dict]:
     """Idempotently create + deliver an agent order. The (store, payer, nonce)
     triple is the idempotency key (see :func:`_assert_nonce_owner`): an existing
@@ -372,6 +377,7 @@ def fulfill_agent_order(
         channel="agent",
         x402_nonce=nonce,
         from_addr=payer or None,
+        referrer_addr=referrer_addr,
         paid_at=checkout._now(),
     )
     session.add(order)
@@ -413,12 +419,22 @@ def agent_buy(
     request: Request,
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
     session: Session = Depends(get_session),
+    ref: str | None = None,
 ):
     # FAIL CLOSED: no verified payment (middleware absent — OKX_API_KEY unset — or
     # payment not provided) → 402. Goods are never served free.
     payload = getattr(request.state, "payment_payload", None)
     if payload is None:
         raise HTTPException(402, "payment required")
+    # M13 affiliate attribution: the ?ref= query param survives the 402->paid-retry
+    # roundtrip. Validate BEFORE settlement so a malformed ref makes this handler
+    # return >=400 (middleware skips settle, zero funds move) rather than settling a
+    # sale that can never be attributed. The query string is path-independent, so the
+    # path-keyed x402 middleware is untouched.
+    try:
+        referrer_addr = affiliates.normalize_ref(ref)
+    except affiliates.RefRejected as exc:
+        raise HTTPException(400, str(exc)) from exc
     # RACE re-check: if the store flipped non-live between challenge and retry (or
     # a sentinel challenge got paid), return >=400 so the middleware SKIPS
     # settlement — the signed authorization is never executed, zero funds move.
@@ -443,7 +459,7 @@ def agent_buy(
     if not isinstance(auth, dict) or not auth.get("nonce"):
         raise HTTPException(400, "missing authorization nonce")
     order, body = fulfill_agent_order(
-        session, store, product, auth.get("from") or "", auth["nonce"]
+        session, store, product, auth.get("from") or "", auth["nonce"], referrer_addr
     )
     session.commit()
     # Shared scope["state"] hands the order id to the outer agent-guard middleware
@@ -683,6 +699,10 @@ def record_settlement(
                     order.attest_status = "pending"
                 webhooks.enqueue(session, store.merchant_id, "order.paid", order)
                 webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
+                # M13 affiliate accrual: written ONLY here, on the settling->delivered
+                # flip — a voided/reaped agent order (which never reaches this branch)
+                # is therefore never accrued, the same guarantee as EAS queueing.
+                affiliates.accrue(session, order, store)
             session.commit()
 
 
@@ -735,6 +755,16 @@ class _CreateCheckoutArgs(BaseModel):
     # product (lowest Product.id), byte-identical to the pre-M10 single-product
     # behaviour. A store with several products (M10 add-product) can target any.
     product_id: int | None = None
+    # M13 affiliate attribution (optional): the referring agent's payout wallet.
+    ref: str | None = None
+
+    @field_validator("ref")
+    @classmethod
+    def _v_ref(cls, v):
+        try:
+            return affiliates.normalize_ref(v)
+        except affiliates.RefRejected as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class _PayArgs(BaseModel):
@@ -807,11 +837,15 @@ def _mcp_tools() -> list[dict]:
                 "Create a unique-amount on-chain checkout (for agents that pay the "
                 "merchant themselves and submit the tx hash via `pay`). Pass an "
                 "optional product_id to check out a specific product; omit it for "
-                "the store's primary product."
+                "the store's primary product. Pass an optional `ref` (a 0x EVM "
+                "address) to attribute the sale to a referring agent's payout wallet."
             ),
             "inputSchema": {
                 "type": "object",
-                "properties": {"product_id": {"type": "integer"}},
+                "properties": {
+                    "product_id": {"type": "integer"},
+                    "ref": {"type": "string"},
+                },
                 "additionalProperties": False,
             },
         },
@@ -893,7 +927,10 @@ def _tool_get_product(
 
 
 def _tool_create_checkout(
-    session: Session, store: Store, product_id: int | None = None
+    session: Session,
+    store: Store,
+    product_id: int | None = None,
+    referrer_addr: str | None = None,
 ) -> dict:
     if product_id is not None:
         product = session.scalar(
@@ -910,7 +947,7 @@ def _tool_create_checkout(
         if product is None:
             raise _ToolError("store has no active product")
     try:
-        order = checkout.create_order(session, store, product)
+        order = checkout.create_order(session, store, product, referrer_addr)
     except checkout.AmountUnavailable as exc:
         raise _ToolError("checkout busy, retry") from exc
     log_event(session, "agentic", "order.created", store_id=store.id, order_id=order.id)
@@ -966,7 +1003,7 @@ def _mcp_tools_call(session: Session, store: Store, slug: str, req_id, params) -
             result = _tool_get_product(session, store, slug, args.product_id)
         elif name == "create_checkout":
             args = _CreateCheckoutArgs.model_validate(raw_args)
-            result = _tool_create_checkout(session, store, args.product_id)
+            result = _tool_create_checkout(session, store, args.product_id, args.ref)
         elif name == "pay":
             result = _tool_pay(session, store, _PayArgs.model_validate(raw_args))
         else:

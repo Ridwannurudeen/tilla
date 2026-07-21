@@ -29,10 +29,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import HTMLResponse, StreamingResponse
 
-from app import chain, checkout, config, delivery, refunds, render, webhooks
+from app import affiliates, chain, checkout, config, delivery, refunds, render, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
+    EmailSubscriber,
     EventLog,
     Merchant,
     Order,
@@ -347,6 +348,8 @@ def merchant_summary(request: Request, session: Session = Depends(get_session)):
                 }
             )
 
+    affiliate_owed_micro = affiliates.merchant_owed_micro(session, merchant.id)
+
     return {
         "merchant": merchant.wallet_address,
         "store_count": len(store_ids),
@@ -357,6 +360,10 @@ def merchant_summary(request: Request, session: Session = Depends(get_session)):
         "outstanding_overpaid_micro": outstanding_overpaid_micro,
         "outstanding_overpaid_usdt": usdt(outstanding_overpaid_micro),
         "underpaid": underpaid,
+        # M13: outstanding (un-refunded, un-paid) affiliate rev-share the merchant
+        # owes referring agents. A number only — no funds move from this figure.
+        "affiliate_owed_micro": affiliate_owed_micro,
+        "affiliate_owed_usdt": usdt(affiliate_owed_micro),
     }
 
 
@@ -582,6 +589,150 @@ def merchant_refund(
     }
 
 
+# ------------------------------------------------------------ M13 affiliates
+class AffiliatePayoutBody(BaseModel):
+    tx_hash: str
+
+    @field_validator("tx_hash")
+    @classmethod
+    def _v_tx(cls, v):
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", v or ""):
+            raise ValueError("tx_hash must be a 0x-prefixed 32-byte hash")
+        return v.lower()
+
+
+@router.get("/api/merchant/affiliates")
+@limiter.limit("60/minute")
+def merchant_affiliates(request: Request, session: Session = Depends(get_session)):
+    """Per-referrer accrued/void/paid totals + per-order rows (with OKLink sale +
+    payout links) for the caller's stores. Behind the _require_merchant IDOR gate;
+    accruals are scoped to the merchant, so no other merchant's ledger is visible."""
+    merchant = _require_merchant(request, session)
+    data = affiliates.merchant_summary(session, merchant.id)
+    for r in data["referrers"]:
+        r["accrued_usdt"] = usdt(r["accrued_micro"])
+        r["void_usdt"] = usdt(r["void_micro"])
+        r["paid_usdt"] = usdt(r["paid_micro"])
+    return {
+        "merchant": merchant.wallet_address,
+        "referrers": data["referrers"],
+        "orders": data["orders"],
+        "owed_micro": data["owed_micro"],
+        "owed_usdt": usdt(data["owed_micro"]),
+    }
+
+
+@router.post("/api/merchant/affiliates/{address}/payout")
+@limiter.limit("10/minute")
+def merchant_affiliate_payout(
+    request: Request,
+    body: AffiliatePayoutBody,
+    address: str = Path(..., min_length=42, max_length=42),
+    session: Session = Depends(get_session),
+):
+    """Record a manual on-chain USDT0 payout the merchant/operator sent to a referring
+    agent from their OWN wallet. VERIFY-AND-RECORD ONLY: Tilla verifies the transfer
+    and flips covered accruals to 'paid' — it constructs no signer and moves no funds
+    (byte-identical to the M9 non-custodial refund). Owning-merchant only; idempotent
+    on (tx_hash, log_index); the applied amount is capped at the outstanding owed."""
+    merchant = _require_merchant(request, session)
+    try:
+        referrer = affiliates.normalize_ref(address)
+    except affiliates.RefRejected as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if referrer is None:
+        raise HTTPException(422, "address is required")
+    try:
+        result = affiliates.verify_and_record_payout(
+            session, merchant.id, referrer, body.tx_hash
+        )
+    except affiliates.PayoutError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    except (httpx.HTTPError, chain.ChainError) as exc:
+        raise HTTPException(502, "chain verification unavailable") from exc
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "payout transfer already recorded") from exc
+    return {
+        "referrer": result["referrer"],
+        "recorded_micro": result["recorded_micro"],
+        "recorded_usdt": usdt(result["recorded_micro"]),
+        "covered_micro": result["covered_micro"],
+        "owed_after_micro": result["owed_after_micro"],
+        "owed_after_usdt": usdt(result["owed_after_micro"]),
+    }
+
+
+# ------------------------------------------------------- M13 email subscribers
+class SubscriberDeleteBody(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+
+@router.get("/api/merchant/stores/{slug}/subscribers")
+@limiter.limit("60/minute")
+def merchant_store_subscribers(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    """The caller's store subscribers (merchant IDOR gate). Emails appear ONLY here,
+    behind auth — never in feeds, discovery, logs, or any unauthenticated body."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    stmt = select(EmailSubscriber).where(
+        EmailSubscriber.store_id == store.id, EmailSubscriber.removed_at.is_(None)
+    )
+    total = session.scalar(select(func.count()).select_from(stmt.subquery()))
+    rows = session.scalars(
+        stmt.order_by(EmailSubscriber.id.desc()).limit(limit).offset(offset)
+    ).all()
+    return {
+        "slug": store.slug,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "subscribers": [
+            {
+                "email": s.email,
+                "source": s.source,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+            for s in rows
+        ],
+    }
+
+
+@router.delete("/api/merchant/stores/{slug}/subscribers")
+@limiter.limit("20/minute")
+def merchant_delete_subscriber(
+    request: Request,
+    body: SubscriberDeleteBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Soft-delete a subscriber (removal request). Idempotent {ok:true} whether or
+    not the email was present (no membership oracle)."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    email = body.email.replace("\r", "").replace("\n", "").strip().lower()
+    row = session.scalar(
+        select(EmailSubscriber).where(
+            EmailSubscriber.store_id == store.id,
+            EmailSubscriber.email == email,
+            EmailSubscriber.removed_at.is_(None),
+        )
+    )
+    if row is not None:
+        row.removed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        log_event(session, "merchant", "subscriber.removed", store_id=store.id)
+        session.commit()
+    return {"ok": True}
+
+
 # ------------------------------------------------------------------ CSV export
 _CSV_INJECT = ("=", "+", "-", "@")
 
@@ -772,6 +923,60 @@ def export_customers_csv(
     merchant = _require_merchant(request, session)
     store_ids = _export_scope(session, merchant, store)
     return _csv_response(_customers_csv_gen(store_ids), "customers.csv")
+
+
+def _subscribers_csv_gen(store_ids):
+    header = ["store_slug", "email", "source", "created_at"]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    def flush():
+        val = buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        return val
+
+    writer.writerow(header)
+    yield flush()
+    if not store_ids:
+        return
+    with SessionLocal() as session:
+        slug_by_id = dict(
+            session.execute(
+                select(Store.id, Store.slug).where(Store.id.in_(store_ids))
+            ).all()
+        )
+        for s in session.scalars(
+            select(EmailSubscriber)
+            .where(
+                EmailSubscriber.store_id.in_(store_ids),
+                EmailSubscriber.removed_at.is_(None),
+            )
+            .order_by(EmailSubscriber.created_at)
+            .execution_options(yield_per=500)
+        ):
+            writer.writerow(
+                _csv_cell(c)
+                for c in [
+                    slug_by_id.get(s.store_id),
+                    s.email,
+                    s.source,
+                    _iso(s.created_at),
+                ]
+            )
+            yield flush()
+
+
+@router.get("/api/merchant/export/subscribers.csv")
+@limiter.limit("20/minute")
+def export_subscribers_csv(
+    request: Request,
+    store: str | None = Query(None, max_length=config.SLUG_MAX_LEN),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store_ids = _export_scope(session, merchant, store)
+    return _csv_response(_subscribers_csv_gen(store_ids), "subscribers.csv")
 
 
 # ------------------------------------------------------------------- webhooks

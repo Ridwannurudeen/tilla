@@ -28,6 +28,8 @@ from sqlalchemy.orm import Session
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from app import (
+    acp,
+    affiliates,
     agentic,
     attest,
     chain,
@@ -35,6 +37,8 @@ from app import (
     config,
     dashboard,
     delivery,
+    embed,
+    external_feeds,
     mpp,
     subscriptions,
     webhooks,
@@ -53,6 +57,7 @@ from app.limiter import limiter
 from app.models import (
     Deliverable,
     Delivery,
+    EmailSubscriber,
     Entitlement,
     Order,
     Product,
@@ -160,6 +165,13 @@ app.include_router(mpp.router)
 # Subscription proxy router: always mounted, 503s until TILLA_SUBSCRIPTIONS_ENABLED
 # (fail-closed); even then it only settles via the sidecar when OKX creds exist.
 app.include_router(subscriptions.router)
+# M13 growth routers (all additive, read-only or dormant):
+#  - external_feeds: OpenAI/Google export shapes generated from the same rows as M7.
+#  - embed: GET /embed.js (the self-contained shadow-DOM buy button asset).
+#  - acp: the five ACP /checkout_sessions endpoints, DORMANT-503 until TILLA_ACP_ENABLED.
+app.include_router(external_feeds.router)
+app.include_router(embed.router)
+app.include_router(acp.router)
 
 
 @app.middleware("http")
@@ -660,12 +672,28 @@ def _augment_gated(session: Session, order: Order, out: dict) -> None:
             out["download_url"] = delivery.download_url(token)
 
 
+class CheckoutCreateBody(BaseModel):
+    # M13 affiliate attribution (additive, optional). The referring agent's payout
+    # wallet; themes forward `?ref=` here. Validated + lowercased, zero-address
+    # rejected. Absent/empty -> no attribution, byte-identical to the pre-M13 flow.
+    ref: str | None = None
+
+    @field_validator("ref")
+    @classmethod
+    def _v_ref(cls, v):
+        try:
+            return affiliates.normalize_ref(v)
+        except affiliates.RefRejected as exc:
+            raise ValueError(str(exc)) from exc
+
+
 # ---------- store checkout: buyer pays the merchant ----------
 @app.post("/api/checkout/{slug}")
 @limiter.limit("20/minute")
 def create_checkout(
     request: Request,
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    body: CheckoutCreateBody | None = None,
     session: Session = Depends(get_session),
 ):
     store = session.scalar(select(Store).where(Store.slug == slug))
@@ -680,8 +708,9 @@ def create_checkout(
         .where(Product.store_id == store.id, Product.active.is_(True))
         .order_by(Product.id)
     )
+    referrer_addr = body.ref if body is not None else None
     try:
-        order = checkout.create_order(session, store, product)
+        order = checkout.create_order(session, store, product, referrer_addr)
     except checkout.AmountUnavailable as exc:
         raise HTTPException(503, "checkout busy, retry") from exc
     log_event(session, "api", "order.created", store_id=store.id, order_id=order.id)
@@ -1159,6 +1188,77 @@ def library(request: Request, session: Session = Depends(get_session)):
         _augment_gated(session, order, item)
         purchases.append(item)
     return {"wallet": wallet, "purchases": purchases}
+
+
+class WaitlistBody(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+
+
+@app.post("/api/stores/{slug}/waitlist")
+@limiter.limit("5/minute")
+def store_waitlist(
+    request: Request,
+    body: WaitlistBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Public store-level subscriber capture (unauthenticated). Live stores only —
+    a pending/blocked store collects nothing (404). CRLF-stripped, valid_email +
+    255-cap validated, lowercased. A duplicate returns the same silent {ok:true}
+    (no membership oracle); the per-store cap 429s a full list. Capture + export
+    only — ANY sending stays dormant (SMTP unset)."""
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None or store.status != "live":
+        raise HTTPException(404, "store not found")
+    email = body.email.replace("\r", "").replace("\n", "").strip().lower()
+    if not delivery.valid_email(email):
+        raise HTTPException(422, "invalid email address")
+    active = session.scalar(
+        select(func.count())
+        .select_from(EmailSubscriber)
+        .where(
+            EmailSubscriber.store_id == store.id,
+            EmailSubscriber.removed_at.is_(None),
+        )
+    )
+    if active >= config.TILLA_SUBSCRIBERS_MAX:
+        raise HTTPException(429, "subscriber list is full")
+    try:
+        with session.begin_nested():
+            session.add(
+                EmailSubscriber(store_id=store.id, email=email, source="waitlist")
+            )
+    except IntegrityError:
+        # UNIQUE(store_id, email): already subscribed — silent no-op (no oracle).
+        return {"ok": True}
+    log_event(session, "api", "subscriber.captured", store_id=store.id)
+    session.commit()
+    return {"ok": True}
+
+
+@app.get("/api/affiliate/summary")
+@limiter.limit("30/minute")
+def affiliate_summary(request: Request, session: Session = Depends(get_session)):
+    """A referring agent's OWN rev-share balance, gated by the buyer wallet-signature
+    session machinery (they sign as the referrer address). No public amount oracle:
+    the balance is only ever returned to the wallet that earned it."""
+    if not config.SIGNING_KEY:
+        raise HTTPException(503, "sign-in not configured")
+    try:
+        wallet = delivery.load_session_token(_bearer(request))
+    except SignatureExpired:
+        raise HTTPException(401, "session expired") from None
+    except BadSignature:
+        raise HTTPException(401, "invalid session") from None
+    data = affiliates.referrer_summary(session, wallet)
+    for key in ("accrued_micro", "void_micro", "paid_micro"):
+        data["totals"][key.replace("_micro", "_usdt")] = dashboard.usdt(
+            data["totals"][key]
+        )
+    for st in data["stores"]:
+        for key in ("accrued_micro", "void_micro", "paid_micro"):
+            st[key.replace("_micro", "_usdt")] = dashboard.usdt(st[key])
+    return data
 
 
 @app.post("/api/checkout/{cid}/email")
