@@ -1,0 +1,71 @@
+# Pinned JSON Schema (Draft 2020-12) for a Tilla per-store product feed served at
+# GET /s/{slug}/feed.json. Shape derived from the ACP product-feed convention
+# (spec 2026-04-17): a store block plus a list of products, each advertising its
+# x402 buy endpoint. Committed so feed.json is validated against a fixed contract
+# (tests/test_agentic.py) rather than an ad-hoc assertion.
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://tilla.gudman.xyz/schemas/feed.json"
+title: "Tilla product feed"
+type: object
+additionalProperties: false
+required: [store, products]
+properties:
+  store:
+    type: object
+    additionalProperties: false
+    required: [slug, name, description, url]
+    properties:
+      slug:
+        type: string
+        pattern: "^[a-z0-9][a-z0-9-]{0,39}$"
+      name:
+        type: string
+      description:
+        type: string
+      url:
+        type: string
+        format: uri
+  products:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [id, title, description, link, price, availability, x402]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        link:
+          type: string
+          format: uri
+        price:
+          type: object
+          additionalProperties: false
+          required: [amount, currency]
+          properties:
+            amount:
+              type: string
+              pattern: "^[0-9]+(\\.[0-9]+)?$"
+            currency:
+              type: string
+              const: "USDT"
+        availability:
+          type: string
+          enum: ["in_stock", "out_of_stock"]
+        x402:
+          type: object
+          additionalProperties: false
+          required: [endpoint, network, asset]
+          properties:
+            endpoint:
+              type: string
+              pattern: "^/s/[a-z0-9][a-z0-9-]{0,39}/buy$"
+            network:
+              type: string
+              const: "eip155:196"
+            asset:
+              type: string
+              pattern: "^0x[0-9a-fA-F]{40}$"

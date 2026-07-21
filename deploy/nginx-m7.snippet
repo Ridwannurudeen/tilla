@@ -1,0 +1,61 @@
+# M7 nginx routing — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# The crux: /s/ is a static nginx alias to /opt/tilla/stores, so the four
+# per-store agent paths (buy, mcp, feed.json, llms.txt) must be diverted to the
+# app while every /s/{slug}/ page and asset keeps being served statically. A
+# store dir contains only index.html + og.svg (+ store.json); those four
+# filenames never exist as static files and a slug can't contain '/', so one
+# top-level regex location cleanly captures exactly them.
+#
+# PRE-FLIGHT (do this FIRST): `nginx -T | grep -n 'location .*\/s\/'` and confirm
+# the existing static block is `location /s/ {` and NOT `location ^~ /s/ {`. A
+# regex location beats a prefix location UNLESS the prefix uses ^~. If it is ^~,
+# drop the ^~ (nothing else changes — there was no regex location before).
+#
+# Add these three location blocks inside the tilla.gudman.xyz server{} block.
+# Use the SAME proxy_set_header lines as the existing /api/ block.
+#
+#     location ~ ^/s/[a-z0-9][a-z0-9-]{0,39}/(buy|mcp|feed\.json|llms\.txt)$ {
+#         limit_req zone=tilla_api burst=10 nodelay;
+#         client_max_body_size 128k;
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... same proxy_set_header lines as the /api/ block ...
+#     }
+#
+#     location = /.well-known/agent-card.json {
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... same proxy_set_header lines as the /api/ block ...
+#     }
+#
+#     location /discovery/ {
+#         limit_req zone=tilla_api burst=10 nodelay;
+#         client_max_body_size 128k;
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... same proxy_set_header lines as the /api/ block ...
+#     }
+#
+# Notes:
+# - proxy_pass WITHOUT a URI suffix preserves the request path (so the app sees
+#   /s/{slug}/buy etc. unchanged — its route + slug Path pattern do the rest).
+# - The large base64 PAYMENT-REQUIRED response header on a 402 is the same size
+#   class /create-store already serves through this vhost today, so the proven
+#   buffer defaults apply. ONLY if a 502/upstream-header error ever appears, add
+#   `proxy_buffer_size 16k;` to the regex block (that block only).
+# - Trailing-slash requests (/s/x/buy/) fall through to the static alias and 404
+#   — acceptable; nginx simply never forwards them.
+# - `nginx -t` then `systemctl reload nginx` (NEVER restart). Touch no other
+#   vhost (the VPS is shared with other live services — see ground rules).
+#
+# POST-DEPLOY SMOKE (all should answer from the app, not the static alias):
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/s/invoice-flow/feed.json   # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/s/invoice-flow/llms.txt    # 200
+#   curl -s -X POST https://tilla.gudman.xyz/s/invoice-flow/mcp \
+#        -H 'content-type: application/json' \
+#        -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'                                      # JSON-RPC result
+#   curl -s -o /dev/null -w '%{http_code}\n' -X POST https://tilla.gudman.xyz/s/invoice-flow/buy  # 402 (unpaid)
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/.well-known/agent-card.json # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/discovery/resources         # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/s/invoice-flow/             # 200 (still STATIC)
+#
+# ROLLBACK: remove the three location blocks (restores exact prior routing) and
+# `nginx -t` + reload. No app rollback is coupled to this.

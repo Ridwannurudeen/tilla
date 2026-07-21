@@ -18,19 +18,19 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from itsdangerous import BadSignature, SignatureExpired
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from app import chain, checkout, config, delivery
+from app import agentic, chain, checkout, config, delivery
 from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
 from app.engine import create_store as gen_store
 from app.engine import rerender_stores, resume_pending
+from app.limiter import limiter
 from app.models import (
     Deliverable,
     Delivery,
@@ -66,13 +66,38 @@ async def lifespan(app: FastAPI):
     sweeper = None
     if config.SWEEP_ENABLED:
         sweeper = asyncio.create_task(checkout.sweeper_loop())
+    # x402 agent commerce (prod only): pre-warm the facilitator /supported off-loop
+    # so the first protected request doesn't do the blocking sync GET, and run the
+    # reaper that voids agent orders stuck delivered-without-settle.
+    reaper = None
+    if os.getenv("OKX_API_KEY"):
+        await _prewarm_facilitator()
+        reaper = asyncio.create_task(agentic.agent_reaper_loop())
     try:
         yield
     finally:
-        if sweeper is not None:
-            sweeper.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sweeper
+        for task in (sweeper, reaper):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+
+async def _prewarm_facilitator() -> None:
+    """Run the blocking sync facilitator GET /supported at boot, off the event
+    loop, then swap ``_srv.initialize`` to a no-op so the middleware's first
+    protected request degrades to in-memory route validation (which needs the
+    now-populated _supported_responses). On failure, leave the real method in
+    place — the middleware's lazy-init/502-retry fallback is preserved."""
+    srv = globals().get("_srv")
+    if srv is None:
+        return
+    try:
+        await asyncio.to_thread(srv.initialize)
+        srv.initialize = lambda: None
+        logger.info("x402 facilitator pre-warmed at startup")
+    except Exception:
+        logger.exception("x402 facilitator pre-warm failed; lazy init will retry")
 
 
 app = FastAPI(
@@ -81,9 +106,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.include_router(agentic.router)
 
 
 @app.middleware("http")
@@ -867,9 +892,10 @@ if os.environ.get("TILLA_TEST") == "1":
         return {"ok": True}
 
 
-# ---------- x402 paywall on /create-store (Warden's validated config) ----------
+# ---------- x402 paywall on /create-store + per-store /s/{slug}/buy ----------
 if os.getenv("OKX_API_KEY"):
     import httpx
+    from starlette.middleware.base import BaseHTTPMiddleware
     from x402.http import OKXAuthConfig, OKXFacilitatorConfig
     from x402.http.middleware.fastapi import PaymentMiddlewareASGI
     from x402.http.types import RouteConfig
@@ -879,6 +905,7 @@ if os.getenv("OKX_API_KEY"):
     from app.payment import (
         NoRedirectOKXFacilitatorClient,
         build_payment_option,
+        build_store_payment_option,
         load_payment_rail,
     )
 
@@ -903,5 +930,22 @@ if os.getenv("OKX_API_KEY"):
         description="Tilla — create a live crypto storefront on X Layer",
         mime_type="application/json",
     )
-    _paid = {"POST /create-store": _route, "GET /create-store": _route}
+    # ':slug' compiles to [^/]+ (no cross-slash match). pay_to + price resolve
+    # per request from the DB; a settle failure runs the compensating hook.
+    _store_route = RouteConfig(
+        accepts=[build_store_payment_option(_rail)],
+        description="Tilla store purchase",
+        mime_type="application/json",
+        hook_timeout_seconds=5.0,
+        settlement_failed_response_body=agentic.store_settle_failed_hook,
+    )
+    _paid = {
+        "POST /create-store": _route,
+        "GET /create-store": _route,
+        "POST /s/:slug/buy": _store_route,
+    }
     app.add_middleware(PaymentMiddlewareASGI, routes=_paid, server=_srv)
+    # Registered AFTER the payment middleware so it is OUTERMOST (runs first): it
+    # 404/409s a dead store before any payable 402 is emitted and records the
+    # settle tx_hash on the way back.
+    app.add_middleware(BaseHTTPMiddleware, dispatch=agentic.agent_guard_dispatch)
