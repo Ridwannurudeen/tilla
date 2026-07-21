@@ -1,0 +1,98 @@
+# Pinned JSON Schema (Draft 2020-12) for the Tilla OpenAI-shape product feed served
+# at GET /s/{slug}/feed/openai.json and, in aggregate, GET /feeds/openai.json. This
+# is an ADDITIVE export shape (the M7 feed.json is untouched, validated separately by
+# openapi.feed.yaml). It advertises the hosted checkout link + x402 vendor extension
+# and carries NO pay_to / merchant wallet / buyer / order data. Committed so the
+# external feed is validated against a fixed contract (tests/test_external_feeds.py)
+# and both the per-store and Tilla-wide aggregate documents validate against it.
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://tilla.gudman.xyz/schemas/external-feeds.json"
+title: "Tilla OpenAI-shape product feed"
+type: object
+additionalProperties: false
+required: [feed, products]
+properties:
+  feed:
+    type: object
+    # per-store carries {store, name, url}; the aggregate carries {name, url,
+    # store_count} — both require name+url, extras allowed.
+    additionalProperties: true
+    required: [name, url]
+    properties:
+      store:
+        type: string
+        pattern: "^[a-z0-9][a-z0-9-]{0,39}$"
+      name:
+        type: string
+      url:
+        type: string
+        format: uri
+      store_count:
+        type: integer
+        minimum: 0
+  products:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - title
+        - description
+        - link
+        - price
+        - availability
+        - enable_search
+        - enable_checkout
+        - x402
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        link:
+          type: string
+          format: uri
+        # aggregate items carry the owning store slug; per-store items omit it.
+        store:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9-]{0,39}$"
+        price:
+          type: object
+          additionalProperties: false
+          required: [amount, currency]
+          properties:
+            amount:
+              type: string
+              pattern: "^[0-9]+(\\.[0-9]+)?$"
+            currency:
+              type: string
+              const: "USDT"
+        availability:
+          type: string
+          enum: ["in_stock", "out_of_stock"]
+        enable_search:
+          type: boolean
+        enable_checkout:
+          type: boolean
+        x402:
+          type: object
+          additionalProperties: false
+          required: [endpoint, network, asset]
+          properties:
+            endpoint:
+              type: string
+              pattern: "^/s/[a-z0-9][a-z0-9-]{0,39}/buy$"
+            network:
+              type: string
+              const: "eip155:196"
+            asset:
+              type: string
+              pattern: "^0x[0-9a-fA-F]{40}$"
+            schemes:
+              type: array
+              items:
+                type: string
+                enum: ["exact", "aggr_deferred"]
