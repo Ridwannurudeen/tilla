@@ -161,6 +161,15 @@ def deliver(session: Session, order: Order):
     # settling->delivered flip instead, and the void paths emit order.voided.
     if store is not None and order.channel != "agent":
         session.refresh(order)
+        # M11: queue this terminal order for EAS receipt attestation — a pure DB
+        # write in the same txn as the delivered transition (the webhook outbox
+        # pattern). Flag OFF leaves attest_status at its 'none' default forever, so
+        # nothing is ever queued and the dormant attester has nothing to drain. Agent
+        # (x402) orders are the exception (they go provisional 'settling' here):
+        # agentic.record_settlement queues them on the settling->delivered flip so a
+        # voided/reaped order is never attested.
+        if config.ATTEST_ENABLED:
+            order.attest_status = "pending"
         webhooks.enqueue(session, store.merchant_id, "order.paid", order)
         webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
     return session.scalar(select(Delivery).where(Delivery.order_id == order.id))

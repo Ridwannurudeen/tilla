@@ -676,6 +676,11 @@ def record_settlement(
             store = session.get(Store, order.store_id)
             if store is not None:
                 session.refresh(order)
+                # M11: queue for EAS attestation ONLY here, on the settling->delivered
+                # flip — a voided/reaped agent order (which never reaches this branch)
+                # is therefore never attested. Flag OFF => stays 'none', never queued.
+                if config.ATTEST_ENABLED:
+                    order.attest_status = "pending"
                 webhooks.enqueue(session, store.merchant_id, "order.paid", order)
                 webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
             session.commit()
