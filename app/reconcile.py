@@ -90,8 +90,11 @@ def _reconcile_one(session, client, order: Order) -> bool:
             session.commit()
             return True
         return False
-    if resp.status == "failed" or (not resp.success and resp.status != "pending"):
-        # Definitive failure — void the provisional order (never on a pending status).
+    if resp.status == "failed":
+        # DEFINITIVE failure only — void the provisional order. A missing/unknown
+        # status (None) or success=False without an explicit "failed" is NOT
+        # treated as definitive (a facilitator that omits status on a transient
+        # error must never trigger a paid-order void): leave it settling, retry.
         if agentic._void_settling(
             session, order, "agent_order.settle_reconcile_failed"
         ):

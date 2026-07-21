@@ -17,7 +17,7 @@ from x402.http.utils import (
 from x402.schemas import PaymentPayload, PaymentRequired, PaymentRequirements
 
 import app.main as main  # noqa: F401 — ensures app + limiter wired for direct calls
-from app import agentic, config
+from app import agentic, checkout, config
 from app.db import SessionLocal
 from app.models import Order, Product, Store
 from app.payment import (
@@ -393,6 +393,37 @@ def test_reconcile_failed_voids(make_store, monkeypatch):
     events = _events(oid)
     assert "agent_order.settle_reconcile_failed" in events
     assert "agent_order.settled" not in events
+
+
+def test_reconcile_missing_status_does_not_void(make_store, monkeypatch):
+    # A facilitator response with success=False but NO explicit "failed" status
+    # (e.g. status omitted on a transient error) must NOT void a paid order — only
+    # an explicit "failed" is definitive. Stays settling, retried next tick.
+    oid = _pending_settling_order(make_store, "rpns")
+    client = _FakeStatusClient(_status(success=False, status=None))
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+    assert "agent_order.settle_reconcile_failed" not in _events(oid)
+
+
+def test_reaper_exempts_aggr_deferred_orders(make_store, monkeypatch):
+    # A poller-owned aggr order (settle_ref set) whose aggregated tx confirms slowly
+    # must NOT be reaped by the 15-min reaper — that would void a genuinely-paid
+    # order without refund. The reaper skips settle_ref-bearing orders.
+    import datetime
+
+    oid = _pending_settling_order(make_store, "rpreap")
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        # Age it well past the reap window.
+        o.paid_at = checkout._now() - datetime.timedelta(hours=2)
+        s.commit()
+        reaped = agentic.reap_agent_orders(s)
+        s.commit()
+        assert reaped == 0
+        assert s.get(Order, oid).status == "settling"  # left for the poller
 
 
 def test_reconcile_idempotent_double_tick(make_store, monkeypatch):

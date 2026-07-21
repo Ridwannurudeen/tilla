@@ -683,10 +683,14 @@ def reap_agent_orders(session: Session, now=None) -> int:
     now = now or checkout._now()
     cutoff = now - REAP_AFTER
     reaped = 0
+    # aggr_deferred orders (settle_ref set) are EXEMPT: their aggregated tx can
+    # confirm after the 15-min window and the M8 reconciliation poller owns their
+    # lifecycle — reaping them could void a genuinely-paid-but-slow order.
     orders = session.scalars(
         select(Order).where(
             Order.channel == "agent",
             Order.status == "settling",
+            Order.settle_ref.is_(None),
         )
     ).all()
     for o in orders:
