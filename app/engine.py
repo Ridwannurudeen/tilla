@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app import config, screening
 from app.db import SessionLocal
+from app.delivery import mint_manage_key
 from app.models import Product, Store, get_or_create_merchant, log_event
 from app.render import render as render_theme
 
@@ -163,6 +164,9 @@ def create_store(desc, addr=None, delivery=None):
     status = screening.scan_with_retry(_screening_text(desc, content))
     price_micro = int(round(float(content.get("price_usdt", 0)) * 1e6))
     pending = status == "pending"
+    # Per-store capability secret returned ONCE to the paid caller (the store
+    # owner by construction). Only its sha256 hash is persisted.
+    manage_key, manage_key_hash = mint_manage_key()
 
     # Resolve the slug and write everything slug-dependent inside a short retry
     # loop: stores.slug is UNIQUE, so a concurrent create that grabbed the same
@@ -222,6 +226,7 @@ def create_store(desc, addr=None, delivery=None):
                     merchant_id=merchant.id,
                     status="pending_screening" if pending else "live",
                     pay_to=addr,
+                    manage_key_hash=manage_key_hash,
                     delivery=store_delivery,
                     description=desc,
                     # Persist content for LIVE stores too (not just pending), so a
@@ -264,6 +269,7 @@ def create_store(desc, addr=None, delivery=None):
             "slug": slug,
             "status": "pending_screening",
             "store_name": content.get("store_name", ""),
+            "manage_key": manage_key,
             "message": (
                 "Store queued: content screening is temporarily unavailable. "
                 "It will not go live until screening completes."
@@ -275,6 +281,7 @@ def create_store(desc, addr=None, delivery=None):
         "url": f"https://tilla.gudman.xyz/s/{slug}/",
         "product_name": content.get("product_name", ""),
         "price_usdt": content.get("price_usdt", 0),
+        "manage_key": manage_key,
     }
 
 

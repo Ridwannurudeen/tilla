@@ -21,11 +21,13 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config
+from app import chain, config, delivery
 from app.db import SessionLocal
 from app.models import (
     ChainCursor,
+    Deliverable,
     Delivery,
+    Entitlement,
     Order,
     ProcessedTransfer,
     Product,
@@ -86,18 +88,62 @@ def transition(
     return result.rowcount == 1
 
 
+def _active_deliverable(session: Session, store_id: int) -> Deliverable | None:
+    """The store's one active deliverable, if any. None → the legacy store.delivery
+    text path, unchanged for every existing store."""
+    return session.scalar(
+        select(Deliverable)
+        .where(Deliverable.store_id == store_id, Deliverable.active.is_(True))
+        .order_by(Deliverable.id.desc())
+        .limit(1)
+    )
+
+
 def deliver(session: Session, order: Order):
     """Flip a ready order to delivered AND write its Delivery row in one txn.
     Idempotent: a lost race (rowcount 0) or a duplicate Delivery returns the
     existing row instead of raising — this is the fix for the concurrent-poll
-    delivery race that used to 500 the loser on UNIQUE(order_id)."""
+    delivery race that used to 500 the loser on UNIQUE(order_id).
+
+    If the store has an active deliverable, an Entitlement is created in the same
+    txn (begin_nested + UNIQUE(order_id), same idempotency as the Delivery row)
+    and the Delivery payload is the text secret / license key / a short file-ready
+    message. With no deliverable the behaviour is EXACTLY the legacy text path."""
     if not transition(session, order.id, READY_TO_DELIVER, "delivered", paid_at=_now()):
         return session.scalar(select(Delivery).where(Delivery.order_id == order.id))
     store = session.get(Store, order.store_id)
-    payload = store.delivery if store and store.delivery else DEFAULT_DELIVERY
+    deliverable = _active_deliverable(session, order.store_id)
+    if deliverable is None:
+        kind = "text"
+        payload = store.delivery if store and store.delivery else DEFAULT_DELIVERY
+    else:
+        license_key = None
+        if deliverable.kind == "license":
+            kind = "license"
+            license_key = delivery.mint_license_key()
+            payload = license_key
+        elif deliverable.kind == "file":
+            kind = "file"
+            payload = delivery.FILE_READY_MESSAGE
+        else:
+            kind = "text"
+            payload = deliverable.payload or DEFAULT_DELIVERY
+        try:
+            with session.begin_nested():
+                session.add(
+                    Entitlement(
+                        order_id=order.id,
+                        deliverable_id=deliverable.id,
+                        buyer_addr=order.from_addr,
+                        license_key=license_key,
+                    )
+                )
+        except IntegrityError:
+            # Entitlement already issued for this order (idempotent replay).
+            pass
     try:
         with session.begin_nested():
-            session.add(Delivery(order_id=order.id, kind="text", payload=payload))
+            session.add(Delivery(order_id=order.id, kind=kind, payload=payload))
     except IntegrityError:
         # belt-and-braces: a Delivery already existed (legacy 'paid' edge); the
         # savepoint rolled back only the insert, so re-read and return it.
