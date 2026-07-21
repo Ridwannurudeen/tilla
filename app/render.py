@@ -104,6 +104,14 @@ def render(content: Mapping, addr: str, slug: str, theme: str = "original.html")
     return template.render(**ctx)
 
 
+def render_shell(template: str) -> str:
+    """Render a data-free template (the M9 ``_dashboard.html`` shell) through the
+    same autoescaped env as the store themes. The shell carries no merchant data —
+    every store/order/refund string is fetched client-side and written via
+    textContent — so this is purely to serve it from the one hardened env."""
+    return _env.get_template(template).render()
+
+
 def render_og(content: Mapping, slug: str) -> str:
     """Render the per-store Open Graph card (SVG, 1200x630). Served statically at
     /s/<slug>/og.svg and referenced from og:image / twitter:image. Autoescaped

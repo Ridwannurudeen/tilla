@@ -6,6 +6,7 @@ network, no funds.
 """
 
 import hashlib
+import secrets
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -13,14 +14,56 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import app.main as main
+from app import checkout
 from app.db import SessionLocal
-from app.models import Merchant
+from app.models import Merchant, Order
 
 client = TestClient(main.app)
 
 
 def _auth(token: str) -> dict:
     return {"Authorization": "Bearer " + token}
+
+
+# ------------------------------------------------------------ sale seed helpers
+def _order_id(slug: str) -> str:
+    return client.post("/api/checkout/" + slug).json()["id"]
+
+
+def _apply(cid: str, value: int, from_addr: str = "0x" + "2" * 40) -> None:
+    """Drive an order through the real state machine with a given inbound value —
+    no network. value == expected → delivered; < expected → underpaid; > → overpaid."""
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        checkout.apply_transfer(
+            s,
+            o,
+            value,
+            tx_hash="0x" + secrets.token_hex(32),
+            log_index=0,
+            block_number=1,
+            from_addr=from_addr,
+            head=10**9,
+        )
+        s.commit()
+
+
+def _expected(cid: str) -> int:
+    with SessionLocal() as s:
+        return s.get(Order, cid).expected_micro
+
+
+def _seed_sale(slug: str, from_addr: str = "0x" + "2" * 40) -> tuple[str, int]:
+    cid = _order_id(slug)
+    exp = _expected(cid)
+    _apply(cid, exp, from_addr)
+    return cid, exp
+
+
+def _owned_store(acct, slug: str, make_store, price_micro: int = 9_000_000):
+    """A live store whose receive wallet is `acct` — so signing in as `acct` owns
+    it (merchant_id derives from pay_to at create time)."""
+    make_store(slug=slug, pay_to=acct.address.lower(), price_micro=price_micro)
 
 
 # ---------------------------------------------------------------- sign-in helpers
@@ -169,3 +212,147 @@ def test_api_key_rotation_kills_old_key():
     assert dead.status_code == 401
     live = client.post("/api/merchant/api-key", headers=_auth(new))
     assert live.status_code == 200
+
+
+# ---------------------------------------------------- multi-store + summary math
+def test_multi_store_lists_both_with_revenue(make_store):
+    """BUILD.md M9 acceptance: one merchant → two stores (same receive wallet) →
+    a sale on each → GET /stores lists both with correct net revenue."""
+    acct = Account.create()
+    _owned_store(acct, "storeone", make_store)
+    _owned_store(acct, "storetwo", make_store)
+    _, exp1 = _seed_sale("storeone")
+    _, exp2 = _seed_sale("storetwo")
+    token = _merchant_token(acct)
+
+    data = client.get("/api/merchant/stores", headers=_auth(token)).json()
+    stores = {s["slug"]: s for s in data["stores"]}
+    assert set(stores) == {"storeone", "storetwo"}
+    assert stores["storeone"]["revenue_micro"] == exp1
+    assert stores["storetwo"]["revenue_micro"] == exp2
+    assert stores["storeone"]["order_counts"].get("delivered") == 1
+
+
+def test_summary_revenue_counts_and_underpaid(make_store):
+    acct = Account.create()
+    _owned_store(acct, "sumstore", make_store)
+    _, exp = _seed_sale("sumstore")
+    # an underpaid order that M9 refund resolution must surface
+    under_cid = _order_id("sumstore")
+    under_exp = _expected(under_cid)
+    _apply(under_cid, under_exp - 1_000_000)
+    token = _merchant_token(acct)
+
+    s = client.get("/api/merchant/summary", headers=_auth(token)).json()
+    assert s["store_count"] == 1
+    assert s["revenue_micro"] == exp  # only the delivered sale counts
+    assert s["counts"].get("delivered") == 1
+    assert s["counts"].get("underpaid") == 1
+    under_ids = {u["order_id"] for u in s["underpaid"]}
+    assert under_cid in under_ids
+    # per-product breakdown present with the delivered revenue
+    assert s["products"] and s["products"][0]["revenue_micro"] == exp
+
+
+def test_summary_overpaid_surfaced_as_outstanding(make_store):
+    acct = Account.create()
+    _owned_store(acct, "overstore", make_store)
+    cid = _order_id("overstore")
+    exp = _expected(cid)
+    _apply(cid, exp + 2_000_000)  # overpaid → delivered, surplus 2 USDT0
+    token = _merchant_token(acct)
+    s = client.get("/api/merchant/summary", headers=_auth(token)).json()
+    assert s["outstanding_overpaid_micro"] == 2_000_000
+
+
+# ----------------------------------------------------------------- IDOR matrix
+def test_idor_store_list_scoped_to_caller(make_store):
+    a, b = Account.create(), Account.create()
+    _owned_store(a, "a-store", make_store)
+    _owned_store(b, "b-store", make_store)
+    _seed_sale("a-store")
+    tok_b = _merchant_token(b)
+    stores = client.get("/api/merchant/stores", headers=_auth(tok_b)).json()["stores"]
+    slugs = {s["slug"] for s in stores}
+    assert slugs == {"b-store"}  # B never sees A's store
+
+
+def test_idor_store_orders_and_order_detail_404_for_non_owner(make_store):
+    a, b = Account.create(), Account.create()
+    _owned_store(a, "aa-store", make_store)
+    _owned_store(b, "bb-store", make_store)
+    cid, _ = _seed_sale("aa-store")
+    tok_b = _merchant_token(b)
+    # B cannot list A's store orders, nor read A's order — uniform 404
+    assert (
+        client.get(
+            "/api/merchant/stores/aa-store/orders", headers=_auth(tok_b)
+        ).status_code
+        == 404
+    )
+    assert (
+        client.get("/api/merchant/orders/" + cid, headers=_auth(tok_b)).status_code
+        == 404
+    )
+    # A (the owner) can
+    tok_a = _merchant_token(a)
+    assert (
+        client.get("/api/merchant/orders/" + cid, headers=_auth(tok_a)).status_code
+        == 200
+    )
+
+
+def test_unknown_store_and_order_are_404(make_store):
+    acct = Account.create()
+    _owned_store(acct, "known", make_store)
+    token = _merchant_token(acct)
+    assert (
+        client.get("/api/merchant/stores/nope/orders", headers=_auth(token)).status_code
+        == 404
+    )
+    assert (
+        client.get("/api/merchant/orders/deadbeef", headers=_auth(token)).status_code
+        == 404
+    )
+
+
+def test_order_detail_has_oklink_and_timeline(make_store):
+    acct = Account.create()
+    _owned_store(acct, "detailstore", make_store)
+    cid, exp = _seed_sale("detailstore")
+    token = _merchant_token(acct)
+    d = client.get("/api/merchant/orders/" + cid, headers=_auth(token)).json()
+    assert d["order_id"] == cid
+    assert d["tx_url"].startswith("https://www.oklink.com/x-layer/tx/")
+    events = {e["event"] for e in d["timeline"]}
+    assert "order.confirmed" in events and "order.delivered" in events
+    assert d["paid_usdt"] == f"{exp // 1_000_000}.{exp % 1_000_000:06d}"
+
+
+# -------------------------------------------- _require_store_key merchant seam
+def test_merchant_session_authorizes_store_key_seam(make_store):
+    """A merchant session token authorizes the manage-key seam for a store it owns
+    (pricing), and a non-owner merchant is rejected — manage keys still work."""
+    a, b = Account.create(), Account.create()
+    _owned_store(a, "seamstore", make_store)
+    tok_a = _merchant_token(a)
+    tok_b = _merchant_token(b)
+    ok = client.post(
+        "/api/stores/seamstore/pricing",
+        headers=_auth(tok_a),
+        json={"pricing_model": "one_time"},
+    )
+    assert ok.status_code == 200, ok.text
+    denied = client.post(
+        "/api/stores/seamstore/pricing",
+        headers=_auth(tok_b),
+        json={"pricing_model": "one_time"},
+    )
+    assert denied.status_code == 401
+
+
+def test_dashboard_shell_renders_without_data():
+    r = client.get("/dashboard")
+    assert r.status_code == 200
+    assert "personal_sign" in r.text
+    assert "{{" not in r.text  # no Jinja leak; shell carries no server data

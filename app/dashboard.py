@@ -16,16 +16,26 @@ import hashlib
 import re
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from itsdangerous import BadSignature, SignatureExpired
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.responses import HTMLResponse
 
-from app import config, delivery
+from app import checkout, config, delivery, render
 from app.db import get_session
 from app.limiter import limiter
-from app.models import Merchant, get_or_create_merchant, log_event
+from app.models import (
+    EventLog,
+    Merchant,
+    Order,
+    Product,
+    Refund,
+    Store,
+    get_or_create_merchant,
+    log_event,
+)
 
 router = APIRouter()
 
@@ -143,3 +153,301 @@ def merchant_api_key(request: Request, session: Session = Depends(get_session)):
     log_event(session, "merchant", "api_key.minted", data={"merchant_id": merchant.id})
     session.commit()
     return {"api_key": plaintext}
+
+
+# ------------------------------------------------------------- money + ownership
+def usdt(micro) -> str:
+    """Exact 6dp USDT0 display string for an integer micro amount (no float)."""
+    micro = int(micro or 0)
+    sign = "-" if micro < 0 else ""
+    micro = abs(micro)
+    return f"{sign}{micro // 1_000_000}.{micro % 1_000_000:06d}"
+
+
+def _owned_store(session: Session, merchant: Merchant, slug: str) -> Store:
+    """The store with `slug` IFF it belongs to `merchant`; 404 otherwise. The one
+    IDOR gate for store-scoped routes — a non-owned or unknown slug is
+    indistinguishable (uniform 404, no existence oracle)."""
+    store = session.scalar(
+        select(Store).where(Store.slug == slug, Store.merchant_id == merchant.id)
+    )
+    if store is None:
+        raise HTTPException(404, "store not found")
+    return store
+
+
+def _owned_order(
+    session: Session, merchant: Merchant, order_id: str
+) -> tuple[Order, Store]:
+    """The order and its store IFF the store belongs to `merchant`; 404 otherwise."""
+    order = session.get(Order, order_id)
+    if order is not None:
+        store = session.get(Store, order.store_id)
+        if store is not None and store.merchant_id == merchant.id:
+            return order, store
+    raise HTTPException(404, "order not found")
+
+
+def _store_stats(session: Session, store_ids: list[int]) -> dict[int, dict]:
+    """Per-store {counts_by_status, revenue_micro, refunded_micro} in one grouped
+    query over ix_orders_store_status. revenue_micro = SUM(paid_micro - refunded_micro)
+    over delivered/paid orders (a full refund flips status out of that set → 0)."""
+    stats: dict[int, dict] = {
+        sid: {"counts": {}, "revenue_micro": 0, "refunded_micro": 0}
+        for sid in store_ids
+    }
+    if not store_ids:
+        return stats
+    rows = session.execute(
+        select(
+            Order.store_id,
+            Order.status,
+            func.count(),
+            func.coalesce(func.sum(Order.paid_micro), 0),
+            func.coalesce(func.sum(Order.refunded_micro), 0),
+        )
+        .where(Order.store_id.in_(store_ids))
+        .group_by(Order.store_id, Order.status)
+    ).all()
+    for store_id, status, count, paid, refunded in rows:
+        st = stats[store_id]
+        st["counts"][status] = count
+        st["refunded_micro"] += int(refunded)
+        if status in checkout.TERMINAL_DELIVERED:
+            st["revenue_micro"] += int(paid) - int(refunded)
+    return stats
+
+
+# --------------------------------------------------------------- read endpoints
+@router.get("/api/merchant/stores")
+@limiter.limit("60/minute")
+def merchant_stores(request: Request, session: Session = Depends(get_session)):
+    """Every store owned by the caller, with order counts by status and net
+    revenue. A second store is created simply by calling /create-store again with
+    the same receive_address — the merchant_id association is automatic."""
+    merchant = _require_merchant(request, session)
+    stores = session.scalars(
+        select(Store)
+        .where(Store.merchant_id == merchant.id)
+        .order_by(Store.created_at.desc())
+    ).all()
+    stats = _store_stats(session, [s.id for s in stores])
+    out = []
+    for s in stores:
+        st = stats[s.id]
+        out.append(
+            {
+                "slug": s.slug,
+                "status": s.status,
+                "theme": s.theme,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "order_counts": st["counts"],
+                "revenue_micro": st["revenue_micro"],
+                "revenue_usdt": usdt(st["revenue_micro"]),
+                "refunded_micro": st["refunded_micro"],
+            }
+        )
+    return {"merchant": merchant.wallet_address, "stores": out}
+
+
+@router.get("/api/merchant/summary")
+@limiter.limit("60/minute")
+def merchant_summary(request: Request, session: Session = Depends(get_session)):
+    """Cross-store totals for the caller: net revenue, counts per status, a
+    per-product breakdown, the outstanding (un-refunded) overpaid total, and the
+    underpaid orders still needing an M9 refund resolution."""
+    merchant = _require_merchant(request, session)
+    store_ids = session.scalars(
+        select(Store.id).where(Store.merchant_id == merchant.id)
+    ).all()
+    store_ids = list(store_ids)
+    stats = _store_stats(session, store_ids)
+    counts: dict[str, int] = {}
+    revenue_micro = 0
+    for st in stats.values():
+        revenue_micro += st["revenue_micro"]
+        for status, n in st["counts"].items():
+            counts[status] = counts.get(status, 0) + n
+
+    slug_by_id = (
+        dict(
+            session.execute(
+                select(Store.id, Store.slug).where(Store.id.in_(store_ids))
+            ).all()
+        )
+        if store_ids
+        else {}
+    )
+
+    products = []
+    if store_ids:
+        prod_rows = session.execute(
+            select(
+                Product.id,
+                Product.name,
+                Product.store_id,
+                func.count(Order.id),
+                func.coalesce(func.sum(Order.paid_micro), 0),
+                func.coalesce(func.sum(Order.refunded_micro), 0),
+            )
+            .join(Order, Order.product_id == Product.id)
+            .where(
+                Product.store_id.in_(store_ids),
+                Order.status.in_(checkout.TERMINAL_DELIVERED),
+            )
+            .group_by(Product.id)
+        ).all()
+        for pid, name, store_id, n, paid, refunded in prod_rows:
+            products.append(
+                {
+                    "product_id": pid,
+                    "name": name,
+                    "store_slug": slug_by_id.get(store_id),
+                    "orders": n,
+                    "revenue_micro": int(paid) - int(refunded),
+                    "revenue_usdt": usdt(int(paid) - int(refunded)),
+                }
+            )
+
+    outstanding_overpaid_micro = 0
+    underpaid = []
+    if store_ids:
+        for o in session.scalars(
+            select(Order).where(
+                Order.store_id.in_(store_ids),
+                Order.status.in_(checkout.TERMINAL_DELIVERED),
+                Order.overpaid_micro > 0,
+            )
+        ):
+            outstanding_overpaid_micro += max(
+                (o.overpaid_micro or 0) - (o.refunded_micro or 0), 0
+            )
+        for o in session.scalars(
+            select(Order)
+            .where(Order.store_id.in_(store_ids), Order.status == "underpaid")
+            .order_by(Order.created_at.desc())
+        ):
+            underpaid.append(
+                {
+                    "order_id": o.id,
+                    "store_slug": slug_by_id.get(o.store_id),
+                    "expected_micro": o.expected_micro,
+                    "paid_micro": o.paid_micro,
+                    "expected_usdt": usdt(o.expected_micro),
+                    "paid_usdt": usdt(o.paid_micro),
+                    "from_addr": o.from_addr,
+                    "created_at": o.created_at.isoformat() if o.created_at else None,
+                }
+            )
+
+    return {
+        "merchant": merchant.wallet_address,
+        "store_count": len(store_ids),
+        "revenue_micro": revenue_micro,
+        "revenue_usdt": usdt(revenue_micro),
+        "counts": counts,
+        "products": products,
+        "outstanding_overpaid_micro": outstanding_overpaid_micro,
+        "outstanding_overpaid_usdt": usdt(outstanding_overpaid_micro),
+        "underpaid": underpaid,
+    }
+
+
+def _order_row(order: Order, store: Store) -> dict:
+    return {
+        "order_id": order.id,
+        "store_slug": store.slug,
+        "status": order.status,
+        "channel": order.channel,
+        "amount_micro": order.amount_micro,
+        "expected_micro": order.expected_micro,
+        "paid_micro": order.paid_micro,
+        "overpaid_micro": order.overpaid_micro,
+        "refunded_micro": order.refunded_micro,
+        "expected_usdt": usdt(order.expected_micro),
+        "paid_usdt": usdt(order.paid_micro),
+        "refunded_usdt": usdt(order.refunded_micro),
+        "from_addr": order.from_addr,
+        "tx_hash": order.tx_hash,
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+        "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+    }
+
+
+@router.get("/api/merchant/stores/{slug}/orders")
+@limiter.limit("60/minute")
+def merchant_store_orders(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    status: str | None = Query(None, max_length=20),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    stmt = select(Order).where(Order.store_id == store.id)
+    if status:
+        stmt = stmt.where(Order.status == status)
+    total = session.scalar(select(func.count()).select_from(stmt.subquery()))
+    orders = session.scalars(
+        stmt.order_by(Order.created_at.desc()).limit(limit).offset(offset)
+    ).all()
+    return {
+        "slug": store.slug,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "orders": [_order_row(o, store) for o in orders],
+    }
+
+
+@router.get("/api/merchant/orders/{order_id}")
+@limiter.limit("60/minute")
+def merchant_order_detail(
+    request: Request,
+    order_id: str = Path(..., min_length=1, max_length=32),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    order, store = _owned_order(session, merchant, order_id)
+    product = session.get(Product, order.product_id) if order.product_id else None
+    detail = _order_row(order, store)
+    detail["product_name"] = product.name if product else None
+    detail["buyer_email"] = order.buyer_email
+    detail["tx_url"] = config.OKLINK_TX_BASE + order.tx_hash if order.tx_hash else None
+    refunds = session.scalars(
+        select(Refund).where(Refund.order_id == order.id).order_by(Refund.id)
+    ).all()
+    detail["refunds"] = [
+        {
+            "kind": r.kind,
+            "amount_micro": r.amount_micro,
+            "amount_usdt": usdt(r.amount_micro),
+            "tx_hash": r.tx_hash,
+            "tx_url": config.OKLINK_TX_BASE + r.tx_hash,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in refunds
+    ]
+    timeline = session.scalars(
+        select(EventLog).where(EventLog.order_id == order.id).order_by(EventLog.id)
+    ).all()
+    detail["timeline"] = [
+        {
+            "source": e.source,
+            "event": e.event,
+            "ts": e.ts.isoformat() if e.ts else None,
+        }
+        for e in timeline
+    ]
+    return detail
+
+
+@router.get("/dashboard")
+def dashboard_shell():
+    """The merchant dashboard SPA shell. Autoescaped, carries NO merchant data:
+    its inline JS does connect → nonce → personal_sign → verify (token kept in
+    memory only) and renders every API string via textContent, so hostile
+    store/product/order text can never become markup."""
+    return HTMLResponse(render.render_shell("_dashboard.html"))

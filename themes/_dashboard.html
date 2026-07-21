@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Tilla · Merchant dashboard</title>
+<style>
+  :root { --bg:#0b0b12; --panel:#15151f; --line:#26263a; --text:#f5f5fa; --muted:#9a9ab0; --primary:#6c5ce7; --accent:#00d1b2; --danger:#ff5c72; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text); }
+  a { color:var(--accent); }
+  header { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.02em; }
+  .wrap { max-width:960px; margin:0 auto; padding:20px; }
+  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:8px; padding:9px 14px; }
+  button.primary { background:var(--primary); border-color:var(--primary); }
+  button.ghost { background:transparent; }
+  button:disabled { opacity:.5; cursor:default; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  .stat { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .stat .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  .stat .v { font-size:22px; font-weight:600; margin-top:4px; word-break:break-word; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; word-break:break-all; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted); }
+  .muted { color:var(--muted); }
+  .err { color:var(--danger); }
+  .ok { color:var(--accent); }
+  input, select { font:inherit; background:#0f0f18; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 11px; }
+  input { width:100%; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  .hide { display:none; }
+  .clickable { cursor:pointer; }
+  .clickable:hover td { background:#1b1b28; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tilla · Merchant</h1>
+  <div class="row">
+    <span id="whoami" class="muted mono"></span>
+    <button id="signBtn" class="primary">Connect wallet</button>
+    <button id="signOut" class="ghost hide">Sign out</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="msg" class="card hide"></div>
+
+  <!-- signed-out -->
+  <div id="viewLogin" class="card">
+    <p>Sign in with your store's receive wallet to see every store you own, its
+       orders and revenue, issue non-custodial refunds, export CSV, and configure
+       a webhook. Nothing is stored — you re-sign on refresh.</p>
+    <p class="muted">This dashboard never holds funds. A refund is a transfer you
+       send from your own wallet; paste the tx hash and Tilla verifies it on X Layer.</p>
+  </div>
+
+  <!-- signed-in -->
+  <div id="viewMain" class="hide">
+    <div id="summary" class="grid"></div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <strong>Webhook</strong>
+        <span id="whStatus" class="muted"></span>
+      </div>
+      <label for="whUrl">Endpoint URL (https only)</label>
+      <input id="whUrl" placeholder="https://example.com/tilla/webhook" />
+      <div class="row" style="margin-top:10px">
+        <button id="whSave">Save / rotate</button>
+        <button id="whDelete" class="ghost">Remove</button>
+      </div>
+      <div id="whSecret" class="hide" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <strong>Export</strong>
+        <div class="row">
+          <button id="csvOrders" class="ghost">orders.csv</button>
+          <button id="csvCustomers" class="ghost">customers.csv</button>
+        </div>
+      </div>
+    </div>
+    <h3>Underpaid orders needing refund</h3>
+    <div id="underpaid" class="card scroll"></div>
+    <h3>Your stores</h3>
+    <div id="stores"></div>
+  </div>
+
+  <!-- one store's orders -->
+  <div id="viewStore" class="hide">
+    <button id="backToMain" class="ghost">&larr; Back</button>
+    <h3 id="storeTitle"></h3>
+    <div id="storeOrders" class="card scroll"></div>
+  </div>
+
+  <!-- one order -->
+  <div id="viewOrder" class="hide">
+    <button id="backFromOrder" class="ghost">&larr; Back</button>
+    <div id="orderDetail"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var TOKEN = null, ADDR = null, LAST_STORE = null, LAST_ORDER = null;
+
+  // ---- EIP-6963 provider discovery (M5 pattern) ----
+  var providers = [];
+  window.addEventListener("eip6963:announceProvider", function (e) { if (e.detail) providers.push(e.detail); });
+  try { window.dispatchEvent(new Event("eip6963:requestProvider")); } catch (e) {}
+  function pickProvider() {
+    for (var i = 0; i < providers.length; i++) {
+      var rdns = ((providers[i].info && providers[i].info.rdns) || "").toLowerCase();
+      if (rdns.indexOf("okex") !== -1 || rdns.indexOf("okx") !== -1) return providers[i].provider;
+    }
+    if (window.okxwallet) return window.okxwallet;
+    if (providers.length) return providers[0].provider;
+    if (window.ethereum) return window.ethereum;
+    return null;
+  }
+  function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
+
+  // ---- helpers ----
+  function byId(id) { return document.getElementById(id); }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function show(id) { ["viewLogin","viewMain","viewStore","viewOrder"].forEach(function (v) { byId(v).classList.toggle("hide", v !== id); }); }
+  function flash(text, isErr) { var m = byId("msg"); m.textContent = text || ""; m.className = "card" + (text ? "" : " hide") + (isErr ? " err" : ""); }
+  function auth() { return { "Authorization": "Bearer " + TOKEN }; }
+
+  async function api(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers || {}, auth());
+    var r = await fetch(path, opts);
+    if (r.status === 401) { signOut(); throw new Error("Session expired — sign in again."); }
+    var body = null;
+    try { body = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error((body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : ("request failed (" + r.status + ")"));
+    return body;
+  }
+
+  // ---- sign-in ----
+  async function signIn() {
+    flash("");
+    var provider = pickProvider();
+    if (!provider) { flash("No wallet detected — open this page in your wallet's browser.", true); return; }
+    var btn = byId("signBtn"); btn.disabled = true;
+    var account;
+    try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
+    catch (e) { flash(isReject(e) ? "Connection declined." : "Could not connect wallet.", true); btn.disabled = false; return; }
+    if (!account) { btn.disabled = false; return; }
+    var message;
+    try {
+      var nr = await fetch("/api/merchant/auth/nonce", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: account }) });
+      if (!nr.ok) throw new Error("nonce");
+      message = (await nr.json()).message;
+    } catch (e) { flash("Could not start sign-in — retry.", true); btn.disabled = false; return; }
+    var signature;
+    try { signature = await provider.request({ method: "personal_sign", params: [message, account] }); }
+    catch (e) { flash(isReject(e) ? "Signature declined." : "Could not sign.", true); btn.disabled = false; return; }
+    try {
+      var vr = await fetch("/api/merchant/auth/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: account, signature: signature }) });
+      if (vr.status === 401) { flash("Signature could not be verified.", true); btn.disabled = false; return; }
+      if (!vr.ok) throw new Error("verify");
+      TOKEN = (await vr.json()).session_token;
+      ADDR = account.toLowerCase();
+    } catch (e) { flash("Could not verify signature — retry.", true); btn.disabled = false; return; }
+    btn.disabled = false;
+    onSignedIn();
+  }
+
+  function signOut() {
+    TOKEN = null; ADDR = null; LAST_STORE = null; LAST_ORDER = null;
+    byId("whoami").textContent = "";
+    byId("signBtn").classList.remove("hide");
+    byId("signOut").classList.add("hide");
+    show("viewLogin");
+  }
+
+  async function onSignedIn() {
+    byId("whoami").textContent = ADDR;
+    byId("signBtn").classList.add("hide");
+    byId("signOut").classList.remove("hide");
+    show("viewMain");
+    await Promise.all([loadSummary(), loadStores(), loadWebhook()]);
+  }
+
+  // ---- summary ----
+  async function loadSummary() {
+    var s;
+    try { s = await api("/api/merchant/summary"); } catch (e) { flash(e.message, true); return; }
+    var g = byId("summary"); clear(g);
+    function stat(k, v) { var c = el("div", "stat"); c.appendChild(el("div", "k", k)); c.appendChild(el("div", "v", v)); g.appendChild(c); }
+    stat("Stores", String(s.store_count));
+    stat("Revenue (USDT0)", s.revenue_usdt);
+    stat("Delivered", String((s.counts && (s.counts.delivered || 0)) + (s.counts && (s.counts.paid || 0) || 0)));
+    stat("Outstanding overpay", s.outstanding_overpaid_usdt);
+
+    var u = byId("underpaid"); clear(u);
+    if (!s.underpaid || !s.underpaid.length) { u.appendChild(el("div", "muted", "None.")); }
+    else {
+      var t = el("table"), thead = el("thead"), tr = el("tr");
+      ["Order","Store","Expected","Paid","Buyer","",].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+      thead.appendChild(tr); t.appendChild(thead);
+      var tb = el("tbody");
+      s.underpaid.forEach(function (o) {
+        var row = el("tr");
+        row.appendChild(el("td", "mono", o.order_id));
+        row.appendChild(el("td", null, o.store_slug || ""));
+        row.appendChild(el("td", null, o.expected_usdt));
+        row.appendChild(el("td", null, o.paid_usdt));
+        row.appendChild(el("td", "mono", o.from_addr || "—"));
+        var td = el("td"); var b = el("button", "ghost", "Open"); b.onclick = function () { openOrder(o.order_id); }; td.appendChild(b); row.appendChild(td);
+        tb.appendChild(row);
+      });
+      t.appendChild(tb); u.appendChild(t);
+    }
+  }
+
+  // ---- stores ----
+  async function loadStores() {
+    var data;
+    try { data = await api("/api/merchant/stores"); } catch (e) { flash(e.message, true); return; }
+    var box = byId("stores"); clear(box);
+    if (!data.stores.length) { box.appendChild(el("div", "card muted", "No stores yet. Create one via the paid create-store service using this wallet as the receive address.")); return; }
+    data.stores.forEach(function (st) {
+      var c = el("div", "card");
+      var head = el("div", "row"); head.style.justifyContent = "space-between";
+      var left = el("div");
+      var title = el("strong", null, st.slug); left.appendChild(title);
+      left.appendChild(el("span", "pill", st.status)); left.appendChild(document.createTextNode(" "));
+      left.appendChild(el("span", "pill", st.theme));
+      head.appendChild(left);
+      var rev = el("div", null); rev.appendChild(el("span", "muted", "Revenue ")); rev.appendChild(el("strong", null, st.revenue_usdt + " USDT0"));
+      head.appendChild(rev);
+      c.appendChild(head);
+      var counts = st.order_counts || {};
+      var line = el("div", "muted"); line.style.marginTop = "8px";
+      line.textContent = Object.keys(counts).map(function (k) { return k + ": " + counts[k]; }).join("  ·  ") || "no orders";
+      c.appendChild(line);
+      var b = el("button", "ghost", "View orders"); b.style.marginTop = "10px"; b.onclick = function () { openStore(st.slug); };
+      c.appendChild(b);
+      box.appendChild(c);
+    });
+  }
+
+  // ---- one store's orders ----
+  async function openStore(slug) {
+    LAST_STORE = slug;
+    var data;
+    try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/orders?limit=100"); } catch (e) { flash(e.message, true); return; }
+    byId("storeTitle").textContent = slug + " — " + data.total + " orders";
+    var box = byId("storeOrders"); clear(box);
+    var t = el("table"), thead = el("thead"), tr = el("tr");
+    ["Order","Status","Channel","Expected","Paid","Refunded","When"].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+    thead.appendChild(tr); t.appendChild(thead);
+    var tb = el("tbody");
+    data.orders.forEach(function (o) {
+      var row = el("tr", "clickable"); row.onclick = function () { openOrder(o.order_id); };
+      row.appendChild(el("td", "mono", o.order_id));
+      row.appendChild(el("td", null, o.status));
+      row.appendChild(el("td", null, o.channel));
+      row.appendChild(el("td", null, o.expected_usdt));
+      row.appendChild(el("td", null, o.paid_usdt));
+      row.appendChild(el("td", null, o.refunded_usdt));
+      row.appendChild(el("td", "muted", (o.created_at || "").slice(0, 19).replace("T", " ")));
+      tb.appendChild(row);
+    });
+    t.appendChild(tb); box.appendChild(t);
+    show("viewStore");
+  }
+
+  // ---- one order ----
+  async function openOrder(orderId) {
+    LAST_ORDER = orderId;
+    var o;
+    try { o = await api("/api/merchant/orders/" + encodeURIComponent(orderId)); } catch (e) { flash(e.message, true); return; }
+    var box = byId("orderDetail"); clear(box);
+
+    var head = el("div", "card");
+    head.appendChild(el("div", "mono", o.order_id));
+    head.appendChild(el("span", "pill", o.status));
+    var g = el("div", "grid"); g.style.marginTop = "12px";
+    function stat(k, v) { var c = el("div", "stat"); c.appendChild(el("div", "k", k)); c.appendChild(el("div", "v", v)); g.appendChild(c); }
+    stat("Product", o.product_name || "—");
+    stat("Expected", o.expected_usdt);
+    stat("Paid", o.paid_usdt);
+    stat("Refunded", o.refunded_usdt);
+    head.appendChild(g);
+    var meta = el("div"); meta.style.marginTop = "12px";
+    function kv(k, v, mono) { var d = el("div"); d.appendChild(el("span", "muted", k + ": ")); d.appendChild(el("span", mono ? "mono" : null, v == null ? "—" : String(v))); return d; }
+    meta.appendChild(kv("Channel", o.channel));
+    meta.appendChild(kv("Buyer", o.from_addr, true));
+    meta.appendChild(kv("Buyer email", o.buyer_email));
+    if (o.tx_url) { var d = el("div"); d.appendChild(el("span", "muted", "Payment tx: ")); var a = el("a", null, o.tx_hash); a.href = o.tx_url; a.rel = "noopener"; a.target = "_blank"; d.appendChild(a); meta.appendChild(d); }
+    head.appendChild(meta);
+    box.appendChild(head);
+
+    // refunds already made
+    if (o.refunds && o.refunds.length) {
+      var rc = el("div", "card");
+      rc.appendChild(el("strong", null, "Refunds"));
+      o.refunds.forEach(function (r) {
+        var line = el("div"); line.style.marginTop = "6px";
+        line.appendChild(el("span", "pill", r.kind));
+        line.appendChild(document.createTextNode(" " + r.amount_usdt + " USDT0 "));
+        var a = el("a", "mono", r.tx_hash); a.href = r.tx_url; a.rel = "noopener"; a.target = "_blank";
+        line.appendChild(a);
+        rc.appendChild(line);
+      });
+      box.appendChild(rc);
+    }
+
+    // refund form (non-custodial: merchant sends, then submits the hash)
+    var rf = el("div", "card");
+    rf.appendChild(el("strong", null, "Issue a refund"));
+    rf.appendChild(el("div", "muted", "Send USDT0 back to the buyer from your own wallet on X Layer, then paste the transaction hash. Tilla verifies it on-chain."));
+    var kindLbl = el("label", null, "Kind"); rf.appendChild(kindLbl);
+    var sel = el("select");
+    var of = el("option"); of.value = "full"; of.textContent = "Full (refunds paid amount, revokes delivery)"; sel.appendChild(of);
+    var oo = el("option"); oo.value = "overage"; oo.textContent = "Overage only (returns surplus, keeps delivery)"; sel.appendChild(oo);
+    rf.appendChild(sel);
+    rf.appendChild(el("label", null, "Refund tx hash"));
+    var txin = el("input"); txin.placeholder = "0x…"; rf.appendChild(txin);
+    var submit = el("button", "primary", "Verify & record refund"); submit.style.marginTop = "12px";
+    var out = el("div"); out.style.marginTop = "10px";
+    submit.onclick = async function () {
+      out.textContent = ""; out.className = ""; submit.disabled = true;
+      try {
+        var res = await api("/api/merchant/orders/" + encodeURIComponent(o.order_id) + "/refund", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ tx_hash: txin.value.trim(), kind: sel.value })
+        });
+        out.className = "ok"; out.textContent = "Refund recorded: status " + res.status + ", refunded " + res.refunded_usdt + " USDT0.";
+        setTimeout(function () { openOrder(o.order_id); }, 900);
+      } catch (e) { out.className = "err"; out.textContent = e.message; }
+      submit.disabled = false;
+    };
+    rf.appendChild(submit); rf.appendChild(out);
+    box.appendChild(rf);
+
+    // timeline
+    if (o.timeline && o.timeline.length) {
+      var tc = el("div", "card");
+      tc.appendChild(el("strong", null, "Timeline"));
+      o.timeline.forEach(function (ev) {
+        var line = el("div", "muted"); line.style.marginTop = "4px";
+        line.textContent = (ev.ts || "").slice(0, 19).replace("T", " ") + "  ·  " + ev.source + "  ·  " + ev.event;
+        tc.appendChild(line);
+      });
+      box.appendChild(tc);
+    }
+    show("viewOrder");
+  }
+
+  // ---- webhook ----
+  async function loadWebhook() {
+    try {
+      var s = await api("/api/merchant/webhook");
+      byId("whUrl").value = s.url || "";
+      byId("whStatus").textContent = s.url ? "registered" : "none";
+    } catch (e) { byId("whStatus").textContent = ""; }
+  }
+  async function saveWebhook() {
+    var url = byId("whUrl").value.trim();
+    try {
+      var res = await api("/api/merchant/webhook", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: url }) });
+      var box = byId("whSecret"); clear(box); box.classList.remove("hide");
+      box.appendChild(el("div", "muted", "Signing secret (shown once — store it now):"));
+      box.appendChild(el("div", "mono ok", res.secret));
+      byId("whStatus").textContent = "registered";
+    } catch (e) { flash(e.message, true); }
+  }
+  async function deleteWebhook() {
+    try { await api("/api/merchant/webhook", { method: "DELETE" }); byId("whUrl").value = ""; byId("whStatus").textContent = "none"; byId("whSecret").classList.add("hide"); }
+    catch (e) { flash(e.message, true); }
+  }
+
+  // ---- CSV (auth header -> blob download) ----
+  async function downloadCsv(path, name) {
+    try {
+      var r = await fetch(path, { headers: auth() });
+      if (!r.ok) throw new Error("export failed (" + r.status + ")");
+      var blob = await r.blob();
+      var a = el("a"); a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    } catch (e) { flash(e.message, true); }
+  }
+
+  // ---- wiring ----
+  byId("signBtn").onclick = signIn;
+  byId("signOut").onclick = signOut;
+  byId("backToMain").onclick = function () { show("viewMain"); };
+  byId("backFromOrder").onclick = function () { if (LAST_STORE) openStore(LAST_STORE); else show("viewMain"); };
+  byId("whSave").onclick = saveWebhook;
+  byId("whDelete").onclick = deleteWebhook;
+  byId("csvOrders").onclick = function () { downloadCsv("/api/merchant/export/orders.csv", "orders.csv"); };
+  byId("csvCustomers").onclick = function () { downloadCsv("/api/merchant/export/customers.csv", "customers.csv"); };
+  show("viewLogin");
+})();
+</script>
+</body>
+</html>
