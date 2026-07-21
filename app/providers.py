@@ -64,6 +64,11 @@ class SandboxBoundaryError(ValueError):
 # --------------------------------------------------------------- delivery providers
 @runtime_checkable
 class DeliveryProvider(Protocol):
+    # ``mint`` is PAYLOAD-ONLY and side-effect-free: it computes the delivery
+    # payload checkout.deliver would write, but state transitions, Entitlement/
+    # Delivery rows, license persistence, webhooks, attest queueing and affiliate
+    # accrual stay owned by checkout.deliver. A rewire may swap deliver's payload
+    # branch for mint — never delegate more than the payload.
     kind: str
 
     def mint(self, session: Session, order: Order) -> str: ...
@@ -331,7 +336,8 @@ def set_status(
 def seed_builtins(session: Session) -> int:
     """Idempotently insert the built-in plugin rows (source='builtin',
     status='active'). Returns the number of rows inserted. The prod path seeds
-    via the 0011 migration; this is the create_all path (app startup / tests)."""
+    via the 0011 migration; this covers create_all databases (tests). Nothing
+    calls it at app startup — wire that only when a live path reads the table."""
     existing = {(p.kind, p.name) for p in list_plugins(session)}
     inserted = 0
     for entry in BUILTIN_SEED:
