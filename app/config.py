@@ -6,6 +6,10 @@ import pathlib
 THEMES_DIR = pathlib.Path(__file__).resolve().parent.parent / "themes"
 STORES_DIR = pathlib.Path(os.environ.get("TILLA_STORES_DIR", "/opt/tilla/stores"))
 DB_PATH = pathlib.Path(os.environ.get("TILLA_DB_PATH", "/opt/tilla/tilla.db"))
+# Uploaded deliverables live OUTSIDE STORES_DIR (which nginx serves at /s/), so an
+# uploaded file is never directly fetchable — the only path to its bytes is a
+# signed, count-limited download token. Dir mode 700 in ops.
+FILES_DIR = pathlib.Path(os.environ.get("TILLA_FILES_DIR", "/opt/tilla/deliverables"))
 
 WARDEN_SCREEN_URL = os.environ.get(
     "TILLA_SCREEN_URL", "https://warden.gudman.xyz/api/demo/scan"
@@ -14,6 +18,54 @@ WARDEN_SCREEN_TIMEOUT = float(os.environ.get("TILLA_SCREEN_TIMEOUT", "10"))
 
 MAX_DESCRIPTION_LEN = 2000
 MAX_BODY_BYTES = 64 * 1024  # generous over MAX_DESCRIPTION_LEN, well under abuse range
+
+# ---------- M4 gated delivery: uploads, signed links, licenses ----------
+# The one upload route is exempted from MAX_BODY_BYTES and capped here instead;
+# the route streams with a running byte budget so a lying/absent Content-Length
+# can't beat the cap.
+MAX_UPLOAD_BYTES = int(os.environ.get("TILLA_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+# Extension allowlist (not blocklist): no svg/html (inline-render XSS class), no
+# executables. Everything is served attachment + octet-stream + nosniff anyway.
+UPLOAD_ALLOWED_EXTS = frozenset(
+    {
+        "pdf",
+        "zip",
+        "png",
+        "jpg",
+        "jpeg",
+        "webp",
+        "gif",
+        "mp3",
+        "wav",
+        "mp4",
+        "epub",
+        "txt",
+        "md",
+        "csv",
+    }
+)
+DOWNLOAD_LIMIT_DEFAULT = 5
+LINK_TTL_DEFAULT = 86400  # 24h; per-deliverable override drives the token max_age
+LICENSE_ACTIVATIONS_DEFAULT = 3
+SESSION_TTL = 3600  # buyer wallet session token lifetime
+NONCE_TTL = 300  # sign-in nonce lifetime (5 min)
+REDELIVER_TTL = 7 * 86400  # email magic-link lifetime
+
+# Signs every download/session/redeliver token. Server .env only, no default:
+# when unset the gated endpoints 503 fail-closed and legacy text delivery is
+# untouched. Generate via secrets.token_hex(32).
+SIGNING_KEY = os.environ.get("TILLA_SIGNING_KEY", "")
+# Base URL for absolute download/redeliver links (emails, wallet library).
+PUBLIC_BASE_URL = os.environ.get("TILLA_PUBLIC_BASE", "https://tilla.gudman.xyz")
+DOMAIN = os.environ.get("TILLA_DOMAIN", "tilla.gudman.xyz")
+
+# SMTP for the email re-delivery fallback. All unset -> send no-ops (logs +
+# event_log), so the endpoint and its tests are fully buildable without creds.
+SMTP_HOST = os.environ.get("TILLA_SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("TILLA_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("TILLA_SMTP_USER", "")
+SMTP_PASS = os.environ.get("TILLA_SMTP_PASS", "")
+SMTP_FROM = os.environ.get("TILLA_SMTP_FROM", "")
 
 # ---------- M3 hardened checkout: chain + sweeper settings ----------
 RPC_URL = os.environ.get("TILLA_RPC", "https://rpc.xlayer.tech")

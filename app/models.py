@@ -49,6 +49,9 @@ class Store(Base):
     merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="live")
     pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
+    # sha256 hex of the per-store manage key (capability secret handed to the
+    # paid create-store caller once). NULL for legacy stores until minted.
+    manage_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     delivery: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -97,6 +100,8 @@ class Order(Base):
                 "status IN ('pending','detected','underpaid','expired','late_paid')"
             ),
         ),
+        # Buyer library lookup: orders for a given on-chain payer wallet.
+        Index("ix_orders_from_addr", "from_addr"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -129,6 +134,9 @@ class Order(Base):
     # order's payment; NULL when the head was unavailable at creation time.
     created_block: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Optional exchange-custody fallback: buyer supplies an email so delivery can
+    # be re-sent via a magic link when the on-chain payer isn't reachable.
+    buyer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -147,6 +155,124 @@ class Delivery(Base):
     delivered_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
+
+
+class Deliverable(Base):
+    """The merchant-supplied thing a buyer receives. One ACTIVE row per store;
+    replacing inserts a new row and flips the old ``active=false`` so already-sold
+    orders keep the version they bought (their Entitlement points at the old row).
+    A store with no deliverable row falls back to the ``store.delivery`` text —
+    that is the exact legacy behaviour."""
+
+    __tablename__ = "deliverables"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('file','text','license')", name="ck_deliverables_kind"
+        ),
+        Index("ix_deliverables_store_id", "store_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    # Dormant M9 multi-product hook: stays NULL for the single-product store.
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The secret for kind='text'. NULL for file/license.
+    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Content-addressed storage: on-disk name is the sha256 hex, no user path.
+    file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Sanitized original name — Content-Disposition only, never a path component.
+    file_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    max_downloads: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="5"
+    )
+    link_ttl_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="86400"
+    )
+    # kind='license' only (default 3); NULL for file/text.
+    max_activations: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
+class Entitlement(Base):
+    """Binds one sale (order) to the deliverable it bought. UNIQUE(order_id) makes
+    issuance idempotent under the same begin_nested pattern as the Delivery row.
+    Counters are advanced by race-proof conditional UPDATEs, never a read-modify-
+    write, so concurrent requests can't exceed a cap."""
+
+    __tablename__ = "entitlements"
+    __table_args__ = (
+        UniqueConstraint("order_id", name="uq_entitlements_order_id"),
+        UniqueConstraint("license_key", name="uq_entitlements_license_key"),
+        Index("ix_entitlements_deliverable_id", "deliverable_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), nullable=False)
+    deliverable_id: Mapped[int] = mapped_column(
+        ForeignKey("deliverables.id"), nullable=False
+    )
+    # Snapshot of the on-chain payer at deliver time (order.from_addr).
+    buyer_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    download_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    activations_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    license_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
+class AuthNonce(Base):
+    """Single-use buyer sign-in nonce. Consumed by a conditional UPDATE
+    (used_at IS NULL), so a captured signature is worthless after first use.
+    Expired rows are opportunistically deleted when new nonces are issued."""
+
+    __tablename__ = "auth_nonces"
+    __table_args__ = (Index("ix_auth_nonces_address", "address"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    address: Mapped[str] = mapped_column(String(42), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(32), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class LicenseActivation(Base):
+    """Audit + idempotency row for one device holding a license activation.
+    UNIQUE(entitlement_id, device_id) makes re-activating the same device a
+    no-op (no double count) and lets deactivate free exactly one slot."""
+
+    __tablename__ = "license_activations"
+    __table_args__ = (
+        UniqueConstraint(
+            "entitlement_id", "device_id", name="uq_license_activation_device"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    entitlement_id: Mapped[int] = mapped_column(
+        ForeignKey("entitlements.id"), nullable=False
+    )
+    device_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ProcessedTransfer(Base):
