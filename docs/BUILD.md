@@ -128,6 +128,27 @@ Merchant accounts (wallet-signature auth + API key, same nonce/session scheme as
 EAS attestation per sale (predeploy `0x4200…0021`, web3.py ABI call; schema: buyer, storeId, amount, payment txHash) after testnet spike; StoreRegistry contract (Foundry, OKLink contract-verify API) if time permits — DIFF, not gating.
 **Accept:** attestation visible on explorer for a real sale; attestation UID on the receipt page.
 
+**BUILD STATUS (branch `m11/onchain-depth`):** code shipped DORMANT. `app/attest.py`
+is the EAS receipt attester (schema `address buyer,string storeId,uint256
+amountUsdt6,bytes32 paymentTxHash`, UID `0x09bb2adc…f9fe29`), drained by a background
+`attest_loop` that is TRIPLE-GATED off (`SWEEP_ENABLED` + `ATTEST_ENABLED` +
+`TILLA_ATTESTER_KEY`). Flag off / key unset ⇒ zero RPC, zero gas, `web3` never
+imported. Orders queue `attest_status='pending'` in the same txn as delivery
+(`checkout.deliver` for web, `agentic.record_settlement` on settling→delivered for
+agent). Migration `0008_onchain_receipts` adds `attestation_uid`, `attest_tx`,
+`attest_status` (+ `ix_orders_attest_status`) via plain ADD COLUMN (the M3 partial
+unique index is untouched). Receipt UID + OKLink attest-tx link surface on the buyer
+receipt (`_order_response`) and merchant order detail. `StoreRegistry.sol` +
+Foundry scaffolding live under `contracts/` — PREPARED, NOT DEPLOYED.
+
+**USER-GATED runbook (each an explicit approval step — build agents never sign/deploy/fund):**
+1. Mint/choose an attester key; set `TILLA_ATTESTER_KEY` + `TILLA_ATTEST=1` in `/opt/tilla/.env` (chmod 600).
+2. Fund it with OKB gas. Recommended: testnet dry-run first — `TILLA_ATTEST_CHAIN_ID=1952` + a testnet `TILLA_ATTEST_RPC`, reuse the spike throwaway key + <https://web3.okx.com/xlayer/faucet> — then mainnet 196 with a few dollars of OKB.
+3. One-time mainnet schema register: the worker does it automatically on the first enabled tick (enabling IS the approval); bounded by `TILLA_ATTEST_MAX_GAS_WEI`.
+4. Optional historical backfill: a runbook UPDATE flipping chosen delivered orders to `attest_status='pending'` (default: only post-enable sales are attested).
+5. StoreRegistry: `forge script script/Deploy.s.sol --rpc-url https://rpc.xlayer.tech --broadcast` from `contracts/`, then OKLink contract-verify (see `contracts/README.md`).
+6. Verify the attestation is readable — OKLink attest-tx link + `getAttestation(uid)` eth_call on `0x4200…0021`. No verified EAS explorer/indexer for X Layer is linked (rule 22); a WebSearch for one is a cheap user-gated follow-up.
+
 ### M12 — Ops (runs alongside, finishes last)
 Health/readiness endpoints; systemd watchdog timer + **Telegram alerting on service-down** (Warden ops pattern — same bot channel); sqlite backup verification + **nightly off-VPS copy** (pull/push to a second location — VPS loss must not lose the database); log rotation; deploy runbook + rollback (previous release dir + symlink); Anthropic API noted as generation SPOF — clear 503 + retry on outage, daily spend logged.
 **Accept:** kill-test (service auto-recovers + alert fires); restore-from-backup drill documented + executed once **from the off-VPS copy**.
