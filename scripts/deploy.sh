@@ -31,6 +31,11 @@ FILES=(
   app/mpp.py
   app/subscriptions.py
   app/import_stores.py
+  app/dashboard.py
+  app/webhooks.py
+  app/refunds.py
+  app/attest.py
+  app/warden_hire.py
   alembic.ini
   alembic/env.py
   alembic/script.py.mako
@@ -39,7 +44,13 @@ FILES=(
   alembic/versions/0003_gated_delivery.py
   alembic/versions/0004_agent_commerce.py
   alembic/versions/0005_payment_methods.py
+  alembic/versions/0006_merchant_platform.py
+  alembic/versions/0007_marketplace_citizenship.py
+  alembic/versions/0008_onchain_receipts.py
   scripts/backup_db.sh
+  scripts/backup_offsite.sh
+  scripts/restore_drill.sh
+  scripts/watchdog.sh
   themes/original.html
   themes/bold.html
   themes/editorial.html
@@ -62,6 +73,10 @@ for f in "${FILES[@]}"; do
   ssh "$VPS" "mkdir -p '$REMOTE/$(dirname "$f")'"
   scp "$f" "$VPS:$REMOTE/$f"
 done
+
+# The shell scripts must stay executable — cron runs backup_db.sh/backup_offsite.sh and
+# the watchdog timer execs watchdog.sh directly (scp does not preserve the +x bit).
+ssh "$VPS" "chmod +x '$REMOTE'/scripts/*.sh"
 
 # Migrate BEFORE restart so new code never meets an old schema. Runs without the
 # systemd EnvironmentFile, so it relies on TILLA_DB_PATH being unset (default
@@ -93,10 +108,23 @@ curl -fsS "$BASE/health" >/dev/null
 for slug in invoice-flow billable; do
   curl -fsS "$BASE/s/$slug/" >/dev/null
 done
+
+# /ready may briefly 503 right after restart until the first sweeper tick stamps its
+# heartbeats, so poll for up to ~30s before treating it as a failure.
+ready_ok=0
+for _ in $(seq 1 15); do
+  if curl -fsS "$BASE/ready" >/dev/null 2>&1; then ready_ok=1; break; fi
+  sleep 2
+done
+if [ "$ready_ok" != 1 ]; then
+  echo "smoke failed: /ready did not reach 200 within ~30s" >&2
+  curl -s "$BASE/ready" >&2 || true
+  exit 1
+fi
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/create-store" \
   -H 'content-type: application/json' -d '{"description":"deploy smoke"}')
 if [ "$code" != "402" ]; then
   echo "smoke failed: unpaid POST /create-store returned $code, expected 402" >&2
   exit 1
 fi
-echo "deploy ok: health up, live stores render, create-store gated (402)"
+echo "deploy ok: health up, ready 200, live stores render, create-store gated (402)"
