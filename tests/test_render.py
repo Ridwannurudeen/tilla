@@ -169,6 +169,61 @@ def test_checkout_retry_resets_state_before_poll(theme):
     assert html.index(reset) < html.index("poll();")
 
 
+# ---------- M18.3 checkout chain honesty + operator bridge affordance ----------
+@pytest.mark.parametrize("theme", THEMES)
+def test_checkout_chain_honesty_present(theme):
+    # The order's settlement chain (name + chainId) is named on the page, and the
+    # explicit wrong-network fund-loss warning is always rendered.
+    html = render({"store_name": "X"}, ADDR, SLUG, theme)
+    assert "X Layer (chainId 196)" in html
+    assert "co-netwarn" in html
+    assert "will <b>NOT</b> be detected and may be lost" in html
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_bridge_absent_by_default(theme, monkeypatch):
+    monkeypatch.setattr("app.config.BRIDGE_URL", "")
+    html = render({"store_name": "X"}, ADDR, SLUG, theme)
+    # the CSS class is always defined in the scoped <style>; the LINK element (and
+    # its label) must be absent unless an operator configured a URL.
+    assert 'class="co-bridge"' not in html
+    assert "Bridge funds to" not in html
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_bridge_link_operator_only(theme, monkeypatch):
+    # A configured operator bridge URL renders exactly one labeled, safe outbound
+    # link; a URL embedded in MERCHANT content never produces a bridge affordance
+    # (only the operator config drives it).
+    monkeypatch.setattr("app.config.BRIDGE_URL", "https://bridge.example.com/xlayer")
+    content = {"store_name": "https://evil.example.com/attacker-bridge"}
+    html = render(content, ADDR, SLUG, theme)
+    assert 'href="https://bridge.example.com/xlayer"' in html
+    assert 'rel="noopener noreferrer nofollow"' in html
+    assert "third-party service" in html
+    # the merchant-supplied URL is NOT wired into any bridge link
+    assert 'href="https://evil.example.com/attacker-bridge"' not in html
+    assert html.count("co-bridge") >= 1
+
+
+def test_bridge_url_rejects_non_http_scheme(monkeypatch):
+    # config validation drops a hostile/malformed value so it can never render as a
+    # link (javascript:/data: XSS), leaving the affordance absent.
+    import importlib
+
+    from app import config as config_module
+
+    for bad in ("javascript:alert(1)", "data:text/html,x", "ftp://x", "notaurl"):
+        monkeypatch.setenv("TILLA_BRIDGE_URL", bad)
+        reloaded = importlib.reload(config_module)
+        assert reloaded.BRIDGE_URL == ""
+    monkeypatch.setenv("TILLA_BRIDGE_URL", "https://bridge.example.com/x")
+    reloaded = importlib.reload(config_module)
+    assert reloaded.BRIDGE_URL == "https://bridge.example.com/x"
+    monkeypatch.delenv("TILLA_BRIDGE_URL", raising=False)
+    importlib.reload(config_module)
+
+
 # ---------- M6 SEO: canonical + OG/twitter meta + JSON-LD ----------
 @pytest.mark.parametrize("theme", THEMES)
 def test_og_and_canonical_meta_present(theme):

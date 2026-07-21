@@ -50,6 +50,7 @@ from app import (
     growth,
     growth_scheduler,
     mpp,
+    payment,
     providers,
     subscriptions,
     webhooks,
@@ -142,6 +143,7 @@ async def lifespan(app: FastAPI):
     reaper = None
     if os.getenv("OKX_API_KEY"):
         await _prewarm_facilitator()
+        await _probe_supported()
         reaper = asyncio.create_task(agentic.agent_reaper_loop())
     try:
         yield
@@ -178,6 +180,17 @@ async def _prewarm_facilitator() -> None:
         logger.info("x402 facilitator pre-warmed at startup")
     except Exception:
         logger.exception("x402 facilitator pre-warm failed; lazy init will retry")
+
+
+async def _probe_supported() -> None:
+    """18.2 read-only ``/supported`` probe at boot: cache the ``(scheme, network)``
+    snapshot the per-chain accepts gate reads, and log it (this increment's live
+    artifact). Never raises — a probe failure caches an empty snapshot so the store
+    402 stays 196-only, never a crash (196 is grandfathered as the proven rail)."""
+    fac = globals().get("_fac")
+    if fac is None:
+        return
+    await asyncio.to_thread(payment.probe_supported, fac)
 
 
 app = FastAPI(

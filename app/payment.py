@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -13,6 +15,8 @@ from x402.http.types import HTTPRequestContext
 from x402.schemas import AssetAmount
 
 from app import config
+
+logger = logging.getLogger("tilla")
 
 PAYMENT_PROTOCOL = "x402-v2"
 PAYMENT_FACILITATOR = "okx"
@@ -99,6 +103,89 @@ def chain_for(network: str) -> ChainConfig:
     because silently re-pointing an order to a different ledger is exactly the
     wrong-chain fund loss the registry exists to prevent."""
     return CHAINS[network]
+
+
+# ---------- 18.2 /supported probe snapshot + per-chain accepts gate ----------
+# The read-only startup probe result: the set of ``(scheme, network)`` pairs the OKX
+# facilitator advertised at boot (``GET /api/v6/pay/x402/supported``). ``None`` until
+# the probe runs; a probe FAILURE caches an EMPTY snapshot (probe failure ⇒ 196-only,
+# never a crash — see :func:`probe_supported`). A non-canonical chain enters the
+# accepts list ONLY when this snapshot lists ``(exact, its caip2)`` AND its flag is on
+# (INV-1, the M8 lesson: never advertise an unsettleable rail).
+_SUPPORTED_SNAPSHOT: frozenset[tuple[str, str]] | None = None
+
+
+def set_supported_snapshot(kinds) -> frozenset[tuple[str, str]]:
+    """Cache the ``(scheme, network)`` pairs for the process. ``kinds`` is either a
+    parsed ``SupportedResponse.kinds`` (objects with ``.scheme`` / ``.network``) or an
+    iterable of ``(scheme, network)`` tuples (tests). Returns the cached snapshot."""
+    global _SUPPORTED_SNAPSHOT
+    pairs: set[tuple[str, str]] = set()
+    for kind in kinds:
+        scheme = getattr(kind, "scheme", None)
+        network = getattr(kind, "network", None)
+        if scheme is None and isinstance(kind, (tuple, list)) and len(kind) == 2:
+            scheme, network = kind
+        if scheme is not None and network is not None:
+            pairs.add((scheme, network))
+    _SUPPORTED_SNAPSHOT = frozenset(pairs)
+    return _SUPPORTED_SNAPSHOT
+
+
+def supported_snapshot() -> frozenset[tuple[str, str]]:
+    """The cached probe snapshot, or an empty set if the probe has not run / failed."""
+    return _SUPPORTED_SNAPSHOT if _SUPPORTED_SNAPSHOT is not None else frozenset()
+
+
+def probe_supported(client: OKXFacilitatorClient) -> frozenset[tuple[str, str]]:
+    """Run the read-only ``get_supported`` probe and cache the snapshot. On ANY
+    failure the snapshot is set EMPTY (probe failure ⇒ 196-only, never a crash) and
+    the failure is logged; ``eip155:196`` stays live regardless (grandfathered proven
+    rail, so :func:`chain_enabled` never consults the snapshot for it)."""
+    try:
+        response = client.get_supported()
+        snapshot = set_supported_snapshot(response.kinds)
+        logger.info("x402 /supported probe: %s", sorted(snapshot))
+        return snapshot
+    except Exception:
+        logger.exception("x402 /supported probe failed — falling back to 196-only")
+        return set_supported_snapshot([])
+
+
+def _chain_flag(chain_id: int) -> bool:
+    """``TILLA_CHAIN_<chain_id>_ENABLED`` — default OFF, so live behaviour stays
+    byte-identical until an operator flips a chain on in the VPS ``.env``."""
+    return os.environ.get(f"TILLA_CHAIN_{chain_id}_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def chain_enabled(cfg: ChainConfig) -> bool:
+    """Whether the sweeper scans ``cfg`` and the store 402 may advertise it. The
+    canonical X Layer ledger is ALWAYS enabled (grandfathered proven rail, INV-2).
+    Any other chain is enabled ONLY when its ``TILLA_CHAIN_<id>_ENABLED`` flag is on
+    AND the startup ``/supported`` snapshot lists ``(exact, caip2)`` — flag on but
+    probe miss ⇒ still disabled (INV-1)."""
+    if cfg.canonical:
+        return True
+    return (
+        _chain_flag(cfg.chain_id)
+        and (
+            PAYMENT_SCHEME,
+            cfg.caip2,
+        )
+        in supported_snapshot()
+    )
+
+
+def enabled_chains() -> list[ChainConfig]:
+    """The chains the sweeper scans and the store 402 may advertise, in registry
+    order: the canonical chain first, then any flag+probe-enabled chain. With all
+    ``TILLA_CHAIN_*`` flags OFF this is exactly ``[CANONICAL_CHAIN]``."""
+    return [cfg for cfg in CHAINS.values() if chain_enabled(cfg)]
 
 
 _FIXED_CONFIGURATION = {
@@ -281,6 +368,31 @@ def _dynamic_store_hooks(rail: PaymentRail):
     return _pay_to, _price
 
 
+def _chain_store_hooks(rail: PaymentRail, cfg: ChainConfig):
+    """Per-chain variant of :func:`_dynamic_store_hooks` for a non-canonical accepts
+    entry: same per-store payTo resolution and same product price (v1 is same-6dp
+    USDT-family only — no FX), but the price ``AssetAmount`` carries THIS chain's
+    asset + EIP-712 domain so the challenge names the token that settles on it."""
+    sentinel_pay_to = rail.pay_to
+
+    async def _pay_to(ctx: HTTPRequestContext) -> str:
+        from app.agentic import resolve_pay_to
+
+        return await asyncio.to_thread(resolve_pay_to, ctx.path, sentinel_pay_to)
+
+    async def _price(ctx: HTTPRequestContext) -> AssetAmount:
+        from app.agentic import resolve_price
+
+        base = await asyncio.to_thread(resolve_price, ctx.path)
+        return AssetAmount(
+            amount=base.amount,
+            asset=cfg.asset,
+            extra={"name": cfg.eip712_name, "version": cfg.eip712_version},
+        )
+
+    return _pay_to, _price
+
+
 def build_store_payment_option(rail: PaymentRail) -> PaymentOption:
     """The single exact WILDCARD PaymentOption for ``POST /s/:slug/buy`` (dynamic
     pay_to + price). Kept as the exact-only builder used everywhere flags are off;
@@ -312,6 +424,23 @@ def build_store_payment_options(rail: PaymentRail) -> list[PaymentOption]:
                 scheme=PAYMENT_SCHEME_AGGR_DEFERRED,
                 price=price,
                 network=rail.network,
+                pay_to=pay_to,
+                max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
+            )
+        )
+    # 18.2 per-chain accepts: append one exact entry per flag+probe-enabled
+    # non-canonical chain (INV-1 gate in :func:`enabled_chains`). With all
+    # TILLA_CHAIN_* flags OFF this loop is empty, so the accepts list is
+    # byte-identical to today ([exact] or [exact, aggr_deferred]).
+    for cfg in enabled_chains():
+        if cfg.canonical:
+            continue
+        pay_to, price = _chain_store_hooks(rail, cfg)
+        options.append(
+            PaymentOption(
+                scheme=PAYMENT_SCHEME,
+                price=price,
+                network=cfg.caip2,
                 pay_to=pay_to,
                 max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
             )

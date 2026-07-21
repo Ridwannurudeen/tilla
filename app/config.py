@@ -1,7 +1,9 @@
 """Environment-driven settings shared across the app package."""
 
+import logging
 import os
 import pathlib
+import re
 
 THEMES_DIR = pathlib.Path(__file__).resolve().parent.parent / "themes"
 STORES_DIR = pathlib.Path(os.environ.get("TILLA_STORES_DIR", "/opt/tilla/stores"))
@@ -307,6 +309,19 @@ GROWTH_DAILY_MAX = int(os.environ.get("TILLA_GROWTH_DAILY_MAX", "50"))
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
+
+# ---------- M18 cross-chain checkout honesty (18.3) ----------
+# Optional operator-configured third-party "Bridge funds to X Layer" link on the
+# checkout page. Default empty => the affordance is ABSENT. Operator config ONLY
+# (never merchant/LLM content, INV-3); validated to an http(s) URL so a malformed or
+# hostile value (javascript:/data:) can never render as a link — anything else is
+# dropped (loud) and the affordance stays absent. No bridge code, no bridge state.
+_BRIDGE_RAW = os.environ.get("TILLA_BRIDGE_URL", "").strip()
+BRIDGE_URL = _BRIDGE_RAW if re.match(r"^https?://\S+$", _BRIDGE_RAW) else ""
+if _BRIDGE_RAW and not BRIDGE_URL:
+    logging.getLogger("tilla").warning(
+        "TILLA_BRIDGE_URL is not an http(s) URL — bridge affordance disabled"
+    )
 
 # Reserved so a merchant's generated slug can never collide with an app route
 # or a future well-known path.

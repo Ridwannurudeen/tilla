@@ -4,7 +4,11 @@
    validated hex address); USDT0 + chain 0xc4 are hardcoded JS constants. #}
 <div class="checkout" id="co">
   <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
-  <div class="row"><span>Network</span><b>X Layer (OKX)</b></div>
+  <div class="row"><span>Network</span><b>{{ CHAIN_NAME }} (chainId {{ CHAIN_ID }})</b></div>
+  <div class="co-netwarn">⚠️ Pay on <b>{{ CHAIN_NAME }}</b> only. Sending funds on any other network will <b>NOT</b> be detected and may be lost — Tilla only watches {{ CHAIN_NAME }} (chainId {{ CHAIN_ID }}) for this order.</div>
+  {% if BRIDGE_URL %}
+  <a class="co-bridge" href="{{ BRIDGE_URL }}" target="_blank" rel="noopener noreferrer nofollow">Bridge funds to {{ CHAIN_NAME }} ↗<span class="co-bridge-3p">third-party service — not operated by Tilla, use at your own risk</span></a>
+  {% endif %}
   <div class="row"><span>Pay to</span></div>
   <div class="addr" id="coAddr">{{ ADDR }}</div>
   <div class="co-count" id="coCountdown"></div>
@@ -49,6 +53,17 @@
   #co .co-copy:hover{ background:color-mix(in srgb,var(--text) 14%,transparent); }
   #co .co-warn{ margin-top:12px; font-size:12.5px; font-weight:700; line-height:1.4;
     color:color-mix(in srgb,var(--accent) 85%, var(--text)); }
+  #co .co-netwarn{ margin-top:10px; padding:10px 12px; border-radius:10px; font-size:12.5px;
+    font-weight:700; line-height:1.45; color:#F59E0B;
+    background:color-mix(in srgb,#F59E0B 12%,transparent);
+    border:1px solid color-mix(in srgb,#F59E0B 34%,transparent); }
+  #co .co-bridge{ display:block; margin-top:10px; padding:11px 12px; border-radius:10px;
+    font-size:13px; font-weight:800; text-decoration:none; color:var(--text);
+    background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 16%,transparent); }
+  #co .co-bridge:hover{ border-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  #co .co-bridge-3p{ display:block; margin-top:3px; font-size:11px; font-weight:600;
+    color:color-mix(in srgb,var(--text) 55%,transparent); }
   #co .co-receipt{ margin-top:16px; padding:14px 16px; border-radius:12px;
     background:color-mix(in srgb,var(--text) 5%,transparent);
     border:1px solid color-mix(in srgb,var(--text) 14%,transparent); }

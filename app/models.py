@@ -439,11 +439,15 @@ class ScreeningReceipt(Base):
 
 
 class ChainCursor(Base):
-    """Single-row sweep cursor: the last block the sweeper has fully processed.
-    Persisting it makes restarts resume gap-free."""
+    """Per-chain sweep cursor: the last block the sweeper has fully processed on the
+    chain whose ``chain_id`` is this row's primary key (``id`` == chain_id). One row
+    per chain the sweeper scans — the canonical X Layer ledger (id 196) always, plus
+    any flag+probe-enabled chain (18.2). Persisting it makes restarts resume gap-free,
+    and keying it per-chain means a second chain's cursor can never rewind the
+    canonical one. Pre-18.2 the table was a singleton pinned to id=1; migration
+    0018 repoints that row to the canonical chain_id (196)."""
 
     __tablename__ = "chain_cursor"
-    __table_args__ = (CheckConstraint("id = 1", name="ck_chain_cursor_singleton"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
     last_block: Mapped[int] = mapped_column(Integer, nullable=False)
