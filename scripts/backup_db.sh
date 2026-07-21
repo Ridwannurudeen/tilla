@@ -19,8 +19,8 @@ tg_alert() {
   [ -r "$TG_CONF" ] || return 0
   # shellcheck disable=SC1090
   . "$TG_CONF"
-  local token="${TELEGRAM_BOT_TOKEN:-${BOT_TOKEN:-${TG_TOKEN:-}}}"
-  local chat="${TELEGRAM_CHAT_ID:-${CHAT_ID:-${TG_CHAT:-}}}"
+  local token="${SOLVENT_TG_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-${BOT_TOKEN:-${TG_TOKEN:-}}}}"
+  local chat="${SOLVENT_TG_CHAT_ID:-${TELEGRAM_CHAT_ID:-${CHAT_ID:-${TG_CHAT:-}}}}"
   [ -n "$token" ] && [ -n "$chat" ] || return 0
   curl -fsS -m 10 "https://api.telegram.org/bot${token}/sendMessage" \
     --data-urlencode "chat_id=${chat}" \

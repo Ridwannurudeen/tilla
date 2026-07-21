@@ -36,8 +36,8 @@ tg_send() {
   fi
   # shellcheck disable=SC1090
   . "$TG_CONF"
-  local token="${TELEGRAM_BOT_TOKEN:-${BOT_TOKEN:-${TG_TOKEN:-}}}"
-  local chat="${TELEGRAM_CHAT_ID:-${CHAT_ID:-${TG_CHAT:-}}}"
+  local token="${SOLVENT_TG_BOT_TOKEN:-${TELEGRAM_BOT_TOKEN:-${BOT_TOKEN:-${TG_TOKEN:-}}}}"
+  local chat="${SOLVENT_TG_CHAT_ID:-${TELEGRAM_CHAT_ID:-${CHAT_ID:-${TG_CHAT:-}}}}"
   if [ -z "$token" ] || [ -z "$chat" ]; then
     echo "watchdog: telegram vars missing in $TG_CONF, alert skipped: $msg"
     return 0
