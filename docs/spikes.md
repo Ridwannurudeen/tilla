@@ -120,7 +120,7 @@ None of the three probes can move funds. The fund-moving acts (TEE-buyer settle,
 channel-open deposit, Permit2 charge) are USER-owned by construction.
 
 ## M8 go-live (flag-flip) BLOCKERS — do NOT enable these flags until fixed
-- **subscription (TILLA_SUBSCRIPTIONS_ENABLED):** payer-binding — a subscription replay is now store-scoped, but a same-store replay of a public terms-signature still delivers that store goods to a non-signer. Before flag-flip: record the payer (recovered signer) on the subscription Order and require the replaying request signer == that payer.
+- **subscription (TILLA_SUBSCRIPTIONS_ENABLED):** payer-binding — RESOLVED. The recovered signer (`terms.payer` from the buyer's decoded PAYMENT-SIGNATURE, lowercased) is now recorded on the subscription Order's existing `from_addr` column at first settle, and every same-store replay must match it: `_require_payer` fail-closes with a 403 (checksum-agnostic lowercased compare) BEFORE any delivery, so a captured public terms-signature replayed with a swapped payer field gets goods refused, no duplicate order, no re-settle. No migration needed (reused `from_addr`, the on-chain payer wallet). Still NOT live: a real subscribe/charge still needs OKX creds + a USER-funded Permit2 buyer, so the flag stays OFF (USER-gated).
 - **aggr_deferred (TILLA_AGGR_DEFERRED / AGGR_DEFERRED_ENABLED):** build the get_settle_status reconciliation poller so a deferred (async) settle is only claimed once its aggregated tx hash is confirmed; today a no-tx deferred settle correctly stays `settling` (never falsely delivered) but there is no poller to finalize it.
 - **All rails:** a real settlement tx hash must be logged before the rail is claimed working (BUILD.md binary acceptance).
 

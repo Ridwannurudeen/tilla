@@ -147,6 +147,32 @@ def _subscription_idem_key(sig: str) -> str:
     return "0x" + hashlib.sha256(basis.encode()).hexdigest()
 
 
+def _recovered_payer(sig: str) -> str | None:
+    """The subscription's payer wallet — ``terms.payer`` from the buyer's decoded
+    PAYMENT-SIGNATURE, lowercased. This is the signer ``verifySubscribe`` binds the
+    termsSignature to; it is recorded on the Order at first settle and required to
+    match on every same-store replay, so a captured (public) terms-signature can
+    never hand another wallet this store's goods. None when the envelope carries no
+    decodable payer (the replay guard then fail-closes on any mismatch)."""
+    try:
+        decoded = json.loads(base64.b64decode(sig))
+        inner = decoded.get("payload") if isinstance(decoded, dict) else None
+        terms = inner.get("terms") if isinstance(inner, dict) else None
+        payer = terms.get("payer") if isinstance(terms, dict) else None
+        return payer.lower() if isinstance(payer, str) and payer else None
+    except Exception:
+        return None
+
+
+def _require_payer(order: Order, payer: str | None) -> None:
+    """Fail-closed payer binding: the replaying request's recovered signer MUST equal
+    the payer recorded on the order at first settle (both lowercased, checksum-
+    agnostic). Any mismatch -> 403 BEFORE any delivery, so a non-signer replaying a
+    public terms-signature gets goods refused, not handed over."""
+    if (order.from_addr or "").lower() != (payer or "").lower():
+        raise HTTPException(403, "subscription payer mismatch")
+
+
 async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
     """With a PAYMENT-SIGNATURE: rebuild the requirements SERVER-SIDE from ctx (so
     verify/settle bind the buyer's signature to the STORE's payTo/amount/period,
@@ -156,7 +182,8 @@ async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
     a facilitator settle failure / 503 -> the same status, NO Order; only a
     facilitator success creates the Order + delivers."""
     idem_key = _subscription_idem_key(sig)
-    replay = await asyncio.to_thread(_subscription_replay, ctx, idem_key)
+    payer = _recovered_payer(sig)
+    replay = await asyncio.to_thread(_subscription_replay, ctx, idem_key, payer)
     if replay is not None:
         return JSONResponse(replay, headers=_SUB_HEADERS)
 
@@ -190,7 +217,9 @@ async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
             "subscription settle failed",
         )
     reference = _safe_json(sresp).get("facilitator")
-    body_out = await asyncio.to_thread(_fulfill_subscription, ctx, reference, idem_key)
+    body_out = await asyncio.to_thread(
+        _fulfill_subscription, ctx, reference, idem_key, payer
+    )
     return JSONResponse(body_out, headers=_SUB_HEADERS)
 
 
@@ -212,15 +241,13 @@ def _subscription_body(session, order: Order, ctx: dict) -> dict:
     return body
 
 
-def _subscription_replay(ctx: dict, idem_key: str) -> dict | None:
+def _subscription_replay(ctx: dict, idem_key: str, payer: str | None) -> dict | None:
     """Return the existing order's body for a replayed PAYMENT-SIGNATURE (keyed on
     the terms signature), or None on a first submission. Prevents a replay from
     re-hitting the facilitator and minting a duplicate order + delivery."""
     with SessionLocal() as session:
         # Scope the replay lookup to this store: a terms-signature bound to store A
         # must never replay against store B and hand over another store's goods.
-        # (Payer-binding within a single store remains a documented flag-flip
-        # blocker — see docs/spikes.md.)
         order = session.scalar(
             select(Order).where(
                 Order.x402_nonce == idem_key,
@@ -229,12 +256,18 @@ def _subscription_replay(ctx: dict, idem_key: str) -> dict | None:
         )
         if order is None:
             return None
+        # Same-store payer binding: refuse to deliver unless the replaying request's
+        # recovered signer equals the payer recorded at first settle. Checked BEFORE
+        # _subscription_body (which delivers), so a mismatch delivers nothing.
+        _require_payer(order, payer)
         body = _subscription_body(session, order, ctx)
         session.commit()
         return body
 
 
-def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
+def _fulfill_subscription(
+    ctx: dict, reference, idem_key: str, payer: str | None
+) -> dict:
     """Record the settled subscription as an agent Order and deliver through the
     exact M3/M4 ``checkout.deliver`` path. Runs ONLY after a real facilitator settle
     success — never on a mocked/failed settle. The terms-signature idempotency key
@@ -251,6 +284,7 @@ def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
             status="confirmed",
             channel="agent",
             x402_nonce=idem_key,
+            from_addr=payer,
             paid_at=checkout._now(),
         )
         session.add(order)
@@ -266,6 +300,7 @@ def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
             )
             if existing is None:
                 raise
+            _require_payer(existing, payer)
             body = _subscription_body(session, existing, ctx)
             session.commit()
             return body

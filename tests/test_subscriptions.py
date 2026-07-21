@@ -246,6 +246,112 @@ def test_replayed_signature_is_idempotent(monkeypatch):
     assert settle.call_count == 1  # the replay never re-hit the facilitator
 
 
+# --------------------------------------------------------------- payer binding
+# A real period PAYMENT-SIGNATURE is a base64 JSON envelope carrying the buyer's
+# signed terms; the recovered signer is terms.payer. _subscription_idem_key keys the
+# replay on termsSignature, so a captured (public) terms-signature collides with the
+# first-settle order even when an attacker swaps in their own payer field.
+def _sub_sig(payer: str, terms_sig: str) -> str:
+    import base64
+    import json
+
+    envelope = {"payload": {"terms": {"payer": payer}, "termsSignature": terms_sig}}
+    return base64.b64encode(json.dumps(envelope).encode()).decode()
+
+
+def _mock_settle(sub_id: str):
+    return respx.post(f"{SIDECAR}/subscriptions/settle").mock(
+        return_value=httpx.Response(
+            200, json={"settled": True, "facilitator": {"subscriptionId": sub_id}}
+        )
+    )
+
+
+PAYER = "0x" + "b" * 40
+ATTACKER = "0x" + "e" * 40
+TERMS_SIG = "0xdeadbeef"
+
+
+@respx.mock
+def test_replay_by_nonsigner_refused(monkeypatch):
+    # Attacker replays PAYER's public terms-signature but with their own payer field:
+    # same idem_key (termsSignature) hits PAYER's order, recovered signer != bound
+    # payer -> 403, goods refused, no duplicate order, no re-settle.
+    _sub_store("sb1")
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    settle = _mock_settle("sub_b1")
+    reqs = {"requirements": {"scheme": "period"}}
+    r1 = client.post(
+        "/s/sb1/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER, TERMS_SIG)},
+        json=reqs,
+    )
+    assert r1.status_code == 200
+    assert _orders()[0].from_addr == PAYER  # bound at first settle, lowercased
+
+    r2 = client.post(
+        "/s/sb1/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig(ATTACKER, TERMS_SIG)},
+        json=reqs,
+    )
+    assert r2.status_code == 403
+    assert "delivery" not in r2.json()  # wrong signer never gets goods
+    assert len(_orders()) == 1
+    assert settle.call_count == 1  # the refused replay never re-hit the facilitator
+
+
+@respx.mock
+def test_recharge_by_bound_payer_allowed(monkeypatch):
+    # The bound payer re-presenting the same terms-signature is delivered the same
+    # order idempotently (a legit re-charge), never refused.
+    _sub_store("sb2")
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    settle = _mock_settle("sub_b2")
+    args = dict(
+        headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER, TERMS_SIG)},
+        json={"requirements": {"scheme": "period"}},
+    )
+    r1 = client.post("/s/sb2/subscribe", **args)
+    r2 = client.post("/s/sb2/subscribe", **args)
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["order_id"] == r2.json()["order_id"]
+    assert r2.json()["delivery"] == "subscriber content"
+    assert len(_orders()) == 1
+    assert settle.call_count == 1
+
+
+@respx.mock
+def test_checksum_cased_payer_matches_binding(monkeypatch):
+    # Binding is checksum-agnostic: the same wallet in mixed case still matches.
+    _sub_store("sb3")
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    _mock_settle("sub_b3")
+    r1 = client.post(
+        "/s/sb3/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER.lower(), TERMS_SIG)},
+        json={"requirements": {"scheme": "period"}},
+    )
+    r2 = client.post(
+        "/s/sb3/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig("0x" + "B" * 40, TERMS_SIG)},
+        json={"requirements": {"scheme": "period"}},
+    )
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["order_id"] == r2.json()["order_id"]
+
+
 @respx.mock
 def test_settle_failure_no_order(monkeypatch):
     _sub_store("sv3")
