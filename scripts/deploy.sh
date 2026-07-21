@@ -61,6 +61,10 @@ FILES=(
   themes/original.html
   themes/bold.html
   themes/editorial.html
+  themes/_fonts.html
+  themes/_checkout.html
+  themes/_dashboard.html
+  themes/og.svg
 )
 
 # Subscription sidecar (Node). node_modules is server-owned (installed via
