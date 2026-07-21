@@ -695,6 +695,52 @@ class Plugin(Base):
     )
 
 
+class GrowthDraft(Base):
+    """One queued piece of marketing copy — the M17 growth-agent outbox. Rows are
+    fanned from a screened growth kit (M17.1); a scheduled calendar will add
+    ``source='scheduled'`` rows later. INVARIANT (INV-1): NOTHING here ever sends —
+    ``mark-published`` only RECORDS that a human posted the copy elsewhere. A draft is
+    immutable after creation: ``approve`` flips ``status`` only and the
+    ``content_sha256`` taken at creation is the tamper anchor, so an approved draft can
+    never be silently mutated. A ``status='blocked'`` row (screening BLOCK) has its
+    ``body`` withheld from every read path."""
+
+    __tablename__ = "growth_drafts"
+    __table_args__ = (
+        CheckConstraint(
+            "channel IN ('social','email_subject','launch_tweet')",
+            name="ck_growth_drafts_channel",
+        ),
+        CheckConstraint(
+            "source IN ('manual','scheduled')", name="ck_growth_drafts_source"
+        ),
+        CheckConstraint(
+            "status IN ('pending','blocked','approved','published','discarded')",
+            name="ck_growth_drafts_status",
+        ),
+        Index("ix_growth_drafts_store_status", "store_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="manual", server_default="manual"
+    )
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="pending", server_default="pending"
+    )
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    screening_status: Mapped[str] = mapped_column(String(10), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    performance_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
 class EventLog(Base):
     __tablename__ = "event_log"
 

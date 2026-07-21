@@ -26,13 +26,15 @@ which also serves the GET read-back for free — no new table, no schema change.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
@@ -40,7 +42,7 @@ from app import config, engine, screening
 from app.db import get_session
 from app.engine import GenerationUnavailable
 from app.limiter import limiter
-from app.models import EventLog, Store, log_event
+from app.models import EventLog, GrowthDraft, Store, log_event
 
 router = APIRouter()
 
@@ -169,6 +171,7 @@ def growth_kit_post(
         )
     data = kit.model_dump()
     log_event(session, "growth", "growth.kit_generated", store_id=store.id, data=data)
+    _fan_kit_into_outbox(session, store, kit)
     session.commit()
     return JSONResponse(data, headers=_KIT_HEADERS)
 
@@ -193,3 +196,163 @@ def growth_kit_get(
     if event is None or not event.data:
         raise HTTPException(404, "no kit generated yet")
     return JSONResponse(event.data, headers=_KIT_HEADERS)
+
+
+# ===================================================================== outbox
+# The draft outbox (M17.1). Every draft is queued copy a human copies out and
+# posts themselves — INV-1: this module sends NOTHING. ``mark-published`` only
+# records that the human already posted it. See test_no_outbound_posting_grep.
+
+
+def _fan_kit_into_outbox(session: Session, store: Store, kit: GrowthKit) -> None:
+    """Fan the already-screened kit into ``growth_drafts`` rows (additive to the
+    unchanged kit response). The whole kit passed ``screening.screen`` fail-closed
+    in the caller before this runs, so every row is stored ``screening_status='allow'``
+    / ``status='pending'``; the ``content_sha256`` taken here is the tamper anchor
+    that makes an approved draft immutable."""
+    items = [("social", body) for body in kit.social_posts]
+    items.append(("launch_tweet", kit.launch_tweet))
+    items.append(("email_subject", kit.email_subject))
+    for channel, body in items:
+        session.add(
+            GrowthDraft(
+                store_id=store.id,
+                channel=channel,
+                body=body,
+                source="manual",
+                status="pending",
+                content_sha256=hashlib.sha256(body.encode()).hexdigest(),
+                screening_status="allow",
+            )
+        )
+
+
+def _draft_view(draft: GrowthDraft) -> dict:
+    """Serialize a draft for a read path. A ``blocked`` draft's body is withheld —
+    unscreened/blocked copy never leaves through any read path."""
+    return {
+        "id": draft.id,
+        "channel": draft.channel,
+        "body": None if draft.status == "blocked" else draft.body,
+        "source": draft.source,
+        "status": draft.status,
+        "content_sha256": draft.content_sha256,
+        "screening_status": draft.screening_status,
+        "created_at": draft.created_at.isoformat() if draft.created_at else None,
+        "approved_at": draft.approved_at.isoformat() if draft.approved_at else None,
+        "published_at": draft.published_at.isoformat() if draft.published_at else None,
+        "performance_note": draft.performance_note,
+    }
+
+
+def _load_owned_draft(
+    request: Request, slug: str, draft_id: int, session: Session
+) -> tuple[Store, GrowthDraft]:
+    """Same merchant/manage-key gate as the kit, then scope the draft to the store —
+    a draft belonging to another store 404s (IDOR-blocked), never leaks."""
+    store = _load_owned_live_store(request, slug, session)
+    draft = session.scalar(
+        select(GrowthDraft).where(
+            GrowthDraft.id == draft_id, GrowthDraft.store_id == store.id
+        )
+    )
+    if draft is None:
+        raise HTTPException(404, "draft not found")
+    return store, draft
+
+
+class MarkPublished(BaseModel):
+    """``mark-published`` records a human's out-of-band post. ``url`` is an optional
+    receipt link — it triggers no send."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: Annotated[str, Field(max_length=500)] | None = None
+
+
+@router.get("/api/stores/{slug}/growth/outbox")
+def growth_outbox_list(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """List the store's draft outbox (merchant-gated, blocked bodies withheld)."""
+    store = _load_owned_live_store(request, slug, session)
+    drafts = session.scalars(
+        select(GrowthDraft)
+        .where(GrowthDraft.store_id == store.id)
+        .order_by(GrowthDraft.id.desc())
+    ).all()
+    return JSONResponse(
+        {"drafts": [_draft_view(d) for d in drafts]}, headers=_KIT_HEADERS
+    )
+
+
+@router.post("/api/stores/{slug}/growth/outbox/{draft_id}/approve")
+def growth_outbox_approve(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    draft_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    """Flip a pending draft to approved (status-only; the body/hash are immutable)."""
+    _, draft = _load_owned_draft(request, slug, draft_id, session)
+    now = datetime.now(timezone.utc)
+    changed = session.execute(
+        update(GrowthDraft)
+        .where(GrowthDraft.id == draft.id, GrowthDraft.status == "pending")
+        .values(status="approved", approved_at=now)
+    ).rowcount
+    if not changed:
+        raise HTTPException(409, "draft is not pending")
+    session.commit()
+    session.refresh(draft)
+    return JSONResponse(_draft_view(draft), headers=_KIT_HEADERS)
+
+
+@router.post("/api/stores/{slug}/growth/outbox/{draft_id}/discard")
+def growth_outbox_discard(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    draft_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    """Discard a pending or approved draft (never a published one)."""
+    _, draft = _load_owned_draft(request, slug, draft_id, session)
+    changed = session.execute(
+        update(GrowthDraft)
+        .where(
+            GrowthDraft.id == draft.id,
+            GrowthDraft.status.in_(("pending", "approved")),
+        )
+        .values(status="discarded")
+    ).rowcount
+    if not changed:
+        raise HTTPException(409, "draft cannot be discarded")
+    session.commit()
+    session.refresh(draft)
+    return JSONResponse(_draft_view(draft), headers=_KIT_HEADERS)
+
+
+@router.post("/api/stores/{slug}/growth/outbox/{draft_id}/mark-published")
+def growth_outbox_mark_published(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    draft_id: int = Path(..., ge=1),
+    payload: MarkPublished = Body(default_factory=MarkPublished),
+    session: Session = Depends(get_session),
+):
+    """RECORD that the human posted an approved draft (INV-1: sends nothing). The
+    optional ``url`` is stored as the receipt — no outbound call is ever made."""
+    _, draft = _load_owned_draft(request, slug, draft_id, session)
+    now = datetime.now(timezone.utc)
+    changed = session.execute(
+        update(GrowthDraft)
+        .where(GrowthDraft.id == draft.id, GrowthDraft.status == "approved")
+        .values(status="published", published_at=now, performance_note=payload.url)
+    ).rowcount
+    if not changed:
+        raise HTTPException(409, "draft is not approved")
+    session.commit()
+    session.refresh(draft)
+    return JSONResponse(_draft_view(draft), headers=_KIT_HEADERS)
