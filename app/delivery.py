@@ -42,6 +42,10 @@ FILE_READY_MESSAGE = "Your download is ready."
 _DOWNLOAD_SALT = "tilla.download.v1"
 _SESSION_SALT = "tilla.session.v1"
 _REDELIVER_SALT = "tilla.redeliver.v1"
+# M9 merchant sessions ride the SAME signing key but a distinct salt, so a buyer
+# session token can never validate on a merchant route and vice versa (the
+# per-purpose-salt rule that already separates download/session/redeliver).
+_MERCHANT_SALT = "tilla.merchant.v1"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -107,6 +111,19 @@ def mint_redeliver_token(order_id: str) -> str:
 
 def load_redeliver_token(token: str) -> str:
     return _serializer(_REDELIVER_SALT).loads(token, max_age=config.REDELIVER_TTL)["o"]
+
+
+def mint_merchant_token(address: str) -> str:
+    return _serializer(_MERCHANT_SALT).dumps({"a": address.lower()})
+
+
+def load_merchant_token(token: str) -> str:
+    """Raises BadSignature (→401 invalid) / SignatureExpired (→401 expired). The
+    _MERCHANT_SALT means a buyer session token can never validate here, and a
+    merchant token can never validate on /api/library (buyer salt)."""
+    return _serializer(_MERCHANT_SALT).loads(
+        token, max_age=config.MERCHANT_SESSION_TTL
+    )["a"]
 
 
 # ------------------------------------------------------------ manage key
@@ -213,6 +230,24 @@ def build_signin_message(
     )
 
 
+def build_merchant_signin_message(
+    address: str, nonce: str, issued_iso: str, expires_iso: str
+) -> str:
+    """Same nonce row, different purpose line ("Tilla merchant sign-in"). Because
+    verify recovers the signer over the server-rebuilt message, a buyer-flow
+    signature recovers to a garbage address on the merchant verify and 401s (and
+    vice versa) — a captured buyer sign-in can never be upgraded to a merchant
+    session, with no purpose column needed."""
+    return (
+        "Tilla merchant sign-in\n"
+        f"domain: {config.DOMAIN}\n"
+        f"address: {address}\n"
+        f"nonce: {nonce}\n"
+        f"issued: {issued_iso}\n"
+        f"expires: {expires_iso}"
+    )
+
+
 def issue_nonce(session: Session, address: str) -> AuthNonce:
     """Create a fresh single-use nonce for `address`, opportunistically pruning
     this address's already-expired rows first."""
@@ -245,11 +280,22 @@ def _recover_signer(message: str, signature: str) -> str | None:
         return None
 
 
-def verify_signin(session: Session, address: str, signature: str) -> str | None:
+def verify_signin(
+    session: Session, address: str, signature: str, purpose: str = "buyer"
+) -> str | None:
     """Verify a wallet signature against this address's live nonces and, on the
     first that matches, consume it atomically (used_at IS NULL → now; a replay
     loses the conditional UPDATE) and mint a short-lived session token. Returns
-    the token, or None on no match / replay / expiry / bad signature."""
+    the token, or None on no match / replay / expiry / bad signature.
+
+    ``purpose`` selects the signed-message text and the token salt: 'buyer' (the
+    M4 default) or 'merchant' (M9). The replay-proof consume path is identical for
+    both; the differing message purpose line means a signature minted for one
+    purpose can never validate for the other."""
+    if purpose == "merchant":
+        build_message, mint_token = build_merchant_signin_message, mint_merchant_token
+    else:
+        build_message, mint_token = build_signin_message, mint_session_token
     addr = address.lower()
     now = _now()
     rows = session.scalars(
@@ -262,7 +308,7 @@ def verify_signin(session: Session, address: str, signature: str) -> str | None:
         .order_by(AuthNonce.id.desc())
     ).all()
     for row in rows:
-        message = build_signin_message(
+        message = build_message(
             addr, row.nonce, row.issued_at.isoformat(), row.expires_at.isoformat()
         )
         recovered = _recover_signer(message, signature)
@@ -274,7 +320,7 @@ def verify_signin(session: Session, address: str, signature: str) -> str | None:
             .values(used_at=now)
         ).rowcount
         if consumed == 1:
-            return mint_session_token(addr)
+            return mint_token(addr)
     return None
 
 

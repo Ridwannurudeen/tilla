@@ -26,7 +26,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from app import agentic, chain, checkout, config, delivery, mpp, subscriptions
+from app import (
+    agentic,
+    chain,
+    checkout,
+    config,
+    dashboard,
+    delivery,
+    mpp,
+    subscriptions,
+)
 from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
 from app.engine import create_store as gen_store
@@ -110,6 +119,9 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(agentic.router)
+# M9 merchant platform: wallet/API-key auth, dashboard read surface, refunds, CSV
+# export, webhook config. All routes under /api/merchant/* plus the /dashboard shell.
+app.include_router(dashboard.router)
 # MPP pay-as-you-go router: always mounted, every endpoint 503s until
 # TILLA_MPP_ENABLED + SA creds are set (fail-closed, no SDK import while dormant).
 app.include_router(mpp.router)
@@ -436,12 +448,19 @@ def _bearer(request: Request) -> str:
     return auth[7:] if auth.lower().startswith("bearer ") else ""
 
 
-def _require_store_key(request: Request, store: Store) -> None:
-    """Per-store capability auth: Authorization: Bearer <manage_key>, verified as
-    sha256 + constant-time compare against stores.manage_key_hash. The single seam
-    M9 swaps for merchant-session auth."""
-    if not delivery.verify_manage_key(_bearer(request), store.manage_key_hash):
-        raise HTTPException(401, "invalid or missing manage key")
+def _require_store_key(request: Request, store: Store, session: Session) -> None:
+    """Per-store capability auth. Accepts EITHER the per-store manage key
+    (Authorization: Bearer <manage_key>, sha256 + constant-time compare against
+    stores.manage_key_hash — byte-identical to M4 for headless/agent callers) OR a
+    merchant session token / API key whose merchant owns this store (M9 additive).
+    Manage keys keep working unchanged."""
+    bearer = _bearer(request)
+    if delivery.verify_manage_key(bearer, store.manage_key_hash):
+        return
+    merchant = dashboard.resolve_merchant(session, bearer)
+    if merchant is not None and merchant.id == store.merchant_id:
+        return
+    raise HTTPException(401, "invalid or missing manage key")
 
 
 def _authorize_order_email(request: Request, session: Session, order: Order) -> bool:
@@ -576,7 +595,7 @@ async def set_pricing(
     store = session.scalar(select(Store).where(Store.slug == slug))
     if store is None:
         raise HTTPException(404, "store not found")
-    _require_store_key(request, store)
+    _require_store_key(request, store, session)
     try:
         body = await request.json()
     except ValueError:
@@ -629,7 +648,7 @@ async def create_deliverable(
     store = session.scalar(select(Store).where(Store.slug == slug))
     if store is None:
         raise HTTPException(404, "store not found")
-    _require_store_key(request, store)
+    _require_store_key(request, store, session)
 
     ctype = request.headers.get("content-type", "")
     if ctype.startswith("multipart/"):
