@@ -105,7 +105,19 @@ def _generate_for_store(session: Session, store: Store, plan: dict) -> bool:
     try:
         kit, llm_in, llm_out = growth._generate_kit(prompt)
     except GenerationUnavailable:
+        # A generation ATTEMPT still counts toward the daily caps: the LLM call
+        # was made (and may have billed) even if its output was unusable. Logging
+        # a run here stops a persistently-failing LLM from being retried every
+        # tick past the cap (the "6/day" must bound attempts, not just successes).
         logger.warning("growth scheduler: generation unavailable for %s", store.slug)
+        log_event(
+            session,
+            "growth",
+            "growth.scheduled_run",
+            store_id=store.id,
+            data={"outcome": "generation_unavailable"},
+        )
+        session.commit()
         return False
     channels = list(plan.get("channels", []))
     dispositions: dict[str, int] = {"allow": 0, "blocked": 0, "unavailable": 0}

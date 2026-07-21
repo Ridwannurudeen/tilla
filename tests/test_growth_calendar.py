@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import app.main as main
-from app import config, engine, growth_scheduler
+from app import config, engine, growth, growth_scheduler
 from app.config import WARDEN_SCREEN_URL
 from app.db import SessionLocal
 from app.delivery import mint_manage_key
@@ -250,6 +250,33 @@ def test_daily_cap_halts_tick(make_store, monkeypatch):
             s.scalars(select(GrowthDraft).where(GrowthDraft.store_id == sid)).all()
             == []
         )
+
+
+def test_failed_generation_counts_toward_daily_cap(make_store, monkeypatch):
+    """A generation that raises GenerationUnavailable still logs a scheduled_run
+    so it counts toward the caps — a persistently-failing LLM can't be retried
+    every tick past the cap (the '6/day' bounds attempts, not just successes)."""
+    from app.engine import GenerationUnavailable
+
+    _enable(monkeypatch)
+
+    def _boom(prompt):
+        raise GenerationUnavailable("llm down")
+
+    monkeypatch.setattr(growth, "_generate_kit", _boom)
+    sid, _ = _store_with_key(make_store, slug="sched-fail")
+    _set_calendar(sid, {"cadence": "daily", "channels": ["social"], "active": True})
+    growth_scheduler.run_scheduler_tick()
+    with SessionLocal() as s:
+        runs = s.scalars(
+            select(EventLog).where(EventLog.event == "growth.scheduled_run")
+        ).all()
+    assert len(runs) == 1  # the failed attempt was counted
+    with SessionLocal() as s:
+        assert (
+            s.scalars(select(GrowthDraft).where(GrowthDraft.store_id == sid)).all()
+            == []
+        )  # but nothing was served
 
 
 @respx.mock
