@@ -47,6 +47,7 @@ from app import (
     embed,
     external_feeds,
     growth,
+    growth_scheduler,
     mpp,
     subscriptions,
     webhooks,
@@ -106,6 +107,7 @@ async def lifespan(app: FastAPI):
     sweeper = None
     webhook_task = None
     attest_task = None
+    growth_sched_task = None
     if config.SWEEP_ENABLED:
         sweeper = asyncio.create_task(checkout.sweeper_loop())
         # M9 outbound webhook dispatcher — shares the sweeper's background-loop gate
@@ -118,6 +120,13 @@ async def lifespan(app: FastAPI):
         # + flag on the VPS) is an explicit user-gated runbook step.
         if config.ATTEST_ENABLED and config.TILLA_ATTESTER_KEY:
             attest_task = asyncio.create_task(attest.attest_loop())
+        # M17.3 content-calendar scheduler — DORMANT: only under SWEEP_ENABLED AND
+        # TILLA_GROWTH_SCHED_ENABLED (default OFF), so zero LLM spend by default and
+        # never started in tests. It drafts + screens + queues only; sends nothing.
+        if config.GROWTH_SCHED_ENABLED:
+            growth_sched_task = asyncio.create_task(
+                growth_scheduler.growth_scheduler_loop()
+            )
     # x402 agent commerce (prod only): pre-warm the facilitator /supported off-loop
     # so the first protected request doesn't do the blocking sync GET, and run the
     # reaper that voids agent orders stuck delivered-without-settle.
@@ -128,7 +137,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (sweeper, webhook_task, attest_task, reaper):
+        for task in (sweeper, webhook_task, attest_task, growth_sched_task, reaper):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

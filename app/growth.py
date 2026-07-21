@@ -30,10 +30,10 @@ import hashlib
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
@@ -77,9 +77,11 @@ def _content(store: Store) -> dict:
     return store.content if isinstance(store.content, dict) else {}
 
 
-def _build_prompt(store: Store, slug: str) -> str:
+def _build_prompt(store: Store, slug: str, perf_block: str = "") -> str:
     """Build the generation prompt from the persisted, already-screened content
-    only — no request body ever reaches the LLM."""
+    only — no request body ever reaches the LLM. ``perf_block`` (M17.3) is an
+    optional compact FIRST-PARTY performance summary (own-DB numbers only, from
+    17.2's aggregates); no buyer-supplied text or fetched content ever enters."""
     c = _content(store)
     url = f"{config.PUBLIC_BASE_URL.rstrip('/')}/s/{slug}/"
     return (
@@ -93,7 +95,8 @@ def _build_prompt(store: Store, slug: str) -> str:
         f"Product: {c.get('product_name', '')}\n"
         f"Product description: {c.get('product_blurb', '')}\n"
         f"Price: {c.get('price_usdt', '')} USDT\n"
-        f"Store URL: {url}\n\n"
+        f"Store URL: {url}\n"
+        f"{perf_block}\n"
         "Output ONLY valid JSON (no markdown) with EXACTLY these keys: "
         "social_posts (array of EXACTLY 3 punchy social posts, each at most 280 "
         "characters), launch_tweet (one launch announcement tweet, at most 280 "
@@ -515,3 +518,153 @@ def growth_performance(
     Same auth seam as the growth kit/outbox; no LLM, no RPC, no writes."""
     store = _load_owned_live_store(request, slug, session)
     return JSONResponse(store_performance(session, store, days), headers=_KIT_HEADERS)
+
+
+# ========================================================= content calendar (M17.3)
+# A merchant sets a cadence + channels; a flag-gated background scheduler drafts
+# performance-aware copy on that cadence, screens it fail-closed, and queues it in
+# the outbox (INV-1: it still sends NOTHING). The plan is the latest event_log row —
+# no new table. Scheduled generation reuses the exact _build_prompt/_generate_kit and
+# screening seams as the on-demand kit.
+
+# The channels a calendar may schedule. 17.4 widens the outbox channel set, but the
+# scheduler drafts only from the kit's own channels.
+SCHEDULED_CHANNELS = ("social", "email_subject")
+
+
+def _performance_block(perf: dict) -> str:
+    """A compact FIRST-PARTY performance line for the generation prompt — numbers
+    only, straight from 17.2's own-DB aggregates. No buyer text, no PII."""
+    orders = perf.get("orders", {})
+    waitlist = perf.get("waitlist", {})
+    affiliates = perf.get("affiliates", {})
+    revenue = int(orders.get("revenue_micro", 0)) / 1_000_000
+    return (
+        f"Recent performance (first-party, last {perf.get('window_days', 0)}d): "
+        f"{int(orders.get('total', 0))} orders, {revenue:g} USDT revenue; "
+        f"waitlist {int(waitlist.get('total', 0))} "
+        f"(+{int(waitlist.get('new_in_window', 0))} new); "
+        f"affiliate-attributed sales {int(affiliates.get('attributed_sales', 0))}. "
+        "Let these numbers inform the angle; do NOT quote them verbatim."
+    )
+
+
+class CalendarPlan(BaseModel):
+    """The merchant's content-calendar plan. Strict + tiny: a cadence, the channels
+    to schedule (a subset of the kit's channels), and an active switch. Stored as the
+    latest ``growth.calendar_set`` event_log row (no new table)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cadence: Literal["daily", "weekly"]
+    channels: Annotated[
+        list[Literal["social", "email_subject"]], Field(min_length=1, max_length=2)
+    ]
+    active: bool = True
+
+    @field_validator("channels")
+    @classmethod
+    def _dedupe(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("channels must be unique")
+        return v
+
+
+def latest_calendar(session: Session, store_id: int) -> dict | None:
+    """The store's current calendar plan (latest row wins), or None if never set."""
+    event = session.scalar(
+        select(EventLog)
+        .where(
+            EventLog.store_id == store_id,
+            EventLog.event == "growth.calendar_set",
+        )
+        .order_by(EventLog.id.desc())
+    )
+    return event.data if event is not None and event.data else None
+
+
+@router.post("/api/stores/{slug}/growth/calendar")
+def growth_calendar_set(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    plan: CalendarPlan = Body(...),
+    session: Session = Depends(get_session),
+):
+    """Owner-gated: set the store's content-calendar plan (latest row wins). Records
+    intent only — the scheduler stays dormant until TILLA_GROWTH_SCHED_ENABLED and
+    sends nothing regardless."""
+    store = _load_owned_live_store(request, slug, session)
+    data = plan.model_dump()
+    log_event(session, "growth", "growth.calendar_set", store_id=store.id, data=data)
+    session.commit()
+    return JSONResponse(data, headers=_KIT_HEADERS)
+
+
+@router.get("/api/stores/{slug}/growth/calendar")
+def growth_calendar_get(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Owner-gated: read back the store's current calendar plan (404 if unset)."""
+    store = _load_owned_live_store(request, slug, session)
+    plan = latest_calendar(session, store.id)
+    if plan is None:
+        raise HTTPException(404, "no calendar set")
+    return JSONResponse(plan, headers=_KIT_HEADERS)
+
+
+def _scheduled_drafts_from_kit(
+    kit: GrowthKit, channels: list[str]
+) -> list[tuple[str, str]]:
+    """Map a generated kit to (channel, body) drafts for the calendar's channels."""
+    drafts: list[tuple[str, str]] = []
+    if "social" in channels:
+        drafts.extend(("social", post) for post in kit.social_posts)
+    if "email_subject" in channels:
+        drafts.append(("email_subject", kit.email_subject))
+    return drafts
+
+
+def screen_and_store_scheduled(
+    session: Session, store: Store, channel: str, body: str
+) -> str:
+    """Screen one scheduled draft fail-closed, then persist it in the outbox with
+    ``source='scheduled'``. Returns the disposition:
+
+    - ``'allow'``   → a ``pending`` row (screened, readable);
+    - ``'blocked'`` → a ``blocked`` row IS written (the body is stored but withheld
+      from every read path by ``_draft_view``) — the M17.1-review binding that the
+      screening-BLOCK path actually persists state, not silently drop it;
+    - ``'unavailable'`` → NO row (screening was ambiguous/down): the M12 outage
+      contract — skip, retry next tick, never serve unscreened copy.
+    """
+    try:
+        outcome = screening.screen(body)
+    except screening.ScreeningBlocked:
+        session.add(
+            GrowthDraft(
+                store_id=store.id,
+                channel=channel,
+                body=body,
+                source="scheduled",
+                status="blocked",
+                content_sha256=hashlib.sha256(body.encode()).hexdigest(),
+                screening_status="blocked",
+            )
+        )
+        return "blocked"
+    if outcome.status != "allow":
+        return "unavailable"
+    session.add(
+        GrowthDraft(
+            store_id=store.id,
+            channel=channel,
+            body=body,
+            source="scheduled",
+            status="pending",
+            content_sha256=hashlib.sha256(body.encode()).hexdigest(),
+            screening_status="allow",
+        )
+    )
+    return "allow"
