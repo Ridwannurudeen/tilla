@@ -35,6 +35,7 @@ from app import (
     delivery,
     mpp,
     subscriptions,
+    webhooks,
 )
 from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
@@ -74,8 +75,13 @@ async def lifespan(app: FastAPI):
     # In-process, restart-safe payment sweeper. Disabled via TILLA_SWEEP_ENABLED=0
     # so the test suite never touches the network.
     sweeper = None
+    webhook_task = None
     if config.SWEEP_ENABLED:
         sweeper = asyncio.create_task(checkout.sweeper_loop())
+        # M9 outbound webhook dispatcher — shares the sweeper's background-loop gate
+        # so the test suite never starts it or hits the network. Idle until a
+        # merchant registers a webhook URL.
+        webhook_task = asyncio.create_task(webhooks.webhook_loop())
     # x402 agent commerce (prod only): pre-warm the facilitator /supported off-loop
     # so the first protected request doesn't do the blocking sync GET, and run the
     # reaper that voids agent orders stuck delivered-without-settle.
@@ -86,7 +92,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (sweeper, reaper):
+        for task in (sweeper, webhook_task, reaper):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

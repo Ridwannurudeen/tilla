@@ -16,7 +16,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config, delivery
+from app import chain, config, delivery, webhooks
 from app.checkout import transition
 from app.models import Order, Refund, Store, log_event
 
@@ -189,6 +189,13 @@ def apply_refund(
         )
 
     session.refresh(order)
+    webhooks.enqueue(
+        session,
+        store.merchant_id,
+        "order.refunded",
+        order,
+        extra={"kind": kind, "refund_amount_micro": total},
+    )
     return _result(order, applied=total)
 
 

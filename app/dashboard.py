@@ -29,7 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import HTMLResponse, StreamingResponse
 
-from app import chain, checkout, config, delivery, refunds, render
+from app import chain, checkout, config, delivery, refunds, render, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -687,6 +687,55 @@ def export_customers_csv(
     merchant = _require_merchant(request, session)
     store_ids = _export_scope(session, merchant, store)
     return _csv_response(_customers_csv_gen(store_ids), "customers.csv")
+
+
+# ------------------------------------------------------------------- webhooks
+class WebhookBody(BaseModel):
+    url: str = Field(min_length=1, max_length=500)
+
+
+@router.get("/api/merchant/webhook")
+@limiter.limit("60/minute")
+def get_webhook(request: Request, session: Session = Depends(get_session)):
+    """The caller's registered webhook URL (never the secret — it is write-only,
+    shown once at registration and only used server-side to sign deliveries)."""
+    merchant = _require_merchant(request, session)
+    return {"url": merchant.webhook_url}
+
+
+@router.post("/api/merchant/webhook")
+@limiter.limit("10/minute")
+def set_webhook(
+    request: Request,
+    body: WebhookBody,
+    session: Session = Depends(get_session),
+):
+    """Register (or rotate) the webhook. SSRF-validates the URL, mints a signing
+    secret, returns it exactly once. POSTing again rotates the secret."""
+    merchant = _require_merchant(request, session)
+    try:
+        url = webhooks.validate_webhook_url(body.url)
+    except webhooks.WebhookURLError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    secret = "whsec_" + secrets.token_urlsafe(32)
+    merchant.webhook_url = url
+    merchant.webhook_secret = secret
+    log_event(
+        session, "merchant", "webhook.registered", data={"merchant_id": merchant.id}
+    )
+    session.commit()
+    return {"url": url, "secret": secret}
+
+
+@router.delete("/api/merchant/webhook")
+@limiter.limit("10/minute")
+def delete_webhook(request: Request, session: Session = Depends(get_session)):
+    merchant = _require_merchant(request, session)
+    merchant.webhook_url = None
+    merchant.webhook_secret = None
+    log_event(session, "merchant", "webhook.removed", data={"merchant_id": merchant.id})
+    session.commit()
+    return {"url": None}
 
 
 @router.get("/dashboard")

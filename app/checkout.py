@@ -21,7 +21,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config, delivery
+from app import chain, config, delivery, webhooks
 from app.db import SessionLocal
 from app.models import (
     ChainCursor,
@@ -151,6 +151,14 @@ def deliver(session: Session, order: Order):
     log_event(
         session, "engine", "order.delivered", store_id=order.store_id, order_id=order.id
     )
+    # M9 webhooks: enqueue in the winner branch only (the transition rowcount-1
+    # guard above means exactly one caller reaches here per order). No-op unless the
+    # merchant registered a webhook. In Tilla's flow confirm and deliver are the
+    # same instant, so order.paid and order.delivered fire together.
+    if store is not None:
+        session.refresh(order)
+        webhooks.enqueue(session, store.merchant_id, "order.paid", order)
+        webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
     return session.scalar(select(Delivery).where(Delivery.order_id == order.id))
 
 
