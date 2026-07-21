@@ -11,18 +11,21 @@ import pathlib
 import secrets
 
 import httpx
+import pytest
 import respx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from starlette.requests import Request
 from x402.http.utils import encode_payment_response_header
-from x402.schemas import SettleResponse
+from x402.schemas import PaymentPayload, PaymentRequirements, SettleResponse
 
 import app.main as main
 from app import affiliates, agentic, checkout, config
 from app.db import SessionLocal
 from app.models import AffiliateAccrual, AffiliatePayout, EventLog, Order, Store
+from app.payment import PAYMENT_ASSET
 
 client = TestClient(main.app)
 
@@ -257,6 +260,63 @@ def test_agent_order_accrues_only_on_settlement(make_store):
     rows = _accruals(oid)
     assert len(rows) == 1
     assert rows[0].referrer_addr == REF
+
+
+def _reqs():
+    return PaymentRequirements(
+        scheme="exact",
+        network="eip155:196",
+        asset=PAYMENT_ASSET,
+        amount="9000000",
+        pay_to="0x" + "b" * 40,
+        max_timeout_seconds=300,
+        extra={},
+    )
+
+
+def _paid_request(slug):
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/s/{slug}/buy",
+        "raw_path": f"/s/{slug}/buy".encode(),
+        "headers": [],
+        "query_string": b"",
+        "client": ("test", 1),
+        "server": ("test", 80),
+        "scheme": "http",
+    }
+    req = Request(scope)
+    req.state.payment_payload = PaymentPayload(
+        x402_version=2,
+        payload={"authorization": {"nonce": NONCE, "from": PAYER}},
+        accepted=_reqs(),
+    )
+    req.state.payment_requirements = _reqs()
+    return req
+
+
+def test_agent_buy_query_ref_captured(make_store):
+    make_store(slug="aff-agentref", pay_to="0x" + "a" * 40, price_micro=9_000_000)
+    with SessionLocal() as s:
+        agentic.agent_buy(_paid_request("aff-agentref"), "aff-agentref", s, ref=REF)
+    with SessionLocal() as s:
+        o = s.scalar(select(Order).where(Order.x402_nonce == NONCE))
+        assert o.referrer_addr == REF
+
+
+def test_agent_buy_bad_ref_rejected_before_settle(make_store):
+    make_store(slug="aff-agentbad", pay_to="0x" + "a" * 40)
+    with SessionLocal() as s:
+        with pytest.raises(Exception) as exc:
+            agentic.agent_buy(
+                _paid_request("aff-agentbad"), "aff-agentbad", s, ref="0xbad"
+            )
+    # a malformed ref 400s BEFORE settle -> the payment middleware skips settlement
+    assert getattr(exc.value, "status_code", None) == 400
+    with SessionLocal() as s:
+        # no order was created for this nonce (rejected before fulfill)
+        assert s.scalar(select(Order).where(Order.x402_nonce == NONCE)) is None
 
 
 def test_voided_agent_order_never_accrues(make_store):
