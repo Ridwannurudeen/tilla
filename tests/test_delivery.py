@@ -314,6 +314,19 @@ def test_download_blocked_when_order_refunded(make_store):
     assert client.get(f"/api/download/{token}").status_code == 403
 
 
+def test_download_missing_file_404_does_not_consume_slot(make_store):
+    # The file-existence check runs before the download slot is claimed, so a
+    # missing file 404s without burning a non-refundable download credit.
+    _cid, url = _buy_file(make_store, "gone", "0x" + "b" * 40)
+    token = url.rsplit("/", 1)[-1]
+    with SessionLocal() as s:
+        dv = s.scalar(select(Deliverable).where(Deliverable.kind == "file"))
+        delivery.file_path(dv.file_sha256).unlink()
+    assert client.get(f"/api/download/{token}").status_code == 404
+    with SessionLocal() as s:
+        assert s.scalar(select(Entitlement)).download_count == 0
+
+
 def test_idor_buyer_cannot_see_or_download_another_buyers_purchase(make_store):
     # Two buyers, one store, distinct wallets. Each library shows only its own
     # purchase, and buyer A never receives a token for buyer B's entitlement.
@@ -426,20 +439,74 @@ def test_library_requires_valid_session():
 # --------------------------------------------------- email + magic link
 def test_email_capture_validates_and_stores(make_store):
     make_store(slug="mail", pay_to="0x" + "a" * 40)
+    key = _give_key("mail")
     cid = _order("mail")
     assert (
         client.post(
-            f"/api/checkout/{cid}/email", json={"email": "not-an-email"}
+            f"/api/checkout/{cid}/email",
+            headers=_auth(key),
+            json={"email": "not-an-email"},
         ).status_code
         == 422
     )
     # header-injection attempt is stripped and then fails validation
     bad = client.post(
-        f"/api/checkout/{cid}/email", json={"email": "a@b.com\r\nBcc: x@y.com"}
+        f"/api/checkout/{cid}/email",
+        headers=_auth(key),
+        json={"email": "a@b.com\r\nBcc: x@y.com"},
     )
     assert bad.status_code == 422
-    ok = client.post(f"/api/checkout/{cid}/email", json={"email": "buyer@example.com"})
+    ok = client.post(
+        f"/api/checkout/{cid}/email",
+        headers=_auth(key),
+        json={"email": "buyer@example.com"},
+    )
     assert ok.status_code == 200
+    with SessionLocal() as s:
+        assert s.get(Order, cid).buyer_email == "buyer@example.com"
+
+
+def test_email_requires_order_proof(make_store):
+    # An attacker who only knows the cid cannot overwrite buyer_email or trigger a
+    # redelivery: proof is the store manage key or the payer's wallet session.
+    make_store(slug="mailauth", pay_to="0x" + "a" * 40, delivery="LEGACY")
+    key = _give_key("mailauth")
+    acct = Account.create()
+    cid = _order("mailauth")
+    _confirm(cid, acct.address.lower(), "0x" + "7" * 64)
+
+    body = {"email": "buyer@example.com"}
+    assert client.post(f"/api/checkout/{cid}/email", json=body).status_code == 401
+    assert (
+        client.post(
+            f"/api/checkout/{cid}/email", headers=_auth("wrong-key"), json=body
+        ).status_code
+        == 401
+    )
+    # a different wallet's session is not proof for this order
+    other = _session_token(Account.create())
+    assert (
+        client.post(
+            f"/api/checkout/{cid}/email", headers=_auth(other), json=body
+        ).status_code
+        == 401
+    )
+    # the payer's own wallet session is accepted
+    assert (
+        client.post(
+            f"/api/checkout/{cid}/email",
+            headers=_auth(_session_token(acct)),
+            json=body,
+        ).status_code
+        == 200
+    )
+    # so is the store manage key
+    assert (
+        client.post(
+            f"/api/checkout/{cid}/email", headers=_auth(key), json=body
+        ).status_code
+        == 200
+    )
     with SessionLocal() as s:
         assert s.get(Order, cid).buyer_email == "buyer@example.com"
 
@@ -555,6 +622,22 @@ def test_license_reactivate_same_device_is_idempotent(make_store):
     assert (
         b.json()["status"] == "already_active" and b.json()["activations"] == 1
     )  # no bump
+
+
+def test_license_reactivate_after_deactivate_reclaims_one_slot(make_store):
+    # Reactivating a previously-deactivated device claims exactly one slot back
+    # via the conditional-UPDATE reactivation path (never leaks a seat).
+    lk = _license_key(make_store, "licreact")
+    client.post("/api/licenses/activate", json={"license_key": lk, "device_id": "d1"})
+    client.post("/api/licenses/deactivate", json={"license_key": lk, "device_id": "d1"})
+    with SessionLocal() as s:
+        assert s.scalar(select(Entitlement)).activations_used == 0
+    r = client.post(
+        "/api/licenses/activate", json={"license_key": lk, "device_id": "d1"}
+    )
+    assert r.json()["status"] == "activated" and r.json()["activations"] == 1
+    with SessionLocal() as s:
+        assert s.scalar(select(Entitlement)).activations_used == 1
 
 
 def test_license_deactivate_frees_a_slot(make_store):

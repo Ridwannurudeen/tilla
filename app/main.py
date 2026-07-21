@@ -335,6 +335,24 @@ def _require_store_key(request: Request, store: Store) -> None:
         raise HTTPException(401, "invalid or missing manage key")
 
 
+def _authorize_order_email(request: Request, session: Session, order: Order) -> bool:
+    """Proof required to attach a buyer email / trigger a redelivery on `order`:
+    a wallet session token for the order's on-chain payer, or the store's manage
+    key. Without it, anyone who learns a cid could overwrite buyer_email or have a
+    working redelivery link mailed to an attacker-chosen address."""
+    bearer = _bearer(request)
+    if not bearer:
+        return False
+    if config.SIGNING_KEY and order.from_addr:
+        with contextlib.suppress(BadSignature, SignatureExpired):
+            if delivery.load_session_token(bearer) == order.from_addr.lower():
+                return True
+    store = session.get(Store, order.store_id)
+    if store is not None and delivery.verify_manage_key(bearer, store.manage_key_hash):
+        return True
+    return False
+
+
 def _deactivate_deliverables(session: Session, store_id: int) -> None:
     session.execute(
         update(Deliverable)
@@ -515,12 +533,12 @@ def download(request: Request, token: str, session: Session = Depends(get_sessio
     order = session.get(Order, ent.order_id)
     if order is None or order.status not in checkout.TERMINAL_DELIVERED:
         raise HTTPException(403, "order is not deliverable")
-    if not delivery.claim_download(session, ent.id, deliverable.max_downloads):
-        raise HTTPException(410, "download limit reached")
-    session.commit()
     path = delivery.file_path(deliverable.file_sha256)
     if not path.exists():
         raise HTTPException(404, "file is missing")
+    if not delivery.claim_download(session, ent.id, deliverable.max_downloads):
+        raise HTTPException(410, "download limit reached")
+    session.commit()
     return FileResponse(
         path,
         media_type="application/octet-stream",
@@ -612,12 +630,15 @@ def checkout_email(
     cid: str,
     session: Session = Depends(get_session),
 ):
-    """Capture a buyer email (exchange-custody fallback). Accepted for any
-    non-refunded order; if the order is already delivered, a re-delivery magic link
-    is minted and mailed (a no-op that logs when SMTP is unconfigured)."""
+    """Capture a buyer email (exchange-custody fallback) for a non-refunded order,
+    gated on proof the caller owns the order (payer wallet session or store manage
+    key); if the order is already delivered, a re-delivery magic link is minted and
+    mailed (a no-op that logs when SMTP is unconfigured)."""
     order = session.get(Order, cid)
     if order is None:
         raise HTTPException(404, "checkout not found")
+    if not _authorize_order_email(request, session, order):
+        raise HTTPException(401, "authentication required")
     if order.status == "refunded":
         raise HTTPException(409, "order refunded")
     email = body.email.replace("\r", "").replace("\n", "").strip()

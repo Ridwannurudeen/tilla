@@ -344,8 +344,23 @@ def activate_license(
         return "at_limit"
 
     if existing is not None:
-        existing.deactivated_at = None
-        existing.activated_at = _now()
+        reactivated = session.execute(
+            update(LicenseActivation)
+            .where(
+                LicenseActivation.id == existing.id,
+                LicenseActivation.deactivated_at.is_not(None),
+            )
+            .values(deactivated_at=None, activated_at=_now())
+        ).rowcount
+        if reactivated != 1:
+            # A concurrent activate() already reactivated this device; undo our
+            # over-bump, mirroring the IntegrityError branch below.
+            session.execute(
+                update(Entitlement)
+                .where(Entitlement.id == ent.id, Entitlement.activations_used > 0)
+                .values(activations_used=Entitlement.activations_used - 1)
+            )
+            return "already_active"
         return "activated"
     try:
         with session.begin_nested():
@@ -418,11 +433,22 @@ def send_redelivery_email(session: Session, order, link: str) -> bool:
     msg["From"] = config.SMTP_FROM
     msg["To"] = order.buyer_email
     msg.set_content(f"Your purchase is ready:\n\n{link}\n")
-    with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT) as smtp:
-        smtp.starttls()
-        if config.SMTP_USER:
-            smtp.login(config.SMTP_USER, config.SMTP_PASS)
-        smtp.send_message(msg)
+    try:
+        with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT) as smtp:
+            smtp.starttls()
+            if config.SMTP_USER:
+                smtp.login(config.SMTP_USER, config.SMTP_PASS)
+            smtp.send_message(msg)
+    except (OSError, smtplib.SMTPException):
+        logger.exception("redelivery email send failed for order %s", order.id)
+        log_event(
+            session,
+            "delivery",
+            "email.failed",
+            store_id=order.store_id,
+            order_id=order.id,
+        )
+        return False
     log_event(
         session,
         "delivery",
