@@ -8,15 +8,21 @@ verified agent owner — otherwise base price, RPC outage included — and the r
 that tier tables never leak on feed/llms/MCP.
 """
 
+import base64
+import json
+import time
+
 import httpx
 import pytest
 import respx
 from sqlalchemy import select
+from x402.http.utils import encode_payment_response_header
+from x402.schemas import SettleResponse
 
 import app.main as main
 from app import agentic, b2b, config, delivery
 from app.db import SessionLocal
-from app.models import Product, Store
+from app.models import EventLog, Order, Product, Store
 from fastapi.testclient import TestClient
 
 client = TestClient(main.app)
@@ -312,4 +318,191 @@ def test_mcp_and_llms_leak_no_tiers(make_store):
     sc = r.json()["result"]["structuredContent"]
     assert "tiers" not in sc["pricing"]["params"]
     assert sc["pricing"]["wholesale"] is True
+    assert "quote" not in sc  # no agent_id => no per-buyer quote echoed
     assert "erc8004" not in client.get("/s/l2/llms.txt").text
+
+
+# ================================================================ 16.2 tiered buy
+NONCE_A = "0x" + "a" * 64
+NONCE_B = "0x" + "b" * 64
+NONCE_C = "0x" + "c" * 64
+NONCE_D = "0x" + "d" * 64
+NONCE_E = "0x" + "e" * 64
+
+
+def _settle_header():
+    return encode_payment_response_header(
+        SettleResponse(success=True, transaction="0x" + "e" * 64, network="eip155:196")
+    )
+
+
+def _fulfill(slug: str, payer: str, nonce: str, agent_id: int | None = None):
+    """Drive the real fulfill path (order born at the INV-1 effective price)."""
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        product = agentic._active_product(s, store.id)
+        order, body = agentic.fulfill_agent_order(
+            s, store, product, payer, nonce, None, agent_id
+        )
+        s.commit()
+        return order.id, order.expected_micro, body
+
+
+def _settled_data(order_id: str) -> dict | None:
+    with SessionLocal() as s:
+        ev = s.scalar(
+            select(EventLog).where(
+                EventLog.order_id == order_id,
+                EventLog.event == "agent_order.settled",
+            )
+        )
+        return ev.data if ev else None
+
+
+def _status(order_id: str) -> str:
+    with SessionLocal() as s:
+        return s.get(Order, order_id).status
+
+
+# --------------------------------------------------------------- resolve_price
+@respx.mock
+def test_resolve_price_tier_for_verified_payer(make_store, registry):
+    make_store(slug="s7", price_micro=9_000_000)
+    _set_tiers("s7", [TIER_6961])
+    _mock_owner(OWNER)
+    # verified owner as payer => tier baked into the 402 challenge amount
+    assert agentic.resolve_price("/s/s7/buy", "6961", OWNER).amount == "5000000"
+    # a payer that is NOT the agent owner => base (fail-to-base, no discount)
+    assert agentic.resolve_price("/s/s7/buy", "6961", OTHER).amount == "9000000"
+
+
+def test_resolve_price_default_no_agent_id_byte_identical(make_store):
+    """GOLDEN: a tiered store with NO agent_id resolves the base price exactly."""
+    make_store(slug="s8", price_micro=9_000_000)
+    _set_tiers("s8", [TIER_6961, TIER_ANY])
+    assert agentic.resolve_price("/s/s8/buy").amount == "9000000"
+    assert agentic.resolve_price("/s/s8/buy", None, OWNER).amount == "9000000"
+
+
+def test_payer_from_payment_header():
+    data = {
+        "x402Version": 1,
+        "scheme": "exact",
+        "network": "eip155:196",
+        "payload": {"authorization": {"from": "0xABCdef01", "nonce": "0x11"}},
+    }
+    header = base64.b64encode(json.dumps(data).encode()).decode()
+    assert agentic.payer_from_payment_header(header) == "0xabcdef01"
+    assert agentic.payer_from_payment_header(None) is None
+    assert agentic.payer_from_payment_header("not-decodable") is None
+
+
+# --------------------------------------------------------------- settle re-derive
+@respx.mock
+def test_settle_price_rederived(make_store, registry):
+    """A tiered buy by the verified owner: order born at the tier price, and the
+    settle seam re-derives (fresh read) tier_applied=True."""
+    make_store(slug="s1", price_micro=9_000_000)
+    _set_tiers("s1", [TIER_6961])
+    _mock_owner(OWNER)
+    oid, price, _ = _fulfill("s1", OWNER, NONCE_A, 6961)
+    assert price == 5_000_000
+    agentic.record_settlement(oid, _settle_header(), None, 6961)
+    data = _settled_data(oid)
+    assert data["tier_applied"] is True
+    assert data["agent_id"] == 6961
+    assert "tier_discrepancy" not in data
+    assert _status(oid) == "delivered"
+
+
+@respx.mock
+def test_tier_buy_mismatched_payer_records_base(make_store, registry):
+    """Adversarial WRONG PAYER: presenting the agent id but paying from a non-owner
+    wallet => order born at BASE and settles at base, tier never applied."""
+    make_store(slug="s2", price_micro=9_000_000)
+    _set_tiers("s2", [TIER_6961])
+    _mock_owner(OWNER)
+    oid, price, _ = _fulfill("s2", OTHER, NONCE_B, 6961)
+    assert price == 9_000_000
+    agentic.record_settlement(oid, _settle_header(), None, 6961)
+    data = _settled_data(oid)
+    assert data["tier_applied"] is False
+    assert "tier_discrepancy" not in data  # settled AT base — no floor breach
+    assert _status(oid) == "delivered"
+
+
+@respx.mock
+def test_identity_rpc_outage_base_price(make_store, registry):
+    """RPC outage => base price at create AND at settle (fail-to-base, never a
+    discount on an unverifiable owner)."""
+    make_store(slug="s3", price_micro=9_000_000)
+    _set_tiers("s3", [TIER_6961])
+    _mock_rpc_error()
+    oid, price, _ = _fulfill("s3", OWNER, NONCE_C, 6961)
+    assert price == 9_000_000
+    agentic.record_settlement(oid, _settle_header(), None, 6961)
+    assert _settled_data(oid)["tier_applied"] is False
+
+
+@respx.mock
+def test_settle_stale_cache_owner_flagged(make_store, registry):
+    """Adversarial CACHE-STALE OWNER: a stale positive cache entry lets the create
+    seam grant the tier, but the settle seam's FRESH read (the registry now returns
+    a different owner) catches it — tier_applied=False and the below-base settle is
+    flagged as a discrepancy (funds already moved; the honest record is what was
+    paid, never a certified discount)."""
+    make_store(slug="s4", price_micro=9_000_000)
+    _set_tiers("s4", [TIER_6961])
+    # stale cache: OWNER remembered as agent 6961's owner though the chain moved on
+    b2b._owner_cache[6961] = (OWNER, time.monotonic() + 100)
+    _mock_owner(OTHER)  # a FRESH read returns the real, now-different owner
+    oid, price, _ = _fulfill("s4", OWNER, NONCE_D, 6961)
+    assert price == 5_000_000  # tier granted off the stale cache
+    agentic.record_settlement(oid, _settle_header(), None, 6961)
+    data = _settled_data(oid)
+    assert data["tier_applied"] is False  # fresh read overrode the stale cache
+    assert data["tier_discrepancy"] is True
+    assert data["base_micro"] == 9_000_000
+    assert data["paid_micro"] == 5_000_000
+
+
+@respx.mock
+def test_replayed_nonce_different_agent_id_keeps_original_price(make_store, registry):
+    """Adversarial REPLAY: replaying the nonce with a DIFFERENT agent_id returns the
+    original order at its original price — the tier is never re-derived on replay."""
+    make_store(slug="s5", price_micro=9_000_000)
+    _set_tiers("s5", [TIER_6961, TIER_ANY])
+    _mock_owner(OWNER)
+    oid1, price1, _ = _fulfill("s5", OWNER, NONCE_E, 6961)
+    assert price1 == 5_000_000
+    oid2, price2, _ = _fulfill("s5", OWNER, NONCE_E, 12345)  # any_agent tier = 7M
+    assert oid2 == oid1
+    assert price2 == 5_000_000  # unchanged — no re-quote on a replayed authorization
+
+
+# --------------------------------------------------------------- MCP quote echo
+@respx.mock
+def test_mcp_quote_fields(make_store, registry):
+    make_store(slug="s6", price_micro=9_000_000)
+    _set_tiers("s6", [TIER_6961])
+    _mock_owner(OWNER)
+    pid = _product("s6").id
+    r = client.post(
+        "/s/s6/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "get_product",
+                "arguments": {"product_id": pid, "agent_id": "6961"},
+            },
+        },
+    )
+    sc = r.json()["result"]["structuredContent"]
+    assert sc["quote"]["agent_id"] == 6961
+    assert sc["quote"]["tier_price_micro"] == 5_000_000
+    assert sc["quote"]["owner"] == OWNER
+    assert "settle payer wallet" in sc["quote"]["requires"]
+    # the public pricing block still never leaks the tier table
+    assert "tiers" not in sc["pricing"]["params"]

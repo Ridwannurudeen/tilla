@@ -73,18 +73,24 @@ def match_tier(product: Product, agent_id: int) -> int | None:
     return exact_price if exact_price is not None else any_price
 
 
-def verify_agent_owner(agent_id: int) -> str | None:
+def verify_agent_owner(agent_id: int, *, fresh: bool = False) -> str | None:
     """The on-chain owner wallet of ``agent_id`` via a read-only registry
     ``eth_call``, lowercased. None on ANY error: registry unconfigured, RPC
-    outage/busy, empty/short result, or the zero address (fail-to-base)."""
+    outage/busy, empty/short result, or the zero address (fail-to-base).
+
+    ``fresh=True`` bypasses the positive cache READ and forces a live eth_call —
+    the settle seam re-verifies ownership this way so a discount can never ride a
+    stale 300s cache entry (ownership transferred inside the TTL window). The
+    fresh result still refreshes the cache."""
     registry = config.ERC8004_REGISTRY
     if not registry:
         return None
     now = time.monotonic()
-    with _owner_cache_lock:
-        hit = _owner_cache.get(agent_id)
-        if hit is not None and hit[1] > now:
-            return hit[0]
+    if not fresh:
+        with _owner_cache_lock:
+            hit = _owner_cache.get(agent_id)
+            if hit is not None and hit[1] > now:
+                return hit[0]
     data = config.ERC8004_OWNER_SELECTOR + f"{agent_id:064x}"
     try:
         result = chain.eth_call(
@@ -108,7 +114,11 @@ def verify_agent_owner(agent_id: int) -> str | None:
 
 
 def effective_price_micro(
-    product: Product, agent_id: int | None, payer_wallet: str | None
+    product: Product,
+    agent_id: int | None,
+    payer_wallet: str | None,
+    *,
+    fresh: bool = False,
 ) -> tuple[int, bool]:
     """INV-1 gate — the single source of truth for what a buy actually costs.
 
@@ -125,7 +135,7 @@ def effective_price_micro(
     tier_price = match_tier(product, agent_id)
     if tier_price is None:
         return base, False
-    owner = verify_agent_owner(agent_id)
+    owner = verify_agent_owner(agent_id, fresh=fresh)
     if owner is None or owner != payer_wallet.lower():
         return base, False
     return tier_price, True

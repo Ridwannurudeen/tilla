@@ -45,7 +45,7 @@ from x402.http.utils import (
 )
 from x402.schemas import AssetAmount
 
-from app import affiliates, b2b, chain, checkout, config, delivery, webhooks
+from app import affiliates, b2b, chain, checkout, config, delivery, federation, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -225,6 +225,28 @@ def enabled_schemes(product: Product) -> list[str]:
     return schemes
 
 
+def _tier_quote(product: Product, agent_id: int) -> dict | None:
+    """The advisory wholesale quote fields for ``agent_id`` on ``product``, or None
+    when no tier matches or the agent owner is not verifiable (fail-to-base). The
+    tier price is disclosed ONLY per-request against a presented id (never in a
+    public feed); INV-1 still governs the actual grant at settle."""
+    tier_price = b2b.match_tier(product, agent_id)
+    if tier_price is None:
+        return None
+    owner = b2b.verify_agent_owner(agent_id)
+    if owner is None:
+        return None
+    return {
+        "tier_price_micro": tier_price,
+        "tier_price": _usdt_str(tier_price),
+        "owner": owner,
+        "requires": (
+            "settle payer wallet must equal the agent owner wallet; "
+            "otherwise the base price applies"
+        ),
+    }
+
+
 def _pricing_block(product: Product) -> dict:
     raw = product.pricing_params if isinstance(product.pricing_params, dict) else {}
     # M16: wholesale tier tables NEVER leak on a public surface (feed/MCP) — only an
@@ -267,10 +289,39 @@ def resolve_pay_to(path: str, sentinel_pay_to: str) -> str:
         return sentinel_pay_to
 
 
-def resolve_price(path: str) -> AssetAmount:
+def payer_from_payment_header(header: str | None) -> str | None:
+    """The EIP-3009 ``from`` (payer) wallet carried in a PAYMENT-SIGNATURE /
+    X-PAYMENT header, lowercased. None when the header is absent or undecodable —
+    the price hook then resolves the base price (no verifiable payer ⇒ no tier)."""
+    if not header:
+        return None
+    try:
+        payload = decode_payment_signature_header(header)
+        auth = (
+            payload.payload.get("authorization")
+            if isinstance(payload.payload, dict)
+            else None
+        )
+        frm = auth.get("from") if isinstance(auth, dict) else None
+        return frm.lower() if isinstance(frm, str) and frm else None
+    except Exception:
+        return None
+
+
+def resolve_price(
+    path: str, agent_id: str | None = None, payer: str | None = None
+) -> AssetAmount:
     """Exact product price as an AssetAmount for the store in ``path``. Any
     unknown/non-live store, missing product, or DB error returns the sentinel
-    (amount '1') rather than raising."""
+    (amount '1') rather than raising.
+
+    M16 B2B: when the request presents an ``agent_id`` (query param) AND a payer
+    wallet is recoverable from the payment header, the price is the wholesale
+    TIER price — but only when :func:`b2b.effective_price_micro` verifies the
+    payer is the on-chain owner of that agent id (INV-1). Absent either, or on any
+    mismatch/RPC outage, this is byte-identical to the base-price path (fail-to-
+    base). The settle seam (:func:`record_settlement`) re-derives the same gate
+    with a fresh ownership read, so a tier never rides a stale positive cache."""
     try:
         slug = _slug_from_path(path)
         if slug is None:
@@ -282,8 +333,12 @@ def resolve_price(path: str) -> AssetAmount:
             product = _active_product(session, store.id)
             if product is None:
                 return _sentinel_price()
+            price_micro = product.price_micro
+            aid = b2b.parse_agent_id(agent_id) if agent_id else None
+            if aid is not None and payer:
+                price_micro, _ = b2b.effective_price_micro(product, aid, payer)
             return AssetAmount(
-                amount=str(product.price_micro),
+                amount=str(price_micro),
                 asset=ASSET,
                 extra={
                     "name": PAYMENT_EIP712_NAME,
@@ -356,6 +411,8 @@ def fulfill_agent_order(
     payer: str,
     nonce: str,
     referrer_addr: str | None = None,
+    agent_id: int | None = None,
+    signed_micro: int | None = None,
 ) -> tuple[Order, dict]:
     """Idempotently create + deliver an agent order. The (store, payer, nonce)
     triple is the idempotency key (see :func:`_assert_nonce_owner`): an existing
@@ -370,15 +427,33 @@ def fulfill_agent_order(
     stuck 'settling'."""
     existing = session.scalar(select(Order).where(Order.x402_nonce == nonce))
     if existing is not None:
+        # Nonce-scoped idempotency: a replay (even carrying a DIFFERENT agent_id)
+        # returns the stored order at its ORIGINAL price — the tier is never
+        # re-derived on a replayed authorization, so a replayed nonce cannot be
+        # re-quoted into a discount.
         _assert_nonce_owner(existing, store, payer)
         return existing, _agent_buy_body(session, existing, store, product)
+    # M16 B2B: the wholesale tier is granted only when the payer is the verified
+    # on-chain owner of the presented agent id (INV-1, capped <= base at write).
+    # Every other case returns product.price_micro — the order is born at the
+    # exact amount the 402 challenge demanded and that settles.
+    #
+    # Prefer the SIGNED authorization value (the amount the middleware matched to a
+    # verified requirement and actually settled) so the DB record can never drift
+    # from reality if the ownership cache expires between the price hook and here
+    # and an RPC read flips. Fall back to re-deriving only when no signed value is
+    # threaded through (internal callers / tests).
+    if signed_micro is not None and signed_micro > 0:
+        price_micro = signed_micro
+    else:
+        price_micro, _ = b2b.effective_price_micro(product, agent_id, payer)
     order = Order(
         id=uuid.uuid4().hex[:16],
         store_id=store.id,
         product_id=product.id,
         pay_to=store.pay_to,
-        amount_micro=product.price_micro,
-        expected_micro=product.price_micro,
+        amount_micro=price_micro,
+        expected_micro=price_micro,
         status="confirmed",
         channel="agent",
         x402_nonce=nonce,
@@ -426,6 +501,7 @@ def agent_buy(
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
     session: Session = Depends(get_session),
     ref: str | None = None,
+    agent_id: str | None = None,
 ):
     # FAIL CLOSED: no verified payment (middleware absent — OKX_API_KEY unset — or
     # payment not provided) → 402. Goods are never served free.
@@ -464,13 +540,31 @@ def agent_buy(
     )
     if not isinstance(auth, dict) or not auth.get("nonce"):
         raise HTTPException(400, "missing authorization nonce")
+    # M16 B2B: the tier is priced off the SETTLED payer (the EIP-3009 `from`), the
+    # same wallet the challenge's price hook verified — never a client-asserted
+    # field. A malformed agent_id parses to None → base price, no discount.
+    aid = b2b.parse_agent_id(agent_id) if agent_id else None
+    # The signed EIP-3009 `value` is the amount the middleware verified + settled;
+    # record the order at exactly that so the DB never drifts from what was paid.
+    try:
+        signed_micro = int(auth.get("value"))
+    except (TypeError, ValueError):
+        signed_micro = None
     order, body = fulfill_agent_order(
-        session, store, product, auth.get("from") or "", auth["nonce"], referrer_addr
+        session,
+        store,
+        product,
+        auth.get("from") or "",
+        auth["nonce"],
+        referrer_addr,
+        aid,
+        signed_micro,
     )
     session.commit()
-    # Shared scope["state"] hands the order id to the outer agent-guard middleware
-    # for settle-success tx_hash bookkeeping.
+    # Shared scope["state"] hands the order id (and the presented agent id) to the
+    # outer agent-guard middleware for settle-success bookkeeping + tier re-verify.
     request.state.agent_order_id = order.id
+    request.state.agent_buy_agent_id = aid
     return JSONResponse(body)
 
 
@@ -642,8 +736,36 @@ def _guard_store_status(slug: str) -> tuple[int, str] | None:
         return None
 
 
+def _settle_tier_data(session: Session, order: Order, agent_id: int | None) -> dict:
+    """Re-derive the wholesale tier at the SETTLE seam with a FRESH ownership read
+    (never the positive cache — INV-1 defense-in-depth). Returns the log payload
+    recording whether the tier is certified for this settled payer. When the order
+    settled BELOW base but a fresh read does NOT confirm the payer owns the agent
+    (e.g. a stale-cache exploit or an ownership transfer inside the 300s window),
+    the settlement is flagged: the funds already moved, so the honest record is the
+    price actually paid with ``tier_applied=False`` — never a certified discount."""
+    base = None
+    tier_applied = False
+    if agent_id is not None and order.product_id is not None:
+        product = session.get(Product, order.product_id)
+        if product is not None:
+            base = product.price_micro
+            _, tier_applied = b2b.effective_price_micro(
+                product, agent_id, order.from_addr, fresh=True
+            )
+    data: dict = {"agent_id": agent_id, "tier_applied": tier_applied}
+    if base is not None and order.expected_micro < base and not tier_applied:
+        data["tier_discrepancy"] = True
+        data["base_micro"] = base
+        data["paid_micro"] = order.expected_micro
+    return data
+
+
 def record_settlement(
-    order_id: str, payment_response_header: str, scheme: str | None = None
+    order_id: str,
+    payment_response_header: str,
+    scheme: str | None = None,
+    agent_id: int | None = None,
 ) -> None:
     """A served 200 with a PAYMENT-RESPONSE header IS the settle-success signal, so
     flip the provisional 'settling' order to 'delivered' — exposing the goods to
@@ -683,6 +805,18 @@ def record_settlement(
                 session.commit()
             return
         fields = {"tx_hash": tx} if tx else {}
+        # INV-1 settle re-verify: for a tiered buy re-derive the tier with a FRESH
+        # ownership read (never the positive cache) BEFORE the terminal flip, so a
+        # discount can never ride a stale cache entry. tier_applied is recorded on
+        # the settled event; a below-base settle a fresh read cannot certify is
+        # flagged. No agent id ⇒ the log payload is byte-identical to the pre-M16
+        # exact-buy path.
+        if agent_id is not None:
+            settle_data: dict | None = _settle_tier_data(session, order, agent_id)
+            if not tx:
+                settle_data["tx"] = "unparsed"
+        else:
+            settle_data = None if tx else {"tx": "unparsed"}
         if checkout.transition(session, order.id, ("settling",), "delivered", **fields):
             log_event(
                 session,
@@ -690,7 +824,7 @@ def record_settlement(
                 "agent_order.settled",
                 store_id=order.store_id,
                 order_id=order_id,
-                data=None if tx else {"tx": "unparsed"},
+                data=settle_data,
             )
             # Fire the paid/delivered webhooks here (suppressed in checkout.deliver
             # for agent orders): the settle is now confirmed on-chain, so the
@@ -742,7 +876,8 @@ async def agent_guard_dispatch(request: Request, call_next):
         order_id = getattr(request.state, "agent_order_id", None)
         if pr and order_id:
             scheme = _payment_scheme(request)
-            await asyncio.to_thread(record_settlement, order_id, pr, scheme)
+            aid = getattr(request.state, "agent_buy_agent_id", None)
+            await asyncio.to_thread(record_settlement, order_id, pr, scheme, aid)
     return response
 
 
@@ -754,6 +889,9 @@ _MCP_NO_CONTENT = object()
 
 class _GetProductArgs(BaseModel):
     product_id: int
+    # M16 B2B: an optional ERC-8004 agent id to receive an advisory wholesale
+    # quote (same gate as GET /s/{slug}/quote — INV-1 governs at settle).
+    agent_id: str | None = None
 
 
 class _CreateCheckoutArgs(BaseModel):
@@ -828,11 +966,16 @@ def _mcp_tools() -> list[dict]:
             "name": "get_product",
             "description": (
                 "Get one product's detail, deliverable kind, and the x402 buy "
-                "endpoint (x402-capable agents can POST straight to /s/{slug}/buy)."
+                "endpoint (x402-capable agents can POST straight to /s/{slug}/buy). "
+                "Pass an optional ERC-8004 `agent_id` to receive an advisory "
+                "wholesale quote; buy at that tier with POST /s/{slug}/buy?agent_id="
             ),
             "inputSchema": {
                 "type": "object",
-                "properties": {"product_id": {"type": "integer"}},
+                "properties": {
+                    "product_id": {"type": "integer"},
+                    "agent_id": {"type": "string"},
+                },
                 "required": ["product_id"],
                 "additionalProperties": False,
             },
@@ -896,7 +1039,11 @@ def _tool_list_products(session: Session, store: Store) -> dict:
 
 
 def _tool_get_product(
-    session: Session, store: Store, slug: str, product_id: int
+    session: Session,
+    store: Store,
+    slug: str,
+    product_id: int,
+    agent_id: str | None = None,
 ) -> dict:
     product = session.scalar(
         select(Product).where(
@@ -913,7 +1060,7 @@ def _tool_get_product(
         .order_by(Deliverable.id.desc())
         .limit(1)
     )
-    return {
+    result = {
         "id": product.id,
         "name": product.name,
         "description": _product_description(store),
@@ -930,6 +1077,15 @@ def _tool_get_product(
             "schemes": enabled_schemes(product),
         },
     }
+    # M16 B2B: echo the advisory wholesale quote for a presented agent id. Pass it
+    # to /buy as ?agent_id=<id> to have the tier priced into the 402 (INV-1 grants
+    # it at settle only if the payer wallet is that agent's on-chain owner).
+    aid = b2b.parse_agent_id(agent_id) if agent_id else None
+    if aid is not None:
+        quote_fields = _tier_quote(product, aid)
+        if quote_fields is not None:
+            result["quote"] = {"agent_id": aid, **quote_fields}
+    return result
 
 
 def _tool_create_checkout(
@@ -1006,7 +1162,9 @@ def _mcp_tools_call(session: Session, store: Store, slug: str, req_id, params) -
             result = _tool_list_products(session, store)
         elif name == "get_product":
             args = _GetProductArgs.model_validate(raw_args)
-            result = _tool_get_product(session, store, slug, args.product_id)
+            result = _tool_get_product(
+                session, store, slug, args.product_id, args.agent_id
+            )
         elif name == "create_checkout":
             args = _CreateCheckoutArgs.model_validate(raw_args)
             result = _tool_create_checkout(session, store, args.product_id, args.ref)
@@ -1146,16 +1304,9 @@ def quote(
         "base_price": _usdt_str(base),
         "currency": CURRENCY,
     }
-    tier_price = b2b.match_tier(product, aid)
-    owner = b2b.verify_agent_owner(aid) if tier_price is not None else None
-    if tier_price is not None and owner is not None:
-        body["tier_price_micro"] = tier_price
-        body["tier_price"] = _usdt_str(tier_price)
-        body["owner"] = owner
-        body["requires"] = (
-            "settle payer wallet must equal the agent owner wallet; "
-            "otherwise the base price applies"
-        )
+    quote_fields = _tier_quote(product, aid)
+    if quote_fields is not None:
+        body.update(quote_fields)
     return JSONResponse(body, headers=_AGENT_HEADERS)
 
 
@@ -1334,6 +1485,7 @@ def discovery_resources(
     request: Request,
     limit: int = 20,
     offset: int = 0,
+    include: str = "",
     session: Session = Depends(get_session),
 ):
     limit = max(1, min(limit, 50))
@@ -1342,17 +1494,22 @@ def discovery_resources(
         select(func.count()).select_from(Store).where(Store.status == "live")
     )
     resources = _discovery_rows(session, [], limit, offset)
-    return JSONResponse(
-        {
-            "service": SERVICE,
-            "agent_card": "/.well-known/agent-card.json",
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "resources": resources,
-        },
-        headers=_AGENT_HEADERS,
-    )
+    body: dict = {
+        "service": SERVICE,
+        "agent_card": "/.well-known/agent-card.json",
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "resources": resources,
+    }
+    # M16.4: opt-in federated peer listings. Each row is labeled
+    # {"origin", "federated": true} and links OUT to the peer's own checkout —
+    # Tilla never proxies, quotes, or settles a peer's sale. Dormant (empty) when
+    # no peers are configured. Peer content is re-emitted json-encoded, never
+    # rendered, so there is no HTML context to escape.
+    if include == "federated":
+        body["federated"] = federation.federated_rows(session, limit)
+    return JSONResponse(body, headers=_AGENT_HEADERS)
 
 
 @router.get("/discovery/search")
