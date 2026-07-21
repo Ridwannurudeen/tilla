@@ -87,8 +87,10 @@ _AGENT_HEADERS = {
 # trailing slash is tolerated here though FastAPI's route never forwards one.
 _BUY_PATH_RE = re.compile(r"^/s/([a-z0-9][a-z0-9-]{0,39})/buy/?$")
 
-# The reaper voids agent orders stuck 'delivered' with no tx_hash (a crash between
-# deliver-commit and settle: the response was never sent, so voiding is correct).
+# The reaper voids agent orders stuck in the provisional 'settling' status (a
+# crash or lost settle between the deliver-commit and the settle-confirm: the goods
+# were never claimable out-of-band, so voiding is correct). A settled order is
+# flipped to 'delivered' by record_settlement and is never reaped.
 REAP_AFTER = timedelta(minutes=15)
 REAP_INTERVAL = 300  # seconds
 
@@ -249,16 +251,38 @@ def _agent_buy_body(
     return body
 
 
+def _assert_nonce_owner(order: Order, store: Store, payer: str) -> None:
+    """Scope the nonce idempotency to exactly one (store, payer). The EIP-3009
+    nonce is globally unique on-chain but PUBLIC (it appears in the settle tx
+    calldata), and unique only per payer. A match on the nonce alone would let a
+    different payer replay a victim's nonce on the same store to receive the
+    victim's deliverable, or a nonce first used on store A be replayed against
+    store B. On any mismatch raise 409 so the payment middleware skips settlement
+    (>=400): the signed authorization is never executed, zero funds move."""
+    if (
+        order.store_id != store.id
+        or (order.from_addr or "").lower() != (payer or "").lower()
+    ):
+        raise HTTPException(409, "x402 nonce already used")
+
+
 def fulfill_agent_order(
     session: Session, store: Store, product: Product, payer: str, nonce: str
 ) -> tuple[Order, dict]:
-    """Idempotently create + deliver an agent order. The EIP-3009 nonce is the
-    idempotency key: an existing order for it returns the stored deliverable (no
-    new rows). A fresh order is born 'confirmed' at the EXACT price (offset 0, so
-    it never collides with a human order's price+[1..4999]) and delivered through
-    the exact M3/M4 ``checkout.deliver`` path (idempotent Delivery + Entitlement)."""
+    """Idempotently create + deliver an agent order. The (store, payer, nonce)
+    triple is the idempotency key (see :func:`_assert_nonce_owner`): an existing
+    order for this payer+store returns the stored deliverable (no new rows). A
+    fresh order is born 'confirmed' at the EXACT price (offset 0, so it never
+    collides with a human order's price+[1..4999]) and delivered through the exact
+    M3/M4 ``checkout.deliver`` path (idempotent Delivery + Entitlement), then held
+    in a NON-TERMINAL 'settling' status until the x402 settle confirms on-chain:
+    the out-of-band claim paths (library, download, license, redeliver) all gate on
+    a TERMINAL_DELIVERED status, so the goods stay unreachable until
+    :func:`record_settlement` flips settling -> delivered. The reaper voids orders
+    stuck 'settling'."""
     existing = session.scalar(select(Order).where(Order.x402_nonce == nonce))
     if existing is not None:
+        _assert_nonce_owner(existing, store, payer)
         return existing, _agent_buy_body(session, existing, store, product)
     order = Order(
         id=uuid.uuid4().hex[:16],
@@ -278,18 +302,28 @@ def fulfill_agent_order(
         session.flush()
     except IntegrityError:
         # A concurrent request inserted the same nonce first (single-use on-chain,
-        # so this is a duplicate submission): reconcile to the committed winner.
+        # so this is a duplicate submission): reconcile to the committed winner,
+        # asserting it belongs to this payer+store (a busy-timeout rollback can
+        # leave the re-select empty -> 409 rather than an AttributeError 500).
         session.rollback()
         existing = session.scalar(select(Order).where(Order.x402_nonce == nonce))
+        if existing is None:
+            raise HTTPException(409, "x402 nonce reconcile failed") from None
+        _assert_nonce_owner(existing, store, payer)
         return existing, _agent_buy_body(session, existing, store, product)
     log_event(
         session, "agentic", "agent_order.created", store_id=store.id, order_id=order.id
     )
     checkout.deliver(session, order)
+    # Hold the delivered order in a non-terminal 'settling' status: the goods are
+    # minted (in-band body is cryptographically bound to this paid request) but
+    # every out-of-band claim path gates on TERMINAL_DELIVERED, so nothing is
+    # claimable until settle confirms.
+    checkout.transition(session, order.id, checkout.TERMINAL_DELIVERED, "settling")
     log_event(
         session,
         "agentic",
-        "agent_order.delivered",
+        "agent_order.settling",
         store_id=store.id,
         order_id=order.id,
     )
@@ -333,43 +367,43 @@ def agent_buy(
 
 
 # ============================================================================
-# Settlement-failed hook + reaper: void a provisional 'delivered' when settle fails
+# Settlement-failed hook + reaper: void a provisional 'settling' when settle fails
 # ============================================================================
 def settle_failed_core(nonce: str) -> dict:
     """Compensator for a settle failure on a just-delivered agent order. If the
-    order already recorded a tx_hash the settle re-ran on an already-settled
-    authorization (a replay after a lost response) → return the deliverable +
-    original tx (recovered=true), NOT a void. Otherwise the provisional
-    'delivered' is voided (→ canceled) and its entitlement revoked, killing the
-    minted download token / license key."""
+    order is already in a terminal delivered status an earlier settle on this
+    authorization landed (record_settlement ran — a replay after a lost response):
+    return a NEUTRAL recovered receipt (tx + order id + the sign-to-claim message),
+    NEVER the deliverable — the full EIP-3009 authorization is reconstructible from
+    the public settle calldata, so the license key / download url / text secret
+    stay behind the wallet-signature claim gate (/api/library as the paying
+    from_addr). Otherwise the provisional 'settling' order is voided (→ canceled)
+    and its entitlement revoked, killing the minted download token / license key."""
     with SessionLocal() as session:
         order = session.scalar(
             select(Order).where(Order.x402_nonce == nonce, Order.channel == "agent")
         )
         if order is None:
             return {"error": "settlement_failed"}
-        store = session.get(Store, order.store_id)
-        product = session.get(Product, order.product_id) if order.product_id else None
-        if order.tx_hash:
-            body = _agent_buy_body(session, order, store, product)
-            body["recovered"] = True
-            body["tx"] = order.tx_hash
-            return body
-        checkout.transition(
-            session,
-            order.id,
-            ("delivered", "paid", "confirmed", "overpaid", "late_paid"),
-            "canceled",
-        )
-        delivery.revoke_entitlement(session, order)
-        log_event(
-            session,
-            "agentic",
-            "agent_order.settle_failed",
-            store_id=order.store_id,
-            order_id=order.id,
-        )
-        session.commit()
+        if order.status in checkout.TERMINAL_DELIVERED:
+            from app.main import CLAIM_DELIVERY_MESSAGE
+
+            return {
+                "recovered": True,
+                "tx": order.tx_hash,
+                "order_id": order.id,
+                "message": CLAIM_DELIVERY_MESSAGE,
+            }
+        if checkout.transition(session, order.id, ("settling",), "canceled"):
+            delivery.revoke_entitlement(session, order)
+            log_event(
+                session,
+                "agentic",
+                "agent_order.settle_failed",
+                store_id=order.store_id,
+                order_id=order.id,
+            )
+            session.commit()
         return {"error": "settlement_failed"}
 
 
@@ -404,25 +438,25 @@ async def store_settle_failed_hook(context, failure) -> HTTPResponseBody:
 
 
 def reap_agent_orders(session: Session, now=None) -> int:
-    """Void channel='agent' orders stuck 'delivered' with tx_hash NULL older than
-    15 min (a crash between deliver-commit and settle). Human orders and settled
-    agent orders (tx_hash set) are never touched."""
+    """Void channel='agent' orders stuck in the provisional 'settling' status older
+    than 15 min (a crash or lost settle between the deliver-commit and the
+    settle-confirm). A settled order (flipped to 'delivered' by record_settlement,
+    even when its PAYMENT-RESPONSE header was undecodable and tx_hash is NULL) and
+    every human order are never touched — the reaper keys on 'settling', never on
+    tx_hash, so a genuinely-paid order can never be clawed back."""
     now = now or checkout._now()
     cutoff = now - REAP_AFTER
     reaped = 0
     orders = session.scalars(
         select(Order).where(
             Order.channel == "agent",
-            Order.status.in_(checkout.TERMINAL_DELIVERED),
-            Order.tx_hash.is_(None),
+            Order.status == "settling",
         )
     ).all()
     for o in orders:
         reached = checkout._naive(o.paid_at) or checkout._naive(o.created_at)
         if reached is not None and reached <= cutoff:
-            if checkout.transition(
-                session, o.id, checkout.TERMINAL_DELIVERED, "canceled"
-            ):
+            if checkout.transition(session, o.id, ("settling",), "canceled"):
                 delivery.revoke_entitlement(session, o)
                 log_event(
                     session,
@@ -475,29 +509,34 @@ def _guard_store_status(slug: str) -> tuple[int, str] | None:
 
 
 def record_settlement(order_id: str, payment_response_header: str) -> None:
-    """On a served 200 with a PAYMENT-RESPONSE header, decode the settle tx and
-    record it on the agent order (+ settled event). Idempotent."""
+    """A served 200 with a PAYMENT-RESPONSE header IS the settle-success signal, so
+    flip the provisional 'settling' order to 'delivered' — exposing the goods to
+    the out-of-band claim paths — and record the settle tx_hash when the header
+    decodes. The flip does NOT depend on the header decoding: an undecodable/empty
+    transaction still delivers (logged for reconciliation) instead of leaving a
+    genuinely-paid order in 'settling' for the reaper to void. Idempotent (the
+    conditional transition is a no-op once the order has left 'settling')."""
+    tx = None
     try:
         settle = decode_payment_response_header(payment_response_header)
-        tx = settle.transaction
+        tx = settle.transaction or None
     except Exception:
         logger.exception("record_settlement: undecodable PAYMENT-RESPONSE")
-        return
-    if not tx:
-        return
     with SessionLocal() as session:
         order = session.get(Order, order_id)
-        if order is None or order.channel != "agent" or order.tx_hash:
+        if order is None or order.channel != "agent":
             return
-        order.tx_hash = tx
-        log_event(
-            session,
-            "agentic",
-            "agent_order.settled",
-            store_id=order.store_id,
-            order_id=order_id,
-        )
-        session.commit()
+        fields = {"tx_hash": tx} if tx else {}
+        if checkout.transition(session, order.id, ("settling",), "delivered", **fields):
+            log_event(
+                session,
+                "agentic",
+                "agent_order.settled",
+                store_id=order.store_id,
+                order_id=order_id,
+                data=None if tx else {"tx": "unparsed"},
+            )
+            session.commit()
 
 
 async def agent_guard_dispatch(request: Request, call_next):

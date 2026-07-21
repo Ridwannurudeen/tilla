@@ -18,7 +18,7 @@ from x402.http.x402_http_server_base import x402HTTPServerBase
 from x402.schemas import AssetAmount, SettleResponse
 
 import app.main as main
-from app import agentic, checkout
+from app import agentic, checkout, delivery
 from app.db import SessionLocal
 from app.models import Deliverable, Delivery, Entitlement, Order, Store
 from app.payment import build_store_payment_option, load_payment_rail
@@ -113,7 +113,8 @@ def test_fulfill_creates_agent_order_and_delivers_text(make_store):
         order, body = agentic.fulfill_agent_order(s, store, product, PAYER, NONCE)
         s.commit()
         assert order.channel == "agent"
-        assert order.status == "delivered"
+        # goods minted in-band, but held non-terminal until the x402 settle confirms
+        assert order.status == "settling"
         assert order.expected_micro == order.amount_micro == 1_000_000
         assert order.x402_nonce == NONCE
         assert order.from_addr == PAYER
@@ -174,6 +175,43 @@ def test_fulfill_idempotent_same_nonce(make_store):
         assert s.scalar(select(func.count(Entitlement.id))) == 0  # no deliverable
 
 
+def test_fulfill_same_nonce_different_payer_409(make_store):
+    # A different payer replaying a victim's (public) nonce on the same store must
+    # not receive the victim's order — the payment middleware skips settle on 409.
+    sid = make_store(slug="np1", price_micro=1_000_000, delivery="VICTIM")
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        agentic.fulfill_agent_order(s, s.merge(store), s.merge(product), PAYER, NONCE)
+        s.commit()
+    attacker = "0x" + "4" * 40
+    with SessionLocal() as s:
+        with pytest.raises(HTTPException) as e:
+            agentic.fulfill_agent_order(
+                s, s.merge(store), s.merge(product), attacker, NONCE
+            )
+        assert e.value.status_code == 409
+
+
+def test_fulfill_same_nonce_different_store_409(make_store):
+    # A nonce first used on store A, replayed against store B, must 409 (not settle
+    # B's merchant while handing back A's deliverable).
+    sid_a = make_store(slug="ns-a", price_micro=1_000_000, delivery="A")
+    sid_b = make_store(slug="ns-b", price_micro=1_000_000, delivery="B")
+    store_a, product_a = _store_product(sid_a)
+    with SessionLocal() as s:
+        agentic.fulfill_agent_order(
+            s, s.merge(store_a), s.merge(product_a), PAYER, NONCE
+        )
+        s.commit()
+    store_b, product_b = _store_product(sid_b)
+    with SessionLocal() as s:
+        with pytest.raises(HTTPException) as e:
+            agentic.fulfill_agent_order(
+                s, s.merge(store_b), s.merge(product_b), PAYER, NONCE
+            )
+        assert e.value.status_code == 409
+
+
 def test_buy_endpoint_402_without_payment(make_store):
     make_store(slug="b5")
     r = client.post("/s/b5/buy")
@@ -215,21 +253,32 @@ def test_settle_failed_voids_fresh_order_and_revokes(make_store):
     assert client.get(f"/api/download/{token}").status_code == 403
 
 
-def test_settle_failed_recovers_when_tx_present(make_store):
+def test_settle_failed_recovered_body_has_no_secrets(make_store):
+    # A replay after a lost response reaches settle_failed with the order already
+    # settled (delivered). The recovered receipt must be NEUTRAL — never the
+    # license key / download url / delivery payload (those stay behind the
+    # sign-to-claim gate), since the EIP-3009 auth is rebuildable from public
+    # settle calldata.
     sid = make_store(slug="sf2", price_micro=1_000_000, delivery="GOODS")
+    _add_deliverable(sid, "license", max_activations=3)
     store, product = _store_product(sid)
     with SessionLocal() as s:
         order, _ = agentic.fulfill_agent_order(
             s, s.merge(store), s.merge(product), PAYER, NONCE
         )
-        order.tx_hash = "0x" + "d" * 64  # already settled once
+        order.status = "delivered"  # an earlier settle landed (record_settlement)
+        order.tx_hash = "0x" + "d" * 64
         s.commit()
         oid = order.id
 
     result = agentic.settle_failed_core(NONCE)
     assert result["recovered"] is True
     assert result["tx"] == "0x" + "d" * 64
-    assert result["delivery"] == "GOODS"
+    assert result["order_id"] == oid
+    assert result["message"] == main.CLAIM_DELIVERY_MESSAGE
+    assert "license_key" not in result
+    assert "download_url" not in result
+    assert "delivery" not in result
     with SessionLocal() as s:
         o = s.get(Order, oid)
         assert o.status == "delivered"  # NOT voided
@@ -256,7 +305,66 @@ def test_record_settlement_sets_tx_hash(make_store):
     )
     agentic.record_settlement(oid, header)
     with SessionLocal() as s:
-        assert s.get(Order, oid).tx_hash == "0x" + "e" * 64
+        o = s.get(Order, oid)
+        assert o.tx_hash == "0x" + "e" * 64
+        assert o.status == "delivered"  # settling -> delivered on settle success
+
+
+def test_record_settlement_delivers_even_when_header_unparsable(make_store):
+    # A successful settle whose PAYMENT-RESPONSE header is undecodable/empty must
+    # still flip settling -> delivered (a served 200+header IS the success signal),
+    # so the reaper never voids a genuinely-paid order (finding #3).
+    sid = make_store(slug="rs2", price_micro=1_000_000, delivery="X")
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        order, _ = agentic.fulfill_agent_order(
+            s, s.merge(store), s.merge(product), PAYER, NONCE
+        )
+        s.commit()
+        oid = order.id
+    agentic.record_settlement(oid, "not-a-decodable-header")
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash is None
+    # aged, but settled: the reaper leaves it alone
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        o.paid_at = checkout._now() - timedelta(minutes=30)
+        s.commit()
+    with SessionLocal() as s:
+        assert agentic.reap_agent_orders(s) == 0
+        assert s.get(Order, oid).status == "delivered"
+
+
+def test_settling_order_not_claimable_via_library_until_settle(make_store):
+    # Finding #1: an agent order with settle still pending is held 'settling', so
+    # the out-of-band claim paths never surface the goods. /api/library (wallet
+    # session for the payer) must return nothing until record_settlement lands.
+    sid = make_store(slug="lib1", price_micro=1_000_000, delivery="TOP-SECRET")
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        order, _ = agentic.fulfill_agent_order(
+            s, s.merge(store), s.merge(product), PAYER, NONCE
+        )
+        s.commit()
+        oid = order.id
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+    token = delivery.mint_session_token(PAYER)
+    auth = {"Authorization": f"Bearer {token}"}
+    pending = client.get("/api/library", headers=auth)
+    assert pending.status_code == 200
+    assert pending.json()["purchases"] == []  # settle pending -> nothing claimable
+    # settle confirms: the order flips delivered and the deliverable appears
+    header = encode_payment_response_header(
+        SettleResponse(success=True, transaction="0x" + "e" * 64, network="eip155:196")
+    )
+    agentic.record_settlement(oid, header)
+    settled = client.get("/api/library", headers=auth).json()["purchases"]
+    assert len(settled) == 1
+    assert settled[0]["order_id"] == oid
+    assert settled[0]["delivery"] == "TOP-SECRET"
 
 
 def test_guard_store_status(make_store):
@@ -268,7 +376,7 @@ def test_guard_store_status(make_store):
 
 
 # ------------------------------------------------------- reaper
-def test_reaper_voids_old_delivered_agent_order(make_store):
+def test_reaper_voids_old_settling_agent_order(make_store):
     sid = make_store(slug="rp_old", price_micro=1_000_000)
     _add_deliverable(sid, "license", max_activations=3)
     store, product = _store_product(sid)
@@ -279,7 +387,7 @@ def test_reaper_voids_old_delivered_agent_order(make_store):
         order.paid_at = checkout._now() - timedelta(minutes=20)
         s.commit()
         old_id = order.id
-    # a recent agent order stays put
+    # a recent settling agent order stays put
     with SessionLocal() as s:
         store2 = s.get(Store, sid)
         product2 = agentic._active_product(s, sid)
@@ -292,7 +400,7 @@ def test_reaper_voids_old_delivered_agent_order(make_store):
         s.commit()
     with SessionLocal() as s:
         assert s.get(Order, old_id).status == "canceled"
-        assert s.get(Order, recent_id).status == "delivered"
+        assert s.get(Order, recent_id).status == "settling"
         ent = s.scalar(select(Entitlement).where(Entitlement.order_id == old_id))
         assert ent.revoked_at is not None
 
@@ -300,12 +408,13 @@ def test_reaper_voids_old_delivered_agent_order(make_store):
 def test_reaper_ignores_settled_and_human_orders(make_store):
     sid = make_store(slug="rp_mix", price_micro=1_000_000, delivery="X")
     store, product = _store_product(sid)
-    # agent order with tx_hash set (settled) — must not be reaped
+    # settled agent order (record_settlement flipped it delivered) — must not reap
     with SessionLocal() as s:
         order, _ = agentic.fulfill_agent_order(
             s, s.merge(store), s.merge(product), PAYER, NONCE
         )
         order.paid_at = checkout._now() - timedelta(minutes=30)
+        order.status = "delivered"
         order.tx_hash = "0x" + "e" * 64
         s.commit()
         settled_id = order.id
