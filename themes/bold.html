@@ -23,6 +23,10 @@
   :root{ --primary:{{C_PRIMARY}}; --accent:{{C_ACCENT}}; --bg:{{C_BG}}; --text:{{C_TEXT}}; }
   :root{
     --on-primary:{{C_ON_PRIMARY}};
+    --dna-scale:{{DNA_SCALE}}; --dna-space:{{DNA_SPACE}}; --dna-weight:{{DNA_WEIGHT}};
+    --dna-r:calc(var(--dna-scale)*0.8);       /* type ratio: 1 at the default 1.25 step */
+    --dna-h1:calc(var(--dna-r)*var(--dna-r)); /* masthead pushes harder than the rest */
+    --dna-w:calc(var(--dna-weight) + 250);    /* display weight: regular (450) -> today's 700 */
     --xlayer:#BCFF2F; --on-xlayer:#000; --xlayer-tint:#e6ffb0;
     --surface:color-mix(in oklab,var(--bg) 92%,var(--text));
     --pressed:color-mix(in oklab,var(--bg) 84%,var(--text));
@@ -71,7 +75,7 @@
 
   /* ---------- masthead: the headline IS the layout ---------- */
   .mast{ position:relative; overflow:hidden; border-bottom:3px solid var(--text);
-    padding:clamp(56px,9vh,110px) 0 clamp(56px,9vh,104px); }
+    padding:calc(clamp(56px,9vh,110px)*var(--dna-space)) 0 calc(clamp(56px,9vh,104px)*var(--dna-space)); }
   .tiles{ position:absolute; top:0; right:0; z-index:0; pointer-events:none; }
   .tiles i{ position:absolute; display:block; }
   .tiles .ta{ width:170px; height:170px; top:0; right:0; background:var(--primary); }
@@ -85,6 +89,8 @@
   .mast h1{
     margin-top:20px; max-width:12ch;
     font-size:clamp(2.8rem,11vw,8.5rem); font-weight:700; text-transform:uppercase;
+    font-size:clamp(calc(2.8rem*var(--dna-h1)),calc(11vw*var(--dna-h1)),calc(8.5rem*var(--dna-h1)));
+    font-weight:var(--dna-w);
     line-height:.92; letter-spacing:-.02em; overflow-wrap:anywhere; text-wrap:balance;
   }
   .stamp{ display:inline-block; margin-top:34px; padding:12px 18px;
@@ -94,6 +100,8 @@
   .mast-price{ display:flex; align-items:baseline; flex-wrap:wrap; gap:14px;
     margin-top:clamp(30px,5vh,52px); }
   .mast-price .n{ font-size:clamp(2.6rem,7vw,5rem); font-weight:700;
+    font-size:clamp(calc(2.6rem*var(--dna-r)),calc(7vw*var(--dna-r)),calc(5rem*var(--dna-r)));
+    font-weight:var(--dna-w);
     letter-spacing:-.02em; line-height:1; }
   .mast-price .u{ font-size:1.1rem; font-weight:700; letter-spacing:.08em;
     color:color-mix(in srgb,var(--text) 62%,transparent); }
@@ -102,12 +110,15 @@
 
   /* ---------- proof / ledger band: dot-leader facts, lime = chain ---------- */
   .ledger{ background:var(--surface); border-bottom:3px solid var(--text); }
-  .ledger .wrap{ padding-top:clamp(44px,7vh,72px); padding-bottom:clamp(44px,7vh,72px); }
+  .ledger .wrap{ padding-top:calc(clamp(44px,7vh,72px)*var(--dna-space));
+    padding-bottom:calc(clamp(44px,7vh,72px)*var(--dna-space)); }
   .ledger-title{ display:inline-flex; align-items:center; gap:10px;
     font-size:11px; font-weight:700; letter-spacing:.2em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 62%,transparent); }
   .ledger-title::before{ content:""; flex:none; width:10px; height:10px; background:var(--xlayer); }
   .ledger h2{ margin-top:14px; font-size:clamp(1.5rem,3.4vw,2.3rem); font-weight:700;
+    font-size:clamp(calc(1.5rem*var(--dna-r)),calc(3.4vw*var(--dna-r)),calc(2.3rem*var(--dna-r)));
+    font-weight:var(--dna-w);
     text-transform:uppercase; letter-spacing:-.01em; line-height:1.1; max-width:24ch; }
   .facts{ margin-top:26px; font-size:14px; }
   .fact{ display:flex; align-items:baseline; gap:14px; padding:16px 0;
@@ -123,7 +134,7 @@
     background:var(--xlayer); color:var(--on-xlayer); font-weight:700; letter-spacing:.06em; }
 
   /* ---------- product + buy block: palette-dominant, hard offset shadow ---------- */
-  .shop{ padding:clamp(60px,10vh,120px) 0; }
+  .shop{ padding:calc(clamp(60px,10vh,120px)*var(--dna-space)) 0; }
   .card{ position:relative; max-width:720px; margin:0 auto;
     border:3px solid var(--text); background:var(--tint);
     box-shadow:10px 10px 0 var(--primary);
@@ -134,6 +145,8 @@
   .card .blocks span:nth-child(2){ background:var(--accent); }
   .card .blocks span:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
   .card h2{ font-size:clamp(1.8rem,4.5vw,3.2rem); font-weight:700; text-transform:uppercase;
+    font-size:clamp(calc(1.8rem*var(--dna-r)),calc(4.5vw*var(--dna-r)),calc(3.2rem*var(--dna-r)));
+    font-weight:var(--dna-w);
     line-height:1.02; letter-spacing:-.02em; color:var(--primary);
     max-width:16ch; text-wrap:balance; }
   .card .blurb{ margin-top:14px; font-size:1.05rem; max-width:32rem;
@@ -141,6 +154,8 @@
   .price-row{ display:flex; align-items:baseline; gap:12px; margin-top:26px;
     padding-top:22px; border-top:2px solid color-mix(in srgb,var(--text) 24%,transparent); }
   .price-row .p{ font-size:clamp(2.4rem,6vw,4.2rem); font-weight:700;
+    font-size:clamp(calc(2.4rem*var(--dna-r)),calc(6vw*var(--dna-r)),calc(4.2rem*var(--dna-r)));
+    font-weight:var(--dna-w);
     letter-spacing:-.02em; line-height:1; }
   .price-row .u{ font-size:1rem; font-weight:700; letter-spacing:.06em; color:var(--accent); }
   .buy{
@@ -166,8 +181,48 @@
     color:color-mix(in srgb,var(--text) 52%,transparent); }
   footer b{ font-weight:700; color:color-mix(in srgb,var(--text) 80%,transparent); }
 
+  /* ---------- Design DNA: hero variants (same elements, rearranged) ---------- */
+  /* stacked = the base layout above, untouched (the no-DNA default). */
+  body[data-hero="split"] .mast .wrap{
+    display:grid; grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);
+    column-gap:clamp(24px,4vw,56px); align-items:end;
+  }
+  body[data-hero="split"] .kicker{ grid-column:1/-1; }
+  body[data-hero="split"] .mast h1{
+    grid-column:1; grid-row:2/span 3; max-width:none;
+    font-size:clamp(calc(2.2rem*var(--dna-h1)),calc(7.5vw*var(--dna-h1)),calc(6.5rem*var(--dna-h1)));
+  }
+  body[data-hero="split"] .stamp{ grid-column:2; justify-self:start; }
+  body[data-hero="split"] .mast-price{ grid-column:2; }
+  body[data-hero="split"] .mast-sub{ grid-column:2; }
+  body[data-hero="offset"] .tiles{ right:auto; left:0; transform-origin:top left; }
+  body[data-hero="offset"] .kicker{ margin-left:clamp(0px,7vw,90px); }
+  body[data-hero="offset"] .mast h1{ margin-left:clamp(0px,14vw,180px); max-width:14ch; }
+  body[data-hero="offset"] .stamp{ margin-left:clamp(20px,30vw,380px); transform:rotate(3deg); }
+  body[data-hero="offset"] .mast-price{ justify-content:flex-end; }
+  body[data-hero="offset"] .mast-sub{ margin-left:auto; text-align:right; }
+
+  /* ---------- Design DNA: block-cluster texture (sparse / medium / dense) ---------- */
+  /* medium = the three base tiles above, untouched; extras exist only for dense. */
+  .tiles .td, .tiles .te, .tiles .tf, .tiles .tg{ display:none; }
+  body[data-texture="sparse"] .tiles .ta{ width:240px; height:240px; }
+  body[data-texture="sparse"] .tiles .tb{ width:130px; height:130px; top:240px; right:0; }
+  body[data-texture="sparse"] .tiles .tc{ display:none; }
+  body[data-texture="dense"] .tiles .ta{ width:120px; height:120px; }
+  body[data-texture="dense"] .tiles .tb{ width:80px; height:80px; right:120px; }
+  body[data-texture="dense"] .tiles .tc{ width:70px; height:70px; top:120px; }
+  body[data-texture="dense"] .tiles .td{ display:block; width:60px; height:60px;
+    top:0; right:200px; background:var(--tint); border:2px solid var(--hairline); }
+  body[data-texture="dense"] .tiles .te{ display:block; width:90px; height:90px;
+    top:120px; right:70px; background:var(--accent); }
+  body[data-texture="dense"] .tiles .tf{ display:block; width:56px; height:56px;
+    top:210px; right:0; background:var(--primary); }
+  body[data-texture="dense"] .tiles .tg{ display:block; width:44px; height:44px;
+    top:216px; right:130px; background:color-mix(in srgb,var(--text) 24%,transparent); }
+
   @media (max-width:860px){
     .tiles{ transform:scale(.6); transform-origin:top right; }
+    body[data-hero="split"] .mast .wrap{ display:block; }
   }
   @media (max-width:560px){
     .brand{ font-size:15px; }
@@ -181,7 +236,7 @@
   }
 </style>
 </head>
-<body>
+<body data-hero="{{DNA_HERO}}" data-texture="{{DNA_TEXTURE}}">
 <header class="topbar">
   <div class="brand"><span class="mark" aria-hidden="true">{{EMOJI}}</span> <span class="brand-name">{{STORE_NAME}}</span></div>
   <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · 196</span>
@@ -189,7 +244,7 @@
 
 <main>
   <section class="mast">
-    <div class="tiles" aria-hidden="true"><i class="ta"></i><i class="tb"></i><i class="tc"></i></div>
+    <div class="tiles" aria-hidden="true"><i class="ta"></i><i class="tb"></i><i class="tc"></i><i class="td"></i><i class="te"></i><i class="tf"></i><i class="tg"></i></div>
     <div class="wrap">
       {% if TAGLINE %}<p class="kicker mono">{{TAGLINE}}</p>{% endif %}
       <h1>{{HERO_HEADLINE}}</h1>
