@@ -229,7 +229,10 @@ def test_mark_published_sends_nothing(make_store, monkeypatch):
 
 # ===================================================================== grep
 def test_no_outbound_posting_grep():
-    src = pathlib.Path("app/growth.py").read_text(encoding="utf-8")
+    src = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(pathlib.Path("app").glob("growth*.py"))
+    )
     assert "smtplib" not in src
     forbidden_hosts = (
         "twitter.com",
