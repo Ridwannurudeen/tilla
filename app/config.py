@@ -51,6 +51,19 @@ SESSION_TTL = 3600  # buyer wallet session token lifetime
 NONCE_TTL = 300  # sign-in nonce lifetime (5 min)
 REDELIVER_TTL = 7 * 86400  # email magic-link lifetime
 
+# ---------- M9 merchant platform: dashboard, refunds, webhooks ----------
+# Merchant wallet session token lifetime (own knob; own itsdangerous salt in
+# delivery.py, so a merchant token never validates on a buyer route and vice
+# versa). Same default as the buyer SESSION_TTL.
+MERCHANT_SESSION_TTL = int(os.environ.get("TILLA_MERCHANT_SESSION_TTL", "3600"))
+# OKLink X Layer explorer tx base — a tx hash is appended server-side to build the
+# receipt / refund links surfaced in the dashboard (BUILD.md §2 pinned format).
+OKLINK_TX_BASE = "https://www.oklink.com/x-layer/tx/"
+# Outbound webhook dispatch. Blind POST (status code only), no redirects followed.
+WEBHOOK_TIMEOUT = float(os.environ.get("TILLA_WEBHOOK_TIMEOUT", "5"))
+WEBHOOK_MAX_ATTEMPTS = int(os.environ.get("TILLA_WEBHOOK_MAX_ATTEMPTS", "5"))
+WEBHOOK_INTERVAL = float(os.environ.get("TILLA_WEBHOOK_INTERVAL", "10"))
+
 # Signs every download/session/redeliver token. Server .env only, no default:
 # when unset the gated endpoints 503 fail-closed and legacy text delivery is
 # untouched. Generate via secrets.token_hex(32).

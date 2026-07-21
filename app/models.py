@@ -36,6 +36,11 @@ class Merchant(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     wallet_address: Mapped[str] = mapped_column(String(42), nullable=False, unique=True)
     api_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # M9 outbound webhook (one per merchant). webhook_secret is plaintext because
+    # Tilla signs each delivery with it (HMAC); the DB is server-owned like .env
+    # and it is never logged or exported. NULL until the merchant registers a URL.
+    webhook_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    webhook_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -137,6 +142,13 @@ class Order(Base):
     # Cumulative verified inbound (underpay accumulates here); overage recorded.
     paid_micro: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     overpaid_micro: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    # M9 refunds: cumulative verified refund micro sent back by the merchant from
+    # their own wallet (non-custodial). A full refund records paid_micro here and
+    # flips status='refunded'; an overage refund records overpaid_micro and keeps
+    # the delivered status. Server-computed, never client-supplied.
+    refunded_micro: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
     # baseline_micro is legacy (balance-delta): kept nullable for rollback
@@ -322,6 +334,32 @@ class ProcessedTransfer(Base):
     seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
 
 
+class Refund(Base):
+    """One verified on-chain refund transfer credited to exactly one order. The
+    merchant sends USDT0 back from their own wallet (non-custodial); Tilla only
+    verifies the tx and records it here. UNIQUE(tx_hash, log_index) makes one
+    on-chain transfer creditable to a single order ever (the ProcessedTransfer
+    pattern), so a resubmit is a no-op and a tx claimed by another order 409s."""
+
+    __tablename__ = "refunds"
+    __table_args__ = (
+        UniqueConstraint("tx_hash", "log_index", name="uq_refunds_tx_log"),
+        CheckConstraint("kind IN ('full','overage')", name="ck_refunds_kind"),
+        Index("ix_refunds_order_id", "order_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)
+    tx_hash: Mapped[str] = mapped_column(String(66), nullable=False)
+    log_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    block_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
 class ChainCursor(Base):
     """Single-row sweep cursor: the last block the sweeper has fully processed.
     Persisting it makes restarts resume gap-free."""
@@ -379,6 +417,42 @@ class MppChannel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
     )
+
+
+class WebhookDelivery(Base):
+    """Outbound webhook outbox row. Enqueued as a pure DB INSERT inside the SAME
+    transaction as the state change it reports (no HTTP in a transaction), then
+    dispatched by the ``webhook_loop`` background task with exponential backoff.
+    ``status`` walks pending -> delivered | dead; ``attempts`` and
+    ``next_attempt_at`` are advanced by a race-proof conditional UPDATE so a claim
+    can only win once."""
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','delivered','dead')",
+            name="ck_webhook_deliveries_status",
+        ),
+        Index("ix_webhook_deliveries_due", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), nullable=False)
+    event: Mapped[str] = mapped_column(String(30), nullable=False)
+    order_id: Mapped[str | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="pending", server_default="pending"
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class EventLog(Base):
