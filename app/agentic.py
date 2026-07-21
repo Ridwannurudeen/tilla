@@ -38,8 +38,10 @@ from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from x402.http.types import HTTPResponseBody
 from x402.http.utils import (
+    decode_payment_required_header,
     decode_payment_response_header,
     decode_payment_signature_header,
+    encode_payment_required_header,
 )
 from x402.schemas import AssetAmount
 
@@ -60,6 +62,7 @@ from app.payment import (
     PAYMENT_EIP712_NAME,
     PAYMENT_EIP712_VERSION,
     PAYMENT_NETWORK,
+    PAYMENT_SCHEME_AGGR_DEFERRED,
 )
 
 logger = logging.getLogger("tilla")
@@ -129,6 +132,59 @@ def _active_product(session: Session, store_id: int) -> Product | None:
         .where(Product.store_id == store_id, Product.active.is_(True))
         .order_by(Product.id)
     )
+
+
+def _is_batch_store(slug: str) -> bool:
+    """True iff the store's active product declares pricing_model='batch'. The
+    agent-guard uses it to decide whether the aggr_deferred accepts-entry stays in
+    the 402 challenge. Any unknown/non-live store or DB error returns False, so the
+    aggr entry is stripped (fail-safe: never over-advertise a rail)."""
+    try:
+        with SessionLocal() as session:
+            store = _live_store(session, slug)
+            if store is None:
+                return False
+            product = _active_product(session, store.id)
+            return (
+                product is not None and (product.pricing_model or "one_time") == "batch"
+            )
+    except Exception:
+        logger.exception("aggr batch-check failed for %s", slug)
+        return False
+
+
+def _payment_scheme(request: Request) -> str | None:
+    """The scheme the payment middleware matched for this paid request — the
+    server-matched requirements (what will actually settle), falling back to the
+    buyer's claimed accepted scheme."""
+    reqs = getattr(request.state, "payment_requirements", None)
+    scheme = getattr(reqs, "scheme", None)
+    if scheme:
+        return scheme
+    payload = getattr(request.state, "payment_payload", None)
+    accepted = getattr(payload, "accepted", None)
+    return getattr(accepted, "scheme", None)
+
+
+def _filter_aggr_from_challenge(header_value: str) -> str | None:
+    """Drop aggr_deferred entries from a base64 PAYMENT-REQUIRED header, returning
+    the re-encoded header — or None when nothing changed or it could not be decoded
+    (fail-open to the handler's hard gate, which 409s a non-batch aggr payment
+    BEFORE settle, so zero funds move regardless of the challenge)."""
+    try:
+        pr = decode_payment_required_header(header_value)
+    except Exception:
+        logger.exception("aggr guard: undecodable PAYMENT-REQUIRED")
+        return None
+    kept = [
+        a
+        for a in pr.accepts
+        if getattr(a, "scheme", None) != PAYMENT_SCHEME_AGGR_DEFERRED
+    ]
+    if len(kept) == len(pr.accepts):
+        return None
+    pr.accepts = kept
+    return encode_payment_required_header(pr)
 
 
 def _content(store: Store) -> dict:
@@ -370,6 +426,15 @@ def agent_buy(
     product = _active_product(session, store.id)
     if product is None:
         raise HTTPException(409, "store has no active product")
+    # Pay-time HARD GATE: an aggr_deferred payment against a non-batch product is
+    # refused BEFORE settlement. A >=400 here makes the payment middleware skip
+    # settle, so the signed authorization is never executed and zero funds move —
+    # the same funds-safe pattern as the dead-store re-check above.
+    if (
+        _payment_scheme(request) == PAYMENT_SCHEME_AGGR_DEFERRED
+        and (product.pricing_model or "one_time") != "batch"
+    ):
+        raise HTTPException(409, "aggr_deferred is only available for batch products")
     auth = (
         payload.payload.get("authorization")
         if isinstance(payload.payload, dict)
@@ -571,6 +636,20 @@ async def agent_guard_dispatch(request: Request, call_next):
     if guard is not None:
         return JSONResponse({"detail": guard[1]}, status_code=guard[0])
     response = await call_next(request)
+    if response.status_code == 402 and config.AGGR_DEFERRED_ENABLED:
+        # CHALLENGE HONESTY: with the aggr flag on, the static accepts list carries
+        # an aggr_deferred entry on EVERY store's 402. Strip it for a NON-batch
+        # store so we never advertise a scheme the handler would 409. Batch stores
+        # keep it. The accepts live in the base64 PAYMENT-REQUIRED header (the SDK
+        # 402 JSON body is ``{}``), so filtering the header keeps body+header in
+        # agreement. Flag off -> this branch never runs -> byte-identical 402.
+        if not await asyncio.to_thread(_is_batch_store, slug):
+            header = response.headers.get("PAYMENT-REQUIRED")
+            if header:
+                filtered = _filter_aggr_from_challenge(header)
+                if filtered is not None:
+                    response.headers["PAYMENT-REQUIRED"] = filtered
+        return response
     if response.status_code == 200:
         pr = response.headers.get("PAYMENT-RESPONSE")
         order_id = getattr(request.state, "agent_order_id", None)

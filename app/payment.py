@@ -15,6 +15,10 @@ from x402.schemas import AssetAmount
 PAYMENT_PROTOCOL = "x402-v2"
 PAYMENT_FACILITATOR = "okx"
 PAYMENT_SCHEME = "exact"
+# The batch-buy scheme (a thin ExactEvmScheme wrapper the facilitator settles
+# asynchronously). Only ever OFFERED as a second accepts-entry behind the
+# TILLA_AGGR_DEFERRED flag; never claimed as settling without a real tx hash.
+PAYMENT_SCHEME_AGGR_DEFERRED = "aggr_deferred"
 PAYMENT_NETWORK = "eip155:196"
 PAYMENT_ASSET = "0x779ded0c9e1022225f8e0630b35a9b54be713736"
 PAYMENT_AMOUNT = "1000000"
@@ -151,19 +155,17 @@ def build_payment_option(rail: PaymentRail) -> PaymentOption:
     )
 
 
-def build_store_payment_option(rail: PaymentRail) -> PaymentOption:
-    """One WILDCARD PaymentOption for ``POST /s/:slug/buy`` whose pay_to and price
-    are resolved PER REQUEST from the DB (spike-8 dynamic accepts).
-
-    Both hooks are ASYNC (``asyncio.to_thread`` around a sync DB read) on purpose:
-    ``_resolve_value`` only applies ``RouteConfig.hook_timeout_seconds`` to
-    coroutines — a sync hook would be unbounded AND run the blocking read on the
-    event loop. The resolvers NEVER raise (a raising hook returns HTTP 500, not
-    404); on any unknown/invalid/pending/blocked store or DB error they return a
-    deterministic sentinel (pay_to = Tilla's own PAY_TO_ADDRESS, price = 1 micro).
-    The sentinel is safe because funds move only at settle, and settle can never
-    run for a dead store (the handler re-checks and returns >=400, which makes the
-    middleware skip settlement)."""
+def _dynamic_store_hooks(rail: PaymentRail):
+    """The shared per-request pay_to/price resolvers for the wildcard store buy
+    route. Both hooks are ASYNC (``asyncio.to_thread`` around a sync DB read) on
+    purpose: ``_resolve_value`` only applies ``RouteConfig.hook_timeout_seconds``
+    to coroutines — a sync hook would be unbounded AND run the blocking read on
+    the event loop. The resolvers NEVER raise (a raising hook returns HTTP 500,
+    not 404); on any unknown/invalid/pending/blocked store or DB error they return
+    a deterministic sentinel (pay_to = Tilla's own PAY_TO_ADDRESS, price = 1
+    micro). The sentinel is safe because funds move only at settle, and settle can
+    never run for a dead store (the handler re-checks and returns >=400, which
+    makes the middleware skip settlement)."""
     sentinel_pay_to = rail.pay_to
 
     async def _pay_to(ctx: HTTPRequestContext) -> str:
@@ -176,10 +178,43 @@ def build_store_payment_option(rail: PaymentRail) -> PaymentOption:
 
         return await asyncio.to_thread(resolve_price, ctx.path)
 
+    return _pay_to, _price
+
+
+def build_store_payment_option(rail: PaymentRail) -> PaymentOption:
+    """The single exact WILDCARD PaymentOption for ``POST /s/:slug/buy`` (dynamic
+    pay_to + price). Kept as the exact-only builder used everywhere flags are off;
+    :func:`build_store_payment_options` wraps it for the accepts list."""
+    pay_to, price = _dynamic_store_hooks(rail)
     return PaymentOption(
         scheme=rail.scheme,
-        price=_price,
+        price=price,
         network=rail.network,
-        pay_to=_pay_to,
+        pay_to=pay_to,
         max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
     )
+
+
+def build_store_payment_options(rail: PaymentRail) -> list[PaymentOption]:
+    """The accepts list for the store buy route. ALWAYS ``[exact]`` (byte-identical
+    to today); when ``config.AGGR_DEFERRED_ENABLED`` it appends a SECOND
+    ``aggr_deferred`` entry sharing the exact same dynamic pay_to/price resolvers.
+    The aggr entry is static (offered on every store's challenge); the agent-guard
+    middleware strips it from the 402 for non-batch stores, and the buy handler
+    hard-gates a non-batch aggr payment with a 409 BEFORE settle — so no dishonest
+    challenge is served and zero funds move on a mis-scheme."""
+    from app import config
+
+    options = [build_store_payment_option(rail)]
+    if config.AGGR_DEFERRED_ENABLED:
+        pay_to, price = _dynamic_store_hooks(rail)
+        options.append(
+            PaymentOption(
+                scheme=PAYMENT_SCHEME_AGGR_DEFERRED,
+                price=price,
+                network=rail.network,
+                pay_to=pay_to,
+                max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
+            )
+        )
+    return options

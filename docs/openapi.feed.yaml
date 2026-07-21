@@ -55,6 +55,18 @@ properties:
         availability:
           type: string
           enum: ["in_stock", "out_of_stock"]
+        # M8 payment-method declaration (additive). Deployed agents ignore unknown
+        # keys; the model is the declared rail and params its public config.
+        pricing:
+          type: object
+          additionalProperties: false
+          required: [model, params]
+          properties:
+            model:
+              type: string
+              enum: ["one_time", "batch", "metered", "subscription"]
+            params:
+              type: object
         x402:
           type: object
           additionalProperties: false
@@ -69,3 +81,10 @@ properties:
             asset:
               type: string
               pattern: "^0x[0-9a-fA-F]{40}$"
+            # Enabled x402 buy schemes (additive). 'exact' always; 'aggr_deferred'
+            # only on batch products when the server flag is on.
+            schemes:
+              type: array
+              items:
+                type: string
+                enum: ["exact", "aggr_deferred"]

@@ -1006,7 +1006,7 @@ if os.getenv("OKX_API_KEY"):
     from app.payment import (
         NoRedirectOKXFacilitatorClient,
         build_payment_option,
-        build_store_payment_option,
+        build_store_payment_options,
         load_payment_rail,
     )
 
@@ -1026,15 +1026,24 @@ if os.getenv("OKX_API_KEY"):
     )
     _srv = x402ResourceServer(_fac)
     _srv.register(_rail.network, ExactEvmScheme())
+    # aggr_deferred (batch buys) is registered ONLY behind its flag: a route whose
+    # accepts lists an unregistered/unsupported scheme makes initialize() raise
+    # RouteConfigurationError -> 502 on every protected route. The flag is flipped
+    # only after the read-only /supported probe confirms the scheme on eip155:196.
+    if config.AGGR_DEFERRED_ENABLED:
+        from x402.mechanisms.evm.deferred.server import AggrDeferredEvmScheme
+
+        _srv.register(_rail.network, AggrDeferredEvmScheme())
     _route = RouteConfig(
         accepts=[build_payment_option(_rail)],
         description="Tilla — create a live crypto storefront on X Layer",
         mime_type="application/json",
     )
     # ':slug' compiles to [^/]+ (no cross-slash match). pay_to + price resolve
-    # per request from the DB; a settle failure runs the compensating hook.
+    # per request from the DB; a settle failure runs the compensating hook. The
+    # accepts list is [exact] (flag off) or [exact, aggr_deferred] (flag on).
     _store_route = RouteConfig(
-        accepts=[build_store_payment_option(_rail)],
+        accepts=build_store_payment_options(_rail),
         description="Tilla store purchase",
         mime_type="application/json",
         hook_timeout_seconds=5.0,
