@@ -374,10 +374,17 @@ def rerender_stores() -> dict:
                 )
                 skipped += 1
                 continue
-            d = STORES_DIR / store.slug
-            d.mkdir(parents=True, exist_ok=True)
-            _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
-            rendered += 1
+            try:
+                d = STORES_DIR / store.slug
+                d.mkdir(parents=True, exist_ok=True)
+                _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+                rendered += 1
+            except Exception:
+                # Runs at startup — one store that fails to render (e.g. a
+                # missing template or bad content) must never crash the whole
+                # service and take checkout down. Log and skip it.
+                logger.exception("rerender_stores: failed to render %s", store.slug)
+                skipped += 1
     logger.info("rerender_stores: rendered=%d skipped=%d", rendered, skipped)
     return {"rendered": rendered, "skipped": skipped}
 
