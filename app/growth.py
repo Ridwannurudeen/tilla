@@ -29,20 +29,28 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
-from app import config, engine, screening
+from app import checkout, config, engine, screening
 from app.db import get_session
 from app.engine import GenerationUnavailable
 from app.limiter import limiter
-from app.models import EventLog, GrowthDraft, Store, log_event
+from app.models import (
+    AffiliateAccrual,
+    EmailSubscriber,
+    EventLog,
+    GrowthDraft,
+    Order,
+    Store,
+    log_event,
+)
 
 router = APIRouter()
 
@@ -356,3 +364,154 @@ def growth_outbox_mark_published(
     session.commit()
     session.refresh(draft)
     return JSONResponse(_draft_view(draft), headers=_KIT_HEADERS)
+
+
+# ============================================================ performance (M17.2)
+# Read-only, owner-gated, pure-DB aggregates over data Tilla already holds — the
+# feedback input for the 17.3 content calendar. NO RPC, NO LLM, NO new writes, and
+# NO buyer PII (a referrer wallet is only ever emitted in a truncated display form).
+
+_MAX_PERFORMANCE_DAYS = 90
+_DEFAULT_PERFORMANCE_DAYS = 30
+
+
+def _display_addr(addr: str | None) -> str | None:
+    """Truncated display form of an EVM address (0x1234…cdef) — never the full
+    wallet, so the performance surface leaks no complete counterparty address."""
+    if not addr:
+        return None
+    return addr[:6] + "…" + addr[-4:] if len(addr) >= 12 else addr
+
+
+def store_performance(session: Session, store: Store, days: int) -> dict:
+    """First-party performance aggregates for ``store`` over the last ``days``:
+    delivered orders/revenue by day, affiliate-attributed sales + top referrers,
+    waitlist growth, and the kit/draft history. Pure DB reads — every number comes
+    from rows Tilla already persisted; no buyer email or full wallet is emitted."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Delivered orders + revenue, bucketed by calendar day (SQLite date()).
+    day_col = func.date(Order.created_at)
+    day_rows = session.execute(
+        select(
+            day_col.label("d"),
+            func.count(Order.id),
+            func.coalesce(func.sum(Order.expected_micro), 0),
+        )
+        .where(
+            Order.store_id == store.id,
+            Order.status.in_(checkout.TERMINAL_DELIVERED),
+            Order.created_at >= since,
+        )
+        .group_by(day_col)
+        .order_by(day_col)
+    ).all()
+    orders_by_day = [
+        {"date": d, "orders": int(c), "revenue_micro": int(rev)}
+        for d, c, rev in day_rows
+    ]
+    total_orders = sum(r["orders"] for r in orders_by_day)
+    total_revenue_micro = sum(r["revenue_micro"] for r in orders_by_day)
+
+    # Affiliate-attributed sales + top referrers (accrued OR paid, not voided).
+    aff_rows = session.execute(
+        select(
+            AffiliateAccrual.referrer_addr,
+            func.count(AffiliateAccrual.id),
+            func.coalesce(func.sum(AffiliateAccrual.accrued_micro), 0),
+        )
+        .where(
+            AffiliateAccrual.store_id == store.id,
+            AffiliateAccrual.status.in_(("accrued", "paid")),
+            AffiliateAccrual.created_at >= since,
+        )
+        .group_by(AffiliateAccrual.referrer_addr)
+        .order_by(func.sum(AffiliateAccrual.accrued_micro).desc())
+    ).all()
+    top_referrers = [
+        {
+            "referrer": _display_addr(addr),
+            "sales": int(cnt),
+            "accrued_micro": int(micro),
+        }
+        for addr, cnt, micro in aff_rows
+    ]
+
+    # Waitlist growth (active, non-removed): total held + new inside the window.
+    waitlist_total = int(
+        session.scalar(
+            select(func.count())
+            .select_from(EmailSubscriber)
+            .where(
+                EmailSubscriber.store_id == store.id,
+                EmailSubscriber.source == "waitlist",
+                EmailSubscriber.removed_at.is_(None),
+            )
+        )
+        or 0
+    )
+    waitlist_new = int(
+        session.scalar(
+            select(func.count())
+            .select_from(EmailSubscriber)
+            .where(
+                EmailSubscriber.store_id == store.id,
+                EmailSubscriber.source == "waitlist",
+                EmailSubscriber.removed_at.is_(None),
+                EmailSubscriber.created_at >= since,
+            )
+        )
+        or 0
+    )
+
+    # Kit/draft history: growth.* event_log rows in the window, counted by event.
+    event_rows = session.execute(
+        select(EventLog.event, func.count(EventLog.id))
+        .where(
+            EventLog.store_id == store.id,
+            EventLog.event.like("growth.%"),
+            EventLog.ts >= since,
+        )
+        .group_by(EventLog.event)
+    ).all()
+    kit_events = {event: int(cnt) for event, cnt in event_rows}
+
+    # Draft outbox counts by status (all-time — the outbox is the working queue).
+    draft_rows = session.execute(
+        select(GrowthDraft.status, func.count(GrowthDraft.id))
+        .where(GrowthDraft.store_id == store.id)
+        .group_by(GrowthDraft.status)
+    ).all()
+    drafts_by_status = {status: int(cnt) for status, cnt in draft_rows}
+
+    return {
+        "window_days": days,
+        "orders": {
+            "total": total_orders,
+            "revenue_micro": total_revenue_micro,
+            "by_day": orders_by_day,
+        },
+        "affiliates": {
+            "attributed_sales": sum(r["sales"] for r in top_referrers),
+            "accrued_micro": sum(r["accrued_micro"] for r in top_referrers),
+            "top_referrers": top_referrers,
+        },
+        "waitlist": {"total": waitlist_total, "new_in_window": waitlist_new},
+        "growth_activity": {
+            "events": kit_events,
+            "drafts_by_status": drafts_by_status,
+        },
+    }
+
+
+@router.get("/api/stores/{slug}/growth/performance")
+def growth_performance(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    days: int = Query(_DEFAULT_PERFORMANCE_DAYS, ge=1, le=_MAX_PERFORMANCE_DAYS),
+    session: Session = Depends(get_session),
+):
+    """Owner-gated, read-only performance readback over a bounded window (days≤90).
+    Same auth seam as the growth kit/outbox; no LLM, no RPC, no writes."""
+    store = _load_owned_live_store(request, slug, session)
+    return JSONResponse(store_performance(session, store, days), headers=_KIT_HEADERS)
