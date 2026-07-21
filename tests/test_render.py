@@ -141,3 +141,16 @@ def test_checkout_partial_included_with_ids_and_constants(theme):
     assert "0xa9059cbb" in html
     # SLUG still enters the script through tojson (autoescape discipline preserved)
     assert f'const SLUG = "{SLUG}";' in html
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_checkout_retry_resets_state_before_poll(theme):
+    # Regression: startCheckout() must clear the prior order's terminal flags on
+    # an expire-then-rebuy. Without the reset, CO.expired stays true from the
+    # first order and poll() bails at `if (CO.paid || CO.expired) return`, so the
+    # retry shows a live-looking panel that never polls payment status.
+    html = render({"store_name": "X"}, ADDR, SLUG, theme)
+    reset = "CO.paid = false; CO.expired = false; CO.txHash = null;"
+    assert reset in html
+    # the reset must run before startCheckout()'s poll() call, not after
+    assert html.index(reset) < html.index("poll();")

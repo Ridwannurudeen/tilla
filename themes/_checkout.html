@@ -128,6 +128,13 @@
   async function startCheckout() {
     byId("co").classList.add("on");
     var buy = byId("buyBtn"); if (buy) buy.disabled = true;
+    CO.paid = false; CO.expired = false; CO.txHash = null;
+    byId("coReceipt").style.display = "none"; byId("coReceipt").textContent = "";
+    byId("coClaim").style.display = "none"; byId("coClaim").textContent = "";
+    byId("claimBtn").style.display = "none";
+    byId("coClaimHint").style.display = "none";
+    byId("coDelivery").style.display = "none";
+    byId("coManual").style.display = "";
     var d;
     try {
       var r = await fetch("/api/checkout/" + SLUG, { method: "POST" });
