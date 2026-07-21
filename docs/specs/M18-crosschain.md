@@ -58,6 +58,18 @@ migration up/down/up passes prod-shape, and new tests
 > head for maturity) or non-canonical orders orphan (funds-received-no-goods unless
 > the buyer submits a txhash). `_promote_matured` already skips unregistered-network
 > rows without killing the tick (18.1 review fix) — keep that invariant.
+>
+> **GO-LIVE BLOCKER from the 18.2 review (must fix before ANY second-chain go-live;
+> harmless while every `TILLA_CHAIN_<id>_ENABLED` is OFF and only 196 exists):** the
+> store `_store_route` accepts list is built ONCE at import time (`app/main.py`,
+> `build_store_payment_options`), before the lifespan probe runs — so a flag flipped
+> on + a probe that lists the chain still leaves the live accepts frozen 196-only.
+> Fixing the flag path means (a) rebuilding the accepts list AFTER the probe, and
+> (b) `_srv.register(<caip2>, ExactEvmScheme())` per enabled chain — today only 196's
+> scheme is registered, so an accepts entry for chain B would make `initialize()`
+> raise → 502 on every protected route. Both must land together. Fail direction is
+> safe (never advertises a chain it can't serve), which is why this is a go-live
+> blocker, not a live bug.
 Startup (lifespan) read-only probe using the exact spikes.md client
 (`NoRedirectOKXFacilitatorClient(...).get_supported()`); snapshot cached with the
 process (probe failure ⇒ 196-only, never a crash — 196 is grandfathered as the
