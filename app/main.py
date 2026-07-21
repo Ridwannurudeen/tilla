@@ -40,7 +40,7 @@ from app import (
 from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
 from app.engine import create_store as gen_store
-from app.engine import rerender_stores, resume_pending
+from app.engine import rerender_stores, resume_pending, upgrade_store
 from app.limiter import limiter
 from app.models import (
     Deliverable,
@@ -48,10 +48,11 @@ from app.models import (
     Entitlement,
     Order,
     Product,
+    ScreeningReceipt,
     Store,
     log_event,
 )
-from app.screening import ScreeningBlocked
+from app.screening import ScreeningBlocked, ScreeningUnavailable, screen
 
 logger = logging.getLogger("tilla")
 
@@ -273,6 +274,220 @@ def create_store_get(
     except ValidationError as exc:
         raise HTTPException(422, json.loads(exc.json())) from exc
     return _run_create_store(body.description, body.receive_address, body.theme)
+
+
+# ---------- M10 marketplace services: upgrade a store / add a product ----------
+class _SlugBody(BaseModel):
+    slug: str = Field(min_length=1, max_length=config.SLUG_MAX_LEN)
+
+    @field_validator("slug")
+    @classmethod
+    def _validate_slug(cls, v):
+        if not re.fullmatch(config.SLUG_PATTERN, v or ""):
+            raise ValueError("slug must match the store slug pattern")
+        return v
+
+
+class UpgradeStoreBody(_SlugBody):
+    # None -> keep the store's existing description as the regeneration prompt.
+    description: str | None = Field(default=None, max_length=config.MAX_DESCRIPTION_LEN)
+    theme: str | None = None
+
+    @field_validator("description")
+    @classmethod
+    def _validate_description(cls, v):
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("theme")
+    @classmethod
+    def _validate_theme(cls, v):
+        if v is None or v == "":
+            return None
+        if v not in config.ALLOWED_THEMES:
+            raise ValueError("theme must be one of: original, bold, editorial")
+        return v
+
+
+class AddProductBody(_SlugBody):
+    name: str = Field(min_length=1, max_length=120)
+    price_usdt: float = Field(ge=0.01, le=10000)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v):
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
+
+
+def _run_upgrade_store(
+    request: Request,
+    session: Session,
+    slug: str,
+    description: str | None,
+    theme: str | None,
+):
+    if not os.environ.get("TILLA_LLM_KEY"):
+        raise HTTPException(503, "generation unavailable")
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None:
+        raise HTTPException(404, "store not found")
+    # Payment is monetization; the manage key is the SECURITY gate. A wrong/missing
+    # key 401s BEFORE settle (>=400 -> the x402 middleware skips settlement), so a
+    # paid call with a bad key moves zero funds and never touches the store.
+    _require_store_key(request, store, session)
+    if store.status != "live":
+        raise HTTPException(409, "store is not live")
+    try:
+        return upgrade_store(session, store, description, theme)
+    except ScreeningBlocked as exc:
+        logger.warning(
+            "store upgrade blocked by screening: risk_level=%s",
+            exc.verdict.get("risk_level"),
+        )
+        # >=400 BEFORE settle: no funds move and the old live content keeps serving.
+        raise HTTPException(422, "content did not pass safety screening") from exc
+    except ScreeningUnavailable as exc:
+        raise HTTPException(503, "content screening temporarily unavailable") from exc
+
+
+@app.post("/upgrade-store")
+@limiter.limit("6/minute")
+def upgrade_store_post(
+    request: Request,
+    body: UpgradeStoreBody,
+    session: Session = Depends(get_session),
+):
+    return _run_upgrade_store(request, session, body.slug, body.description, body.theme)
+
+
+@app.get("/upgrade-store")
+@limiter.limit("6/minute")
+def upgrade_store_get(
+    request: Request,
+    slug: str = "",
+    description: str = "",
+    theme: str = "",
+    session: Session = Depends(get_session),
+):
+    # unpaid GET is intercepted by the x402 paywall (402). A paid GET reaches here;
+    # with no slug it returns service-usage JSON (like create-store's GET).
+    if not slug:
+        return {
+            "service": "Tilla · upgrade-store",
+            "how": (
+                "POST {slug, description?, theme?} + Authorization: Bearer "
+                "<manage_key> (x402-paid, 1 USDT) → regenerates, re-screens, and "
+                "re-renders a store you own"
+            ),
+            "network": "eip155:196",
+        }
+    try:
+        body = UpgradeStoreBody(
+            slug=slug, description=description or None, theme=theme or None
+        )
+    except ValidationError as exc:
+        raise HTTPException(422, json.loads(exc.json())) from exc
+    return _run_upgrade_store(request, session, body.slug, body.description, body.theme)
+
+
+def _run_add_product(
+    request: Request, session: Session, slug: str, name: str, price_usdt: float
+):
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None:
+        raise HTTPException(404, "store not found")
+    _require_store_key(request, store, session)
+    if store.status != "live":
+        raise HTTPException(409, "store is not live")
+    # Screen the product name fail-closed. BLOCK -> 422, unavailable -> 503; in both
+    # cases the response is >=400 BEFORE settle (no funds move) and no product row is
+    # inserted.
+    try:
+        outcome = screen(name)
+    except ScreeningBlocked as exc:
+        raise HTTPException(422, "content did not pass safety screening") from exc
+    if outcome.status != "allow":
+        raise HTTPException(503, "content screening temporarily unavailable")
+    # Additive by construction: a second active product. /s/{slug}/buy keeps selling
+    # the primary product (lowest Product.id) at its unchanged price; feeds + MCP
+    # enumerate all active products. Per-product deliverables are out of scope — all
+    # products share the store's one active deliverable.
+    price_micro = int(round(price_usdt * 1e6))
+    product = Product(
+        store_id=store.id, name=name, price_micro=price_micro, active=True
+    )
+    session.add(product)
+    session.flush()
+    r = outcome.receipt
+    if r is not None:
+        session.add(
+            ScreeningReceipt(
+                store_id=store.id,
+                mode=r.mode,
+                verdict=r.verdict,
+                risk_level=r.risk_level,
+                endpoint=r.endpoint,
+                amount_micro=r.amount_micro,
+                tx_hash=r.tx_hash,
+            )
+        )
+    log_event(
+        session,
+        "api",
+        "product.added",
+        store_id=store.id,
+        data={"slug": slug, "product_id": product.id},
+    )
+    session.commit()
+    return {
+        "slug": slug,
+        "product_id": product.id,
+        "name": name,
+        "price_usdt": price_usdt,
+    }
+
+
+@app.post("/add-product")
+@limiter.limit("6/minute")
+def add_product_post(
+    request: Request,
+    body: AddProductBody,
+    session: Session = Depends(get_session),
+):
+    return _run_add_product(request, session, body.slug, body.name, body.price_usdt)
+
+
+@app.get("/add-product")
+@limiter.limit("6/minute")
+def add_product_get(
+    request: Request,
+    slug: str = "",
+    name: str = "",
+    price_usdt: float | None = None,
+    session: Session = Depends(get_session),
+):
+    if not slug:
+        return {
+            "service": "Tilla · add-product",
+            "how": (
+                "POST {slug, name, price_usdt} + Authorization: Bearer "
+                "<manage_key> (x402-paid, 0.5 USDT) → adds a second product to a "
+                "store you own"
+            ),
+            "network": "eip155:196",
+        }
+    try:
+        body = AddProductBody(
+            slug=slug, name=name, price_usdt=price_usdt if price_usdt is not None else 0
+        )
+    except ValidationError as exc:
+        raise HTTPException(422, json.loads(exc.json())) from exc
+    return _run_add_product(request, session, body.slug, body.name, body.price_usdt)
 
 
 class TxBody(BaseModel):
@@ -1036,6 +1251,7 @@ if os.getenv("OKX_API_KEY"):
 
     from app.payment import (
         NoRedirectOKXFacilitatorClient,
+        build_fee_payment_option,
         build_payment_option,
         build_store_payment_options,
         load_payment_rail,
@@ -1080,10 +1296,32 @@ if os.getenv("OKX_API_KEY"):
         hook_timeout_seconds=5.0,
         settlement_failed_response_body=agentic.store_settle_failed_hook,
     )
+    # M10 platform-fee services (static exact options, payTo = Tilla's own rail —
+    # Tilla earning its platform fee). Both register POST and GET: onchainos'
+    # x402-check probes GET and expects a 402 challenge (the Warden 405->402
+    # lesson); a paid GET with no body returns service-usage JSON.
+    _upgrade_route = RouteConfig(
+        accepts=[build_fee_payment_option(_rail, "1000000")],
+        description="Tilla — upgrade an existing storefront (1 USDT)",
+        mime_type="application/json",
+    )
+    _add_product_route = RouteConfig(
+        accepts=[build_fee_payment_option(_rail, "500000")],
+        description="Tilla — add a product to a storefront (0.5 USDT)",
+        mime_type="application/json",
+    )
     _paid = {
         "POST /create-store": _route,
         "GET /create-store": _route,
+        "POST /upgrade-store": _upgrade_route,
+        "GET /upgrade-store": _upgrade_route,
+        "POST /add-product": _add_product_route,
+        "GET /add-product": _add_product_route,
         "POST /s/:slug/buy": _store_route,
+        # Register GET so an UNPAID GET on the buy path returns the 402 challenge
+        # (listing-review robustness); a PAID GET reaches agentic.agent_buy_get and
+        # is refused 405 BEFORE settle, so zero funds can move on the GET method.
+        "GET /s/:slug/buy": _store_route,
     }
     app.add_middleware(PaymentMiddlewareASGI, routes=_paid, server=_srv)
     # Registered AFTER the payment middleware so it is OUTERMOST (runs first): it
