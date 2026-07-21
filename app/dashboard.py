@@ -15,15 +15,18 @@ import contextlib
 import hashlib
 import re
 import secrets
+from typing import Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from itsdangerous import BadSignature, SignatureExpired
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import HTMLResponse
 
-from app import checkout, config, delivery, render
+from app import chain, checkout, config, delivery, refunds, render
 from app.db import get_session
 from app.limiter import limiter
 from app.models import (
@@ -442,6 +445,59 @@ def merchant_order_detail(
         for e in timeline
     ]
     return detail
+
+
+class RefundBody(BaseModel):
+    tx_hash: str
+    kind: Literal["full", "overage"]
+
+    @field_validator("tx_hash")
+    @classmethod
+    def _v_tx(cls, v):
+        if not re.fullmatch(r"0x[0-9a-fA-F]{64}", v or ""):
+            raise ValueError("tx_hash must be a 0x-prefixed 32-byte hash")
+        return v.lower()
+
+
+@router.post("/api/merchant/orders/{order_id}/refund")
+@limiter.limit("10/minute")
+def merchant_refund(
+    request: Request,
+    body: RefundBody,
+    order_id: str = Path(..., min_length=1, max_length=32),
+    session: Session = Depends(get_session),
+):
+    """Verify a merchant-sent USDT0 refund on X Layer and apply it (non-custodial:
+    Tilla verifies, never sends). Owning-merchant only (404 otherwise); idempotent
+    on the refund tx; the amount is server-computed, never trusted from the body."""
+    merchant = _require_merchant(request, session)
+    order, store = _owned_order(session, merchant, order_id)
+    try:
+        result = refunds.apply_refund(session, order, store, body.tx_hash, body.kind)
+    except refunds.RefundError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    except (httpx.HTTPError, chain.ChainError) as exc:
+        raise HTTPException(502, "chain verification unavailable") from exc
+    try:
+        session.commit()
+    except IntegrityError:
+        # a raced concurrent refund won at commit; reconcile to the committed state
+        session.rollback()
+        session.refresh(order)
+        result = {
+            "order_id": order.id,
+            "status": order.status,
+            "applied_micro": 0,
+            "refunded_micro": order.refunded_micro,
+        }
+    return {
+        "order_id": result["order_id"],
+        "status": result["status"],
+        "kind": body.kind,
+        "applied_micro": result["applied_micro"],
+        "refunded_micro": result["refunded_micro"],
+        "refunded_usdt": usdt(result["refunded_micro"]),
+    }
 
 
 @router.get("/dashboard")
