@@ -123,3 +123,6 @@ channel-open deposit, Permit2 charge) are USER-owned by construction.
 - **subscription (TILLA_SUBSCRIPTIONS_ENABLED):** payer-binding — a subscription replay is now store-scoped, but a same-store replay of a public terms-signature still delivers that store goods to a non-signer. Before flag-flip: record the payer (recovered signer) on the subscription Order and require the replaying request signer == that payer.
 - **aggr_deferred (TILLA_AGGR_DEFERRED / AGGR_DEFERRED_ENABLED):** build the get_settle_status reconciliation poller so a deferred (async) settle is only claimed once its aggregated tx hash is confirmed; today a no-tx deferred settle correctly stays `settling` (never falsely delivered) but there is no poller to finalize it.
 - **All rails:** a real settlement tx hash must be logged before the rail is claimed working (BUILD.md binary acceptance).
+
+## M11 attester (TILLA_ATTEST) flag-flip hardening
+- **crash-window double-attest:** _attest_one broadcasts before the pending->sent DB claim, so a process crash between broadcast and claim can re-attest (wasteful OKB gas, NOT fund loss). Before enabling the attester on mainnet: reorder to an intermediate sending state + nonce-based dedup on reconcile, OR accept the rare double-attest as bounded-gas. Dormant (flag off + no key) until then.
