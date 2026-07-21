@@ -118,3 +118,8 @@ PY
 
 None of the three probes can move funds. The fund-moving acts (TEE-buyer settle,
 channel-open deposit, Permit2 charge) are USER-owned by construction.
+
+## M8 go-live (flag-flip) BLOCKERS — do NOT enable these flags until fixed
+- **subscription (TILLA_SUBSCRIPTIONS_ENABLED):** payer-binding — a subscription replay is now store-scoped, but a same-store replay of a public terms-signature still delivers that store goods to a non-signer. Before flag-flip: record the payer (recovered signer) on the subscription Order and require the replaying request signer == that payer.
+- **aggr_deferred (TILLA_AGGR_DEFERRED / AGGR_DEFERRED_ENABLED):** build the get_settle_status reconciliation poller so a deferred (async) settle is only claimed once its aggregated tx hash is confirmed; today a no-tx deferred settle correctly stays `settling` (never falsely delivered) but there is no poller to finalize it.
+- **All rails:** a real settlement tx hash must be logged before the rail is claimed working (BUILD.md binary acceptance).
