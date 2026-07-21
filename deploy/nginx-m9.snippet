@@ -1,0 +1,44 @@
+# M9 nginx routing — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# M9 adds the merchant platform. EVERY new API route lives under /api/merchant/*
+# (auth, dashboard reads, refunds, CSV export, webhook config) and is therefore
+# ALREADY proxied by the existing `location /api/` block — no nginx change is
+# needed for the API surface.
+#
+# The ONLY new top-level path is the dashboard SPA shell at GET /dashboard. It is
+# NOT under /api/, so nginx must be told to proxy it to the app; otherwise it
+# falls through to the static root and 404s.
+#
+# Add ONE location block inside the tilla.gudman.xyz server{} block, using the
+# SAME proxy_set_header lines as the existing /api/ block:
+#
+#     location = /dashboard {
+#         proxy_pass http://127.0.0.1:8040;
+#         # ... same proxy_set_header lines as the /api/ block ...
+#     }
+#
+# Notes:
+# - `location = /dashboard` (exact match) is enough — the shell is a single page;
+#   it fetches all data via /api/merchant/* (already proxied) using an in-memory
+#   bearer token, so there are no /dashboard/* sub-paths to route.
+# - The shell is served with autoescaped Jinja2 and carries NO merchant data; all
+#   store/order strings are rendered client-side via textContent. No CSP change is
+#   required beyond what the existing app pages use.
+# - CSV export (/api/merchant/export/*.csv) streams via the /api/ block unchanged.
+#   If very large exports ever hit a proxy read timeout, raise proxy_read_timeout
+#   on the /api/ block only — not needed at current scale.
+# - Outbound webhooks are delivered by an in-process asyncio task (systemd
+#   tilla-api); they make OUTBOUND https calls and need no inbound nginx route and
+#   no new worker/unit. Ensure the VPS allows outbound 443 (it already does for the
+#   x402 facilitator + RPC). SSRF is enforced in-app (app/webhooks.py).
+# - `nginx -t` then `systemctl reload nginx` (NEVER restart). Touch no other vhost.
+#
+# POST-DEPLOY SMOKE:
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/dashboard    # 200 (HTML shell)
+#   curl -s -X POST https://tilla.gudman.xyz/api/merchant/auth/nonce \
+#        -H 'content-type: application/json' -d '{"address":"0x0000000000000000000000000000000000000001"}'  # {nonce,message,...}
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/api/merchant/stores  # 401 (no auth) — proxied, not static 404
+#
+# ROLLBACK: remove the one /dashboard location block, `nginx -t` + reload. The
+# /api/merchant/* routes need no nginx rollback (they ride the pre-existing /api/
+# block). App rollback = redeploy previous files + `alembic downgrade 0005_payment_methods`.
