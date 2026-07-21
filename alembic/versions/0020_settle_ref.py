@@ -18,7 +18,7 @@ RENUMBER-AT-INTEGRATION: authored as 0019 on top of ``0018_perchain_cursor`` (th
 worktree's head). At integration, renumber this file + ``revision`` to the next free
 head and repoint ``down_revision`` to the true predecessor.
 
-Revision ID: 0019_settle_ref
+Revision ID: 0020_settle_ref
 Revises: 0018_perchain_cursor
 Create Date: 2026-07-21
 """
@@ -30,8 +30,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0019_settle_ref"
-down_revision: Union[str, None] = "0018_perchain_cursor"
+revision: str = "0020_settle_ref"
+down_revision: Union[str, None] = "0019_attest_nonce"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
