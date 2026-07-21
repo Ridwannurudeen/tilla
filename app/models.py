@@ -218,14 +218,18 @@ class Order(Base):
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # M11 on-chain depth: the EAS receipt attestation for this order. attest_status
-    # walks none -> pending -> sent -> attested | failed, driven ONLY by the dormant
-    # attester worker (app.attest) — a single writer, so no CHECK constraint (which
-    # would force an orders-table rebuild and endanger ux_orders_active_amount). Every
-    # existing row stays 'none' (never queued), so enabling later attests only
-    # post-enable sales. attest_tx is the on-chain attestation tx; attestation_uid is
-    # the EAS UID parsed from its Attested log.
+    # walks none -> pending -> sending -> sent -> attested | failed, driven ONLY by the
+    # dormant attester worker (app.attest) — a single writer, so no CHECK constraint
+    # (which would force an orders-table rebuild and endanger ux_orders_active_amount).
+    # Every existing row stays 'none' (never queued), so enabling later attests only
+    # post-enable sales. 'sending' records the broadcast intent (attest_tx + attest_nonce)
+    # BEFORE the tx is broadcast, so a crash in the send window reconciles by nonce (at
+    # most one tx per nonce mines) instead of blind-re-broadcasting. attest_tx is the
+    # on-chain attestation tx; attest_nonce is the account nonce it was signed with;
+    # attestation_uid is the EAS UID parsed from its Attested log.
     attestation_uid: Mapped[str | None] = mapped_column(String(66), nullable=True)
     attest_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    attest_nonce: Mapped[int | None] = mapped_column(Integer, nullable=True)
     attest_status: Mapped[str] = mapped_column(
         String(12), nullable=False, default="none", server_default="none"
     )

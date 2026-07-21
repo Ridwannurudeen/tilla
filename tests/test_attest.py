@@ -40,8 +40,21 @@ ATTEST_SELECTOR = "0xf17325e7"
 PAYER = "0x" + "33" * 20
 PAY_TX = "0x" + "11" * 32
 ATTEST_TX = "0x" + "ee" * 32
+ATTEST_TX2 = "0x" + "dd" * 32
 UID = "0x" + "ab" * 32
 NONCE = "0x" + "1" * 64
+ATTEST_NONCE = 7
+
+
+def _prep(tx=ATTEST_TX, nonce=ATTEST_NONCE):
+    """A _prepare_attestation stand-in: returns (signed, tx_hash, nonce) and honours a
+    pinned nonce kwarg (the reconcile re-broadcast path), so nothing is ever built."""
+
+    def _fn(*a, **k):
+        pinned = k.get("nonce")
+        return object(), tx, pinned if pinned is not None else nonce
+
+    return _fn
 
 
 @pytest.fixture(autouse=True)
@@ -319,37 +332,142 @@ def test_voided_agent_order_is_never_queued(monkeypatch, make_store):
 # ============================================================================
 def test_worker_attests_pending_exactly_once(monkeypatch, make_store):
     _wire(monkeypatch)
-    send = _Spy(ATTEST_TX)
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
     wait = _Spy(_receipt(1, UID))
-    monkeypatch.setattr(attest, "_send_attestation", send)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
     monkeypatch.setattr(attest, "_wait_receipt", wait)
     _seed(make_store)
 
     assert attest.attest_tick() == 1
     assert _order("ordattest0000001") == ("attested", UID, ATTEST_TX)
-    assert send.count == 1
+    assert prep.count == 1 and bcast.count == 1
 
-    # second tick: nothing pending -> no send, no-op
+    # second tick: nothing pending -> no prepare, no broadcast, no-op
     assert attest.attest_tick() == 0
-    assert send.count == 1
+    assert prep.count == 1 and bcast.count == 1
     assert _attest_status("ordattest0000001") == "attested"
+
+
+def test_pending_is_claimed_sending_with_nonce_before_broadcast(
+    monkeypatch, make_store
+):
+    # The nonce + tx hash are recorded on the row BEFORE the broadcast fires — the
+    # crash-window invariant. Assert it by inspecting the DB from inside the broadcast.
+    _wire(monkeypatch)
+    seen = {}
+
+    def _capture(att, signed):
+        with SessionLocal() as s:
+            o = s.get(Order, "ordattest0000001")
+            seen["status"] = o.attest_status
+            seen["tx"] = o.attest_tx
+            seen["nonce"] = o.attest_nonce
+
+    monkeypatch.setattr(attest, "_prepare_attestation", _prep())
+    monkeypatch.setattr(attest, "_broadcast", _capture)
+    monkeypatch.setattr(attest, "_wait_receipt", _Spy(_receipt(1, UID)))
+    _seed(make_store)
+    attest.attest_tick()
+    assert seen == {"status": "sending", "tx": ATTEST_TX, "nonce": ATTEST_NONCE}
+
+
+def test_crash_after_broadcast_before_claim_does_not_double_broadcast(
+    monkeypatch, make_store
+):
+    # Simulate a crash between broadcast and the sending->sent claim: the row is left
+    # 'sending' with its tx + nonce recorded. On restart the reconcile resolves it from
+    # chain and NEVER prepares/broadcasts a second attestation.
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
+    monkeypatch.setattr(attest, "_get_receipt", _Spy(_receipt(1, UID)))
+    _seed(make_store, attest_status="sending")
+    with SessionLocal() as s:
+        o = s.get(Order, "ordattest0000001")
+        o.attest_tx = ATTEST_TX
+        o.attest_nonce = ATTEST_NONCE
+        s.commit()
+    attest._reconcile_sending(object())
+    assert _order("ordattest0000001") == ("attested", UID, ATTEST_TX)
+    assert prep.count == 0 and bcast.count == 0  # no re-broadcast — resolved from chain
+
+
+def test_sending_reconcile_nonce_free_rebroadcasts_same_nonce(monkeypatch, make_store):
+    # Crash BEFORE the broadcast landed: tx not on chain and the nonce is still free.
+    # Reconcile re-broadcasts pinned to the SAME nonce (idempotent dedup) and advances
+    # to 'sent'. The new hash replaces the recorded one.
+    prep = _Spy(_prep(tx=ATTEST_TX2))
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
+    monkeypatch.setattr(attest, "_get_receipt", _Spy(None))  # not on chain
+    monkeypatch.setattr(attest, "_confirmed_nonce", lambda att: ATTEST_NONCE)  # free
+    _seed(make_store, attest_status="sending")
+    with SessionLocal() as s:
+        o = s.get(Order, "ordattest0000001")
+        o.attest_tx = ATTEST_TX
+        o.attest_nonce = ATTEST_NONCE
+        s.commit()
+    attest._reconcile_sending(object())
+    assert _order("ordattest0000001") == ("sent", None, ATTEST_TX2)
+    assert bcast.count == 1
+    # re-broadcast pinned to the SAME nonce (dedup key), never a fresh one
+    assert prep.calls[0][1].get("nonce") == ATTEST_NONCE
+
+
+def test_sending_reconcile_nonce_consumed_reattests_fresh(monkeypatch, make_store):
+    # Nonce-based dedup: the recorded nonce was consumed by a DIFFERENT mined tx (our
+    # hash is not on chain) => our attestation is definitively not on chain => re-attest
+    # fresh (back to pending, tx/nonce cleared) rather than re-broadcast at a dead nonce.
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
+    monkeypatch.setattr(attest, "_get_receipt", _Spy(None))  # our tx not on chain
+    monkeypatch.setattr(attest, "_confirmed_nonce", lambda att: ATTEST_NONCE + 2)
+    _seed(make_store, attest_status="sending")
+    with SessionLocal() as s:
+        o = s.get(Order, "ordattest0000001")
+        o.attest_tx = ATTEST_TX
+        o.attest_nonce = ATTEST_NONCE
+        s.commit()
+    attest._reconcile_sending(object())
+    assert _order("ordattest0000001") == ("pending", None, None)
+    assert prep.count == 0 and bcast.count == 0  # no re-broadcast at the dead nonce
+
+
+def test_sending_reconcile_reverted_marks_failed(monkeypatch, make_store):
+    monkeypatch.setattr(attest, "_get_receipt", _Spy(_receipt(status=0)))
+    _seed(make_store, attest_status="sending")
+    with SessionLocal() as s:
+        o = s.get(Order, "ordattest0000001")
+        o.attest_tx = ATTEST_TX
+        o.attest_nonce = ATTEST_NONCE
+        s.commit()
+    attest._reconcile_sending(object())
+    assert _attest_status("ordattest0000001") == "failed"
 
 
 def test_non_pending_order_sends_nothing(monkeypatch, make_store):
     # The pre-send status re-check means an order already out of 'pending' is never
     # signed for (the conditional-claim guard — no double-attest).
-    send = _Spy(ATTEST_TX)
-    monkeypatch.setattr(attest, "_send_attestation", send)
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
     sid, oid = _seed(make_store, attest_status="attested")
     attest._attest_one(object(), oid, sid)
-    assert send.count == 0
+    assert prep.count == 0 and bcast.count == 0
     assert _attest_status(oid) == "attested"
 
 
 def test_reverted_attestation_marks_failed(monkeypatch, make_store):
     _wire(monkeypatch)
-    send = _Spy(ATTEST_TX)
-    monkeypatch.setattr(attest, "_send_attestation", send)
+    monkeypatch.setattr(attest, "_prepare_attestation", _Spy(_prep()))
+    monkeypatch.setattr(attest, "_broadcast", _Spy(None))
     monkeypatch.setattr(attest, "_wait_receipt", _Spy(_receipt(status=0)))
     _seed(make_store)
     attest.attest_tick()
@@ -357,8 +475,10 @@ def test_reverted_attestation_marks_failed(monkeypatch, make_store):
 
 
 def test_sent_reconcile_status1_attests(monkeypatch, make_store):
-    send = _Spy(ATTEST_TX)
-    monkeypatch.setattr(attest, "_send_attestation", send)  # must NOT be called
+    prep = _Spy(_prep())  # must NOT be called
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
     monkeypatch.setattr(attest, "_get_receipt", _Spy(_receipt(1, UID)))
     _seed(make_store, attest_status="sent", tx_hash=PAY_TX)
     with SessionLocal() as s:
@@ -366,7 +486,7 @@ def test_sent_reconcile_status1_attests(monkeypatch, make_store):
         s.commit()
     attest._reconcile_sent(object())
     assert _order("ordattest0000001") == ("attested", UID, ATTEST_TX)
-    assert send.count == 0
+    assert prep.count == 0 and bcast.count == 0
 
 
 def test_sent_reconcile_status0_fails(monkeypatch, make_store):
@@ -380,8 +500,10 @@ def test_sent_reconcile_status0_fails(monkeypatch, make_store):
 
 
 def test_sent_reconcile_not_found_fails_after_bounded_ticks(monkeypatch, make_store):
-    send = _Spy(ATTEST_TX)
-    monkeypatch.setattr(attest, "_send_attestation", send)
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
     monkeypatch.setattr(attest, "_get_receipt", _Spy(None))  # never found
     _seed(make_store, attest_status="sent")
     with SessionLocal() as s:
@@ -392,34 +514,45 @@ def test_sent_reconcile_not_found_fails_after_bounded_ticks(monkeypatch, make_st
         assert _attest_status("ordattest0000001") == "sent"  # still retrying
     attest._reconcile_sent(object())
     assert _attest_status("ordattest0000001") == "failed"
-    assert send.count == 0  # reconcile never re-sends
+    assert prep.count == 0 and bcast.count == 0  # reconcile never re-sends
 
 
 def test_chain_guard_refuses_wrong_chain(monkeypatch, make_store):
     _wire(monkeypatch, chain_id=1952)  # != ATTEST_CHAIN_ID (196)
-    send = _Spy(ATTEST_TX)
-    monkeypatch.setattr(attest, "_send_attestation", send)
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
     _seed(make_store)
     assert attest.attest_tick() == 0
-    assert send.count == 0  # nothing signed on a chain mismatch
+    assert prep.count == 0 and bcast.count == 0  # nothing signed on a chain mismatch
     assert _attest_status("ordattest0000001") == "pending"  # untouched
 
 
 def test_missing_buyer_or_tx_marks_failed(monkeypatch, make_store):
-    send = _Spy(ATTEST_TX)
-    monkeypatch.setattr(attest, "_send_attestation", send)
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
     sid, oid = _seed(make_store, from_addr=None)
     attest._attest_one(object(), oid, sid)
     assert _attest_status(oid) == "failed"
-    assert send.count == 0  # can't attest a receipt without a buyer
+    assert prep.count == 0 and bcast.count == 0  # can't attest without a buyer
 
 
 def test_gas_over_cap_leaves_pending(monkeypatch, make_store):
     _wire(monkeypatch)
-    monkeypatch.setattr(attest, "_send_attestation", _Spy(attest._GasTooHigh(10**18)))
+    # Gas is checked inside _prepare_attestation (before any broadcast) — a refusal
+    # leaves the row 'pending', never 'sending', so nothing is ever broadcast.
+    bcast = _Spy(None)
+    monkeypatch.setattr(
+        attest, "_prepare_attestation", _Spy(attest._GasTooHigh(10**18))
+    )
+    monkeypatch.setattr(attest, "_broadcast", bcast)
     _seed(make_store)
     attest.attest_tick()  # must not raise
     assert _attest_status("ordattest0000001") == "pending"  # retried later, not failed
+    assert bcast.count == 0
 
 
 def test_send_signed_refuses_over_gas_cap():
