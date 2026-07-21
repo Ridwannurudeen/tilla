@@ -391,6 +391,40 @@ def test_same_tx_for_second_order_is_409(make_store):
 
 
 @respx.mock
+def test_tx_against_canceled_order_rejected_and_transfer_stays_claimable(make_store):
+    # A released (canceled) or reorged order must never record a transfer, or a
+    # griefer could orphan a real buyer's payment (globally consuming the
+    # tx_hash+log_index via ProcessedTransfer) while delivering nothing.
+    # Regression for the M3 re-review money-safety hole.
+    _mk(make_store, "grief", "0x" + "b" * 40, delivery="GOODS")
+    pay_to = "0x" + "b" * 40
+    cid_dead, exp = _order("grief")
+    cid_real, _ = _order("grief")
+    # Kill the first order the way release_expired does, and make the real
+    # buyer's order share its amount (the collision a griefer engineers).
+    with SessionLocal() as s:
+        s.get(Order, cid_dead).status = "canceled"
+        s.get(Order, cid_real).expected_micro = exp
+        s.commit()
+    rpc = Rpc(head=200, receipts={TX1: _receipt([_log(pay_to, exp, TX1, 0, 100)], 100)})
+    rpc.install()
+
+    # Submitting the buyer's tx against the dead order is rejected and consumes
+    # nothing.
+    assert (
+        client.post(f"/api/checkout/{cid_dead}/tx", json={"tx_hash": TX1}).status_code
+        == 400
+    )
+    with SessionLocal() as s:
+        assert s.scalar(select(func.count()).select_from(ProcessedTransfer)) == 0
+    # The true owner can still claim the same transfer.
+    assert (
+        client.post(f"/api/checkout/{cid_real}/tx", json={"tx_hash": TX1}).status_code
+        == 200
+    )
+
+
+@respx.mock
 def test_concurrent_tx_commit_conflict_reconciles_not_500(make_store, monkeypatch):
     # Two identical /tx submissions race: both pass the in-session ProcessedTransfer
     # pre-check, then the loser trips uq_processed_tx_log at commit. The handler must

@@ -307,6 +307,11 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
     can still claim it."""
     if order.status in TERMINAL_DELIVERED or order.status == "refunded":
         return
+    if order.status in ("canceled", "reorged"):
+        # A released/reorged order is dead: never record a transfer against it,
+        # or a griefer could orphan a real buyer's payment (globally consuming
+        # its tx_hash+log_index via ProcessedTransfer) while delivering nothing.
+        raise TxVerificationError("order is no longer active")
     if order.status == "expired":
         # Same quarantine window the sweeper's _match_order enforces: a late tx can
         # only revive an expired order inside the window, never arbitrarily later.
