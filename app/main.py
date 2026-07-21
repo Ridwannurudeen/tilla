@@ -39,6 +39,7 @@ from app import (
     delivery,
     embed,
     external_feeds,
+    growth,
     mpp,
     subscriptions,
     webhooks,
@@ -172,6 +173,9 @@ app.include_router(subscriptions.router)
 app.include_router(external_feeds.router)
 app.include_router(embed.router)
 app.include_router(acp.router)
+# Phase 3 growth-kit: merchant-gated POST/GET /api/stores/{slug}/growth-kit. Additive,
+# no schema change, no fund-moving or external-posting code (persists to event_log).
+app.include_router(growth.router)
 
 
 @app.middleware("http")
