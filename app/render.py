@@ -12,6 +12,7 @@ from typing import Mapping
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from app import config, payment
 from app.config import PUBLIC_BASE_URL, THEMES_DIR
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{3,8}$")
@@ -97,6 +98,12 @@ def render(content: Mapping, addr: str, slug: str, theme: str = "original.html")
         "PRICE": str(content.get("price_usdt", 0)),
         "EMOJI": str(content.get("emoji", "🛍️")),
         "ADDR": addr,
+        # 18.3 checkout chain honesty: the canonical settlement chain the order is
+        # pinned to (v1 mints every order on X Layer 196), named explicitly on the
+        # page, plus the optional operator-configured bridge link (empty => absent).
+        "CHAIN_NAME": "X Layer",
+        "CHAIN_ID": payment.CANONICAL_CHAIN.chain_id,
+        "BRIDGE_URL": config.BRIDGE_URL,
         **_palette_ctx(content),
         **_seo_ctx(content, slug),
     }
