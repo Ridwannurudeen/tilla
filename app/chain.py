@@ -56,10 +56,13 @@ def block_number(cfg: ChainConfig, timeout: float | None = None) -> int:
     return int(_rpc(cfg, "eth_blockNumber", [], timeout), 16)
 
 
-def eth_call(to: str, data: str, timeout: float | None = None) -> str | None:
-    """Read-only contract call against the latest block. Returns the raw hex result
-    (or None). Time-boxed + sema-capped like every other RPC (ChainBusy on cap)."""
-    return _rpc("eth_call", [{"to": to, "data": data}, "latest"], timeout)
+def eth_call(
+    cfg: ChainConfig, to: str, data: str, timeout: float | None = None
+) -> str | None:
+    """Read-only contract call against the latest block of ``cfg``'s chain.
+    Returns the raw hex result (or None). Time-boxed + sema-capped like every
+    other RPC (ChainBusy on cap)."""
+    return _rpc(cfg, "eth_call", [{"to": to, "data": data}, "latest"], timeout)
 
 
 def pad_address(addr: str) -> str:

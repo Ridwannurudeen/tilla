@@ -21,7 +21,7 @@ import re
 import threading
 import time
 
-from app import chain, config
+from app import chain, config, payment
 from app.models import Product
 
 logger = logging.getLogger("tilla")
@@ -87,7 +87,9 @@ def verify_agent_owner(agent_id: int) -> str | None:
             return hit[0]
     data = config.ERC8004_OWNER_SELECTOR + f"{agent_id:064x}"
     try:
-        result = chain.eth_call(registry, data, timeout=config.RPC_TIMEOUT_REQUEST)
+        result = chain.eth_call(
+            payment.CANONICAL_CHAIN, registry, data, timeout=config.RPC_TIMEOUT_REQUEST
+        )
     except Exception:
         logger.exception("verify_agent_owner: eth_call failed for %s", agent_id)
         return None

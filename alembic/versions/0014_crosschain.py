@@ -34,7 +34,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0014_crosschain"
-down_revision: Union[str, None] = "0009_growth"
+down_revision: Union[str, None] = "0013_growth_agent"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
