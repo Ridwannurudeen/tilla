@@ -217,7 +217,16 @@ def _subscription_replay(ctx: dict, idem_key: str) -> dict | None:
     the terms signature), or None on a first submission. Prevents a replay from
     re-hitting the facilitator and minting a duplicate order + delivery."""
     with SessionLocal() as session:
-        order = session.scalar(select(Order).where(Order.x402_nonce == idem_key))
+        # Scope the replay lookup to this store: a terms-signature bound to store A
+        # must never replay against store B and hand over another store's goods.
+        # (Payer-binding within a single store remains a documented flag-flip
+        # blocker — see docs/spikes.md.)
+        order = session.scalar(
+            select(Order).where(
+                Order.x402_nonce == idem_key,
+                Order.store_id == ctx["store_id"],
+            )
+        )
         if order is None:
             return None
         body = _subscription_body(session, order, ctx)
@@ -249,7 +258,12 @@ def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
             session.flush()
         except IntegrityError:
             session.rollback()
-            existing = session.scalar(select(Order).where(Order.x402_nonce == idem_key))
+            existing = session.scalar(
+                select(Order).where(
+                    Order.x402_nonce == idem_key,
+                    Order.store_id == ctx["store_id"],
+                )
+            )
             if existing is None:
                 raise
             body = _subscription_body(session, existing, ctx)
