@@ -130,11 +130,25 @@ def _amount_taken(session: Session, pay_to: str, candidate: int, now: datetime) 
     return False
 
 
+def _current_head() -> int | None:
+    """Chain head at order creation, stored as a floor so a buyer-submitted txhash
+    can't credit a historical transfer. Best-effort: with the sweeper disabled
+    (tests) or on an RPC blip we store NULL and the floor is simply not enforced
+    for that order — exact-amount matching still guards the concurrent case."""
+    if not config.SWEEP_ENABLED:
+        return None
+    try:
+        return chain.block_number()
+    except (httpx.HTTPError, chain.ChainError, ValueError):
+        return None
+
+
 def create_order(session: Session, store: Store, product: Product) -> Order:
     """Insert a pending order with a unique per-address expected_micro. Redraws
     the offset on collision (app check) or IntegrityError (index backstop);
     raises AmountUnavailable after config.AMOUNT_ALLOC_RETRIES draws."""
     now = _now()
+    created_block = _current_head()
     for _ in range(config.AMOUNT_ALLOC_RETRIES):
         offset = random.randint(config.AMOUNT_OFFSET_MIN, config.AMOUNT_OFFSET_MAX)
         expected = product.price_micro + offset
@@ -148,6 +162,7 @@ def create_order(session: Session, store: Store, product: Product) -> Order:
             amount_micro=product.price_micro,
             expected_micro=expected,
             status="pending",
+            created_block=created_block,
             expires_at=now + timedelta(minutes=config.ORDER_TTL_MIN),
         )
         session.add(order)
@@ -282,11 +297,23 @@ def apply_transfer(
 # ------------------------------------------------------------ fast path
 def verify_txhash(session: Session, order: Order, tx_hash: str):
     """Verify a buyer-submitted txhash against the USDT0 contract and apply it.
-    Sums Transfer logs whose `to` is this order's pay_to; rejects a mismatched
-    contract/recipient/status, a not-found tx, and a transfer already consumed by
-    another order (409)."""
+    Credits the order ONLY when the tx's new USDT0 transfers to pay_to sum EXACTLY
+    to expected_micro (mirrors _match_order — no >= accumulation, no underpay
+    top-up), so an attacker can't farm a concurrent or historical inbound transfer
+    for free goods. Rejects a mismatched contract/recipient/status, a not-found tx,
+    a transfer mined below the order's creation floor, an out-of-quarantine expired
+    order, a non-exact total (400), and a transfer already consumed by another
+    order (409). A non-matching transfer is never recorded, so its true owner order
+    can still claim it."""
     if order.status in TERMINAL_DELIVERED or order.status == "refunded":
         return
+    if order.status == "expired":
+        # Same quarantine window the sweeper's _match_order enforces: a late tx can
+        # only revive an expired order inside the window, never arbitrarily later.
+        exp = _naive(order.expires_at) or _naive(order.created_at)
+        quarantine = timedelta(hours=config.QUARANTINE_HOURS)
+        if exp is None or exp + quarantine <= _now():
+            raise TxVerificationError("order expired past the payment window")
     receipt = chain.get_transaction_receipt(tx_hash)
     if receipt is None:
         raise TxVerificationError("transaction not found")
@@ -307,6 +334,10 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
             continue
         matched_any = True
         d = chain.decode_transfer_log(lg)
+        if order.created_block is not None and d["block_number"] < order.created_block:
+            # Mined before this order existed — a historical/M2-era transfer, never
+            # this order's payment. Reject so it can't be farmed for free goods.
+            raise TxVerificationError("transfer predates the order")
         pt = session.scalar(
             select(ProcessedTransfer).where(
                 ProcessedTransfer.tx_hash == d["tx_hash"],
@@ -324,6 +355,10 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
         raise TxVerificationError("no USDT0 transfer to this store in that transaction")
     if not new_logs:
         return  # everything already applied to this order
+    if total != order.expected_micro:
+        # Not the exact payable amount. Reject WITHOUT recording any transfer, so
+        # the transfer's true owner order can still consume it.
+        raise TxVerificationError("transfer amount does not match the exact total due")
 
     head = chain.block_number()
     for d in new_logs:
@@ -344,6 +379,40 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
         new_logs[0]["from"],
         tx_hash,
         head,
+    )
+
+
+# --------------------------------------------------------- reorg re-check
+def _receipt_still_valid(order: Order) -> bool:
+    """Re-fetch the receipt for a fast-path-ingested order and confirm the tx still
+    succeeds at the SAME block with a USDT0 transfer to pay_to. detected/late_paid
+    are only ever reached via the depth-0 fast path (the sweeper ingests at
+    safe_head and delivers immediately), so an order maturing from either state
+    must be re-checked against a reorg before it delivers."""
+    receipt = chain.get_transaction_receipt(order.tx_hash)
+    if receipt is None:
+        return False
+    if str(receipt.get("status", "")).lower() != "0x1":
+        return False
+    block_hex = receipt.get("blockNumber")
+    if block_hex is None or int(block_hex, 16) != order.block_number:
+        return False
+    want_to = chain.pad_address(order.pay_to).lower()
+    for lg in receipt.get("logs", []):
+        if (lg.get("address", "") or "").lower() != config.USDT0:
+            continue
+        topics = lg.get("topics", [])
+        if len(topics) < 3 or topics[0].lower() != config.TRANSFER_TOPIC:
+            continue
+        if topics[2].lower() == want_to:
+            return True
+    return False
+
+
+def _mark_reorged(session: Session, order: Order):
+    transition(session, order.id, ("detected", "late_paid"), "reorged")
+    log_event(
+        session, "checkout", "order.reorged", store_id=order.store_id, order_id=order.id
     )
 
 
@@ -376,6 +445,10 @@ def refresh_order(session: Session, order: Order):
             logger.warning("refresh_order: block_number unavailable for %s", order.id)
             return
         if order.block_number <= head - config.CONFIRMATIONS:
+            if not _receipt_still_valid(order):
+                _mark_reorged(session, order)
+                session.commit()
+                return
             if order.status == "detected":
                 over = (order.paid_micro or 0) - order.expected_micro
                 to_state = "overpaid" if over > 0 else "confirmed"
@@ -413,14 +486,42 @@ def _set_cursor(session: Session, block: int):
 
 def flip_expired(session: Session):
     now = _now()
-    for o in session.scalars(select(Order).where(Order.status == "pending")):
+    # 'underpaid' is included so a dust underpay can't pin the amount reservation
+    # and the merchant address into every getLogs call forever: it expires on
+    # expires_at like pending, then follows the normal quarantine/release path.
+    for o in session.scalars(
+        select(Order).where(Order.status.in_(("pending", "underpaid")))
+    ):
         exp = _naive(o.expires_at)
         if exp is None:  # legacy pre-M3 order: created_at + TTL, not instant expiry
             exp = _naive(o.created_at) + timedelta(minutes=config.ORDER_TTL_MIN)
         if now > exp:
-            transition(session, o.id, ("pending",), "expired")
+            transition(session, o.id, ("pending", "underpaid"), "expired")
             log_event(
                 session, "sweeper", "order.expired", store_id=o.store_id, order_id=o.id
+            )
+
+
+def release_expired(session: Session):
+    """Move expired orders past the quarantine window to a terminal status OUTSIDE
+    the unique-amount index predicate, so the reserved offset is actually released
+    for re-allocation. Without this the 24h quarantine is illusory: the expired row
+    keeps holding the index, every redraw of that amount IntegrityErrors, and each
+    abandoned checkout permanently burns one of the 4999 offsets per price point.
+    _match_order already refuses past-quarantine expired orders, so a late tx that
+    could still have matched is never lost."""
+    now = _now()
+    quarantine = timedelta(hours=config.QUARANTINE_HOURS)
+    for o in session.scalars(select(Order).where(Order.status == "expired")):
+        exp = _naive(o.expires_at) or _naive(o.created_at)
+        if exp is not None and exp + quarantine <= now:
+            transition(session, o.id, ("expired",), "canceled")
+            log_event(
+                session,
+                "sweeper",
+                "order.released",
+                store_id=o.store_id,
+                order_id=o.id,
             )
 
 
@@ -488,6 +589,9 @@ def _promote_matured(session: Session, head: int):
             Order.block_number <= threshold,
         )
     ).all():
+        if not _receipt_still_valid(o):
+            _mark_reorged(session, o)
+            continue
         over = (o.paid_micro or 0) - o.expected_micro
         transition(
             session, o.id, ("detected",), "overpaid" if over > 0 else "confirmed"
@@ -503,6 +607,9 @@ def _promote_matured(session: Session, head: int):
             Order.block_number <= threshold,
         )
     ).all():
+        if not _receipt_still_valid(o):
+            _mark_reorged(session, o)
+            continue
         deliver(session, o)
 
 
@@ -514,6 +621,7 @@ def sweep_tick():
     now = _now()
     with SessionLocal() as session:
         flip_expired(session)
+        release_expired(session)
         session.commit()
 
     head = chain.block_number()

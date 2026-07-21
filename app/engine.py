@@ -205,6 +205,10 @@ def create_store(desc, addr=None, delivery=None):
                 "amount_usdt": content.get("price_usdt", 0),
                 "pay_to": addr,
                 "delivery": store_delivery,
+                # Render inputs, so an import + re-render can rebuild index.html.
+                "description": desc,
+                "content": content,
+                "theme": DEFAULT_THEME,
             }
         (d / "store.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -220,7 +224,9 @@ def create_store(desc, addr=None, delivery=None):
                     pay_to=addr,
                     delivery=store_delivery,
                     description=desc,
-                    content=content if pending else None,
+                    # Persist content for LIVE stores too (not just pending), so a
+                    # later theme fix can re-render their static index.html.
+                    content=content,
                     theme=DEFAULT_THEME,
                 )
                 session.add(store)
@@ -312,6 +318,34 @@ def resume_pending():
             log_event(session, "resume", "store.live", store_id=store.id)
             session.commit()
             logger.info("resume_pending: %s screened clean, now live", store.slug)
+
+
+def rerender_stores() -> dict:
+    """Re-render index.html for every live store from its persisted content, so a
+    theme change (e.g. the exact-amount checkout row) reaches already-deployed
+    static pages instead of leaving them serving stale HTML. Idempotent; never
+    deletes. A live store with no persisted content is logged and skipped (never
+    fatal), mirroring resume_pending — such a store predates content persistence
+    and must be re-created or re-imported to recover its render inputs."""
+    rendered = skipped = 0
+    with SessionLocal() as session:
+        stores = session.scalars(select(Store).where(Store.status == "live")).all()
+        for store in stores:
+            content = store.content
+            if not isinstance(content, dict):
+                logger.warning(
+                    "rerender_stores: %s has no persisted content, skipping",
+                    store.slug,
+                )
+                skipped += 1
+                continue
+            d = STORES_DIR / store.slug
+            d.mkdir(parents=True, exist_ok=True)
+            html = render_theme(content, store.pay_to, store.slug, store.theme)
+            (d / "index.html").write_text(html, encoding="utf-8")
+            rendered += 1
+    logger.info("rerender_stores: rendered=%d skipped=%d", rendered, skipped)
+    return {"rendered": rendered, "skipped": skipped}
 
 
 def _mark_store_json_live(store_dir, slug):

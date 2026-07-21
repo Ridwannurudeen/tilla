@@ -124,6 +124,10 @@ class Order(Base):
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     from_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Chain head captured at order creation. A buyer-submitted txhash whose
+    # transfer is mined below this floor is a historical transfer, never this
+    # order's payment; NULL when the head was unavailable at creation time.
+    created_block: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow

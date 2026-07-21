@@ -96,10 +96,10 @@
       <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}} →</button>
       <div class="xlayer">Instant settlement in USDT on OKX X Layer · non-custodial</div>
       <div class="checkout" id="co">
-        <div class="row"><span>Amount</span><b>{{PRICE}} USDT</b></div>
+        <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
         <div class="row"><span>Network</span><b>X Layer (OKX)</b></div>
         <div class="row"><span>Pay to</span></div>
-        <div class="addr">{{ADDR}}</div>
+        <div class="addr" id="coAddr">{{ADDR}}</div>
         <div class="status" id="coStatus">⏳ Waiting for payment… (auto-verified on-chain)</div>
         <div class="status" id="coDelivery" style="display:none;color:var(--accent)"></div>
       </div>
@@ -112,6 +112,8 @@
       document.getElementById('buyBtn').disabled = true;
       let r = await fetch('/api/checkout/'+SLUG, {method:'POST'});
       let d = await r.json();
+      document.getElementById('coAmount').textContent = d.amount + ' USDT';
+      document.getElementById('coAddr').textContent = d.pay_to;
       poll(d.id);
     }
     async function poll(id){

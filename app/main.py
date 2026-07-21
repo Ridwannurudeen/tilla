@@ -20,6 +20,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
@@ -27,7 +28,7 @@ from app import chain, checkout, config
 from app.checkout import DEFAULT_DELIVERY
 from app.db import get_session
 from app.engine import create_store as gen_store
-from app.engine import resume_pending
+from app.engine import rerender_stores, resume_pending
 from app.models import Delivery, Order, Product, Store, log_event
 from app.screening import ScreeningBlocked
 
@@ -42,6 +43,10 @@ async def lifespan(app: FastAPI):
     # Retry any stores held in pending_screening from before this process
     # started, so a restart flips recovered ones live instead of stranding them.
     resume_pending()
+    # Re-render every live store's static index.html from its persisted content so
+    # a theme fix (e.g. the exact-amount checkout row) reaches already-deployed
+    # pages on the next restart, instead of leaving them serving stale HTML.
+    rerender_stores()
     # In-process, restart-safe payment sweeper. Disabled via TILLA_SWEEP_ENABLED=0
     # so the test suite never touches the network.
     sweeper = None
@@ -254,7 +259,16 @@ def submit_txhash(
         raise HTTPException(400, str(exc)) from exc
     except (httpx.HTTPError, chain.ChainError) as exc:
         raise HTTPException(502, "chain verification unavailable") from exc
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # Two concurrent identical /tx submissions both passed the in-session
+        # ProcessedTransfer pre-check; the loser trips uq_processed_tx_log at
+        # commit. No double-delivery (the unique constraint + idempotent deliver
+        # hold) — reconcile to the committed winner state instead of 500ing.
+        session.rollback()
+        session.expire(order)
+        return _order_response(session, order)
     session.expire(order)
     return _order_response(session, order)
 

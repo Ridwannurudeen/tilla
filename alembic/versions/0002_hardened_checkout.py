@@ -47,12 +47,26 @@ def upgrade() -> None:
         )
         batch_op.add_column(sa.Column("from_addr", sa.String(length=42), nullable=True))
         batch_op.add_column(sa.Column("block_number", sa.Integer(), nullable=True))
+        batch_op.add_column(sa.Column("created_block", sa.Integer(), nullable=True))
         batch_op.alter_column(
             "baseline_micro", existing_type=sa.Integer(), nullable=True
         )
 
     # Legacy orders keep exact-price matching: expected == price (offset 0).
     op.execute("UPDATE orders SET expected_micro = amount_micro")
+
+    # M2 had no unique-amount offset and no expiry, so a real DB can hold several
+    # stale pending orders sharing one (pay_to, amount_micro). After the backfill
+    # above they collide on the partial unique index below and abort the upgrade.
+    # Park every duplicate pending (keep one per group) in a terminal status that
+    # sits OUTSIDE the index predicate so the index builds cleanly.
+    op.execute(
+        "UPDATE orders SET status = 'canceled' "
+        "WHERE status = 'pending' AND id NOT IN ("
+        "  SELECT MIN(id) FROM orders WHERE status = 'pending' "
+        "  GROUP BY pay_to, expected_micro"
+        ")"
+    )
 
     op.create_index(
         "ux_orders_active_amount",
@@ -99,10 +113,14 @@ def downgrade() -> None:
     op.drop_index("ix_processed_transfers_order_id", table_name="processed_transfers")
     op.drop_table("processed_transfers")
     op.drop_index("ux_orders_active_amount", table_name="orders")
+    # M3 code leaves baseline_micro NULL (it is legacy balance-delta state). Backfill
+    # before restoring NOT NULL, or the batch table-rebuild fails on any M3 row.
+    op.execute("UPDATE orders SET baseline_micro = 0 WHERE baseline_micro IS NULL")
     with op.batch_alter_table("orders", schema=None) as batch_op:
         batch_op.alter_column(
             "baseline_micro", existing_type=sa.Integer(), nullable=False
         )
+        batch_op.drop_column("created_block")
         batch_op.drop_column("block_number")
         batch_op.drop_column("from_addr")
         batch_op.drop_column("overpaid_micro")

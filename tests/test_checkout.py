@@ -217,7 +217,10 @@ def test_sweeper_windows_never_exceed_101_blocks(make_store):
 
 # ------------------------------------------------------- txhash fast path
 @respx.mock
-def test_underpay_then_topup_then_confirmed(make_store):
+def test_partial_txhash_rejected_and_leaves_transfer_claimable(make_store):
+    # The buyer path is exact-only: a partial credits nothing, records no transfer
+    # (so its true owner order can still claim it), and does not move the order. A
+    # later exact payment confirms.
     _mk(make_store, "up", "0x" + "2" * 40, delivery="UP-DELIV")
     pay_to = "0x" + "2" * 40
     cid, exp = _order("up")
@@ -226,17 +229,17 @@ def test_underpay_then_topup_then_confirmed(make_store):
         head=200,
         receipts={
             TX1: _receipt([_log(pay_to, partial, TX1, 0, 100)], 100),
-            TX2: _receipt([_log(pay_to, 1_000, TX2, 0, 101)], 101),
+            TX2: _receipt([_log(pay_to, exp, TX2, 0, 101)], 101),
         },
     )
     rpc.install()
 
     r1 = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
-    assert r1.status_code == 200 and r1.json()["status"] == "underpaid"
-    # resubmitting the same tx must not double-count
-    client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
+    assert r1.status_code == 400  # partial: not the exact total due
     with SessionLocal() as s:
-        assert s.get(Order, cid).paid_micro == partial
+        assert s.scalar(select(func.count()).select_from(ProcessedTransfer)) == 0
+        o = s.get(Order, cid)
+        assert o.status == "pending" and o.paid_micro == 0
 
     r2 = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX2})
     assert r2.status_code == 200 and r2.json()["status"] == "paid"
@@ -244,7 +247,10 @@ def test_underpay_then_topup_then_confirmed(make_store):
 
 
 @respx.mock
-def test_overpay_records_overage_and_delivers(make_store):
+def test_overpay_rejected_on_fast_path(make_store):
+    # A non-exact total (here an overpay) is not credited on the buyer path — it
+    # mirrors the sweeper, which never matches a value != expected_micro. The
+    # transfer is left unrecorded for support/sweeper handling.
     _mk(make_store, "ov", "0x" + "3" * 40)
     pay_to = "0x" + "3" * 40
     cid, exp = _order("ov")
@@ -255,11 +261,60 @@ def test_overpay_records_overage_and_delivers(make_store):
     rpc.install()
 
     r = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
-    assert r.status_code == 200 and r.json()["status"] == "paid"
+    assert r.status_code == 400
     with SessionLocal() as s:
-        o = s.get(Order, cid)
-        assert o.overpaid_micro == 5_000
-        assert o.status == "delivered"
+        assert s.scalar(select(func.count()).select_from(ProcessedTransfer)) == 0
+        assert s.get(Order, cid).status == "pending"
+
+
+@respx.mock
+def test_txhash_below_created_block_is_rejected(make_store):
+    # A transfer mined before the order's creation floor is historical, never this
+    # order's payment — the fast path must refuse it without recording it.
+    _mk(make_store, "floor", "0x" + "2" * 39 + "a")
+    pay_to = "0x" + "2" * 39 + "a"
+    cid, exp = _order("floor")
+    with SessionLocal() as s:
+        s.get(Order, cid).created_block = 500  # order created at chain head 500
+        s.commit()
+    rpc = Rpc(
+        head=600,
+        receipts={
+            TX1: _receipt([_log(pay_to, exp, TX1, 0, 100)], 100),  # below the floor
+            TX2: _receipt([_log(pay_to, exp, TX2, 0, 500)], 500),  # at the floor
+        },
+    )
+    rpc.install()
+
+    r1 = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
+    assert r1.status_code == 400
+    with SessionLocal() as s:
+        assert s.scalar(select(func.count()).select_from(ProcessedTransfer)) == 0
+        assert s.get(Order, cid).status == "pending"
+
+    r2 = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX2})
+    assert r2.status_code == 200 and r2.json()["status"] == "paid"
+
+
+@respx.mock
+def test_fast_path_reorg_marks_reorged_not_delivered(make_store):
+    # A depth-0 fast-path order must re-verify its receipt at maturation; a tx that
+    # reorged to a different block is parked 'reorged', never delivered by block
+    # arithmetic alone.
+    _mk(make_store, "reorg", "0x" + "3" * 39 + "a")
+    pay_to = "0x" + "3" * 39 + "a"
+    cid, exp = _order("reorg")
+    rpc = Rpc(head=100, receipts={TX1: _receipt([_log(pay_to, exp, TX1, 0, 99)], 99)})
+    rpc.install()
+
+    r = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
+    assert r.json()["status"] == "detected"  # depth 1 < CONFIRMATIONS
+
+    rpc.head = 200  # past the confirmation window, but the tx re-mined elsewhere
+    rpc.receipts[TX1] = _receipt([_log(pay_to, exp, TX1, 0, 105)], 105)
+    assert _status(cid) == "reorged"
+    with SessionLocal() as s:
+        assert s.get(Order, cid).status == "reorged"
 
 
 @respx.mock
@@ -335,6 +390,59 @@ def test_same_tx_for_second_order_is_409(make_store):
     )
 
 
+@respx.mock
+def test_concurrent_tx_commit_conflict_reconciles_not_500(make_store, monkeypatch):
+    # Two identical /tx submissions race: both pass the in-session ProcessedTransfer
+    # pre-check, then the loser trips uq_processed_tx_log at commit. The handler must
+    # reconcile to the winner's committed state (200), never surface a 500 — and
+    # there is still exactly one transfer and one delivery. Reproduced single-thread
+    # by committing the winner in the window between verify_txhash and the commit.
+    _mk(make_store, "conc", "0x" + "9" * 39 + "a", delivery="CONC")
+    pay_to = "0x" + "9" * 39 + "a"
+    cid, exp = _order("conc")
+    rpc = Rpc(head=200, receipts={TX1: _receipt([_log(pay_to, exp, TX1, 0, 100)], 100)})
+    rpc.install()
+
+    def racing_verify(session, order, tx_hash):
+        # This request buffers its transfer (no flush, so it holds no write lock)…
+        session.add(
+            ProcessedTransfer(
+                tx_hash=tx_hash,
+                log_index=0,
+                order_id=order.id,
+                pay_to=order.pay_to,
+                from_addr=FROM,
+                amount_micro=exp,
+                block_number=100,
+                seen_at=checkout._now(),
+            )
+        )
+        # …then the concurrent winner commits the same transfer first, so this
+        # request's commit will trip uq_processed_tx_log.
+        with SessionLocal() as other:
+            checkout.apply_transfer(
+                other, other.get(Order, order.id), exp, tx_hash, 0, 100, FROM, 200
+            )
+            other.commit()
+
+    monkeypatch.setattr(checkout, "verify_txhash", racing_verify)
+
+    r = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
+    assert r.status_code == 200  # reconciled to the winner, not a 500
+    assert r.json()["status"] == "paid" and r.json()["delivery"] == "CONC"
+    with SessionLocal() as s:
+        assert s.scalar(select(func.count()).select_from(ProcessedTransfer)) == 1
+        assert (
+            s.scalar(
+                select(func.count())
+                .select_from(Delivery)
+                .where(Delivery.order_id == cid)
+            )
+            == 1
+        )
+        assert s.get(Order, cid).status == "delivered"
+
+
 # --------------------------------------------------- expiry / quarantine
 def test_expiry_flip_via_poll(make_store):
     _mk(make_store, "exp", "0x" + "9" * 40)
@@ -384,6 +492,101 @@ def test_late_payment_honored_within_quarantine(make_store):
         o = s.get(Order, cid)
         assert o.status == "delivered"  # expired -> late_paid -> delivered
     assert client.get(f"/api/checkout/{cid}").json()["delivery"] == "LATE-OK"
+
+
+@respx.mock
+def test_expired_within_quarantine_credits_on_fast_path(make_store):
+    _mk(make_store, "eqok", "0x" + "1" * 39 + "a", delivery="LATE-FAST")
+    pay_to = "0x" + "1" * 39 + "a"
+    cid, exp = _order("eqok")
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        o.status = "expired"
+        o.expires_at = checkout._now() - timedelta(minutes=1)  # within quarantine
+        s.commit()
+    rpc = Rpc(head=200, receipts={TX1: _receipt([_log(pay_to, exp, TX1, 0, 150)], 150)})
+    rpc.install()
+
+    r = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
+    assert r.status_code == 200 and r.json()["status"] == "paid"
+    assert r.json()["delivery"] == "LATE-FAST"
+
+
+@respx.mock
+def test_expired_past_quarantine_rejected_on_fast_path(make_store):
+    _mk(make_store, "eqno", "0x" + "1" * 39 + "b")
+    pay_to = "0x" + "1" * 39 + "b"
+    cid, exp = _order("eqno")
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        o.status = "expired"
+        o.expires_at = checkout._now() - timedelta(
+            hours=config.QUARANTINE_HOURS, minutes=5
+        )
+        s.commit()
+    rpc = Rpc(head=200, receipts={TX1: _receipt([_log(pay_to, exp, TX1, 0, 150)], 150)})
+    rpc.install()
+
+    r = client.post(f"/api/checkout/{cid}/tx", json={"tx_hash": TX1})
+    assert r.status_code == 400  # past quarantine: the fast path refuses to revive it
+    with SessionLocal() as s:
+        assert s.get(Order, cid).status == "expired"
+        assert s.scalar(select(func.count()).select_from(ProcessedTransfer)) == 0
+
+
+def test_expired_amount_released_after_quarantine(make_store):
+    # Past-quarantine expired orders leave the unique-amount index so the burned
+    # offset is genuinely re-allocatable — the quarantine release is real, not
+    # illusory (the amount was previously pinned by the index forever).
+    store_id = make_store(slug="rel", pay_to="0x" + "a" * 38 + "cd")
+    pay_to = "0x" + "a" * 38 + "cd"
+    cid, exp = _order("rel")
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        o.status = "expired"
+        o.expires_at = checkout._now() - timedelta(
+            hours=config.QUARANTINE_HOURS, minutes=5
+        )
+        s.commit()
+
+    with SessionLocal() as s:
+        checkout.release_expired(s)
+        s.commit()
+
+    with SessionLocal() as s:
+        assert s.get(Order, cid).status == "canceled"
+        # the amount is now free: a fresh active order on the same (pay_to, amount)
+        # no longer trips the partial unique index
+        s.add(
+            Order(
+                id="reused0000000001",
+                store_id=store_id,
+                pay_to=pay_to,
+                amount_micro=exp,
+                expected_micro=exp,
+                status="pending",
+                expires_at=checkout._now() + timedelta(minutes=30),
+            )
+        )
+        s.commit()  # must not raise IntegrityError
+        assert s.get(Order, "reused0000000001").status == "pending"
+
+
+def test_underpaid_order_expires_via_sweeper(make_store):
+    # A stuck underpaid order (e.g. legacy data) must not pin its amount/address
+    # forever: flip_expired expires it on expires_at like pending.
+    make_store(slug="undr", pay_to="0x" + "b" * 39 + "a")
+    cid, exp = _order("undr")
+    with SessionLocal() as s:
+        o = s.get(Order, cid)
+        o.status = "underpaid"
+        o.expires_at = checkout._now() - timedelta(minutes=1)
+        s.commit()
+    with SessionLocal() as s:
+        checkout.flip_expired(s)
+        s.commit()
+    with SessionLocal() as s:
+        assert s.get(Order, cid).status == "expired"
 
 
 # ------------------------------------------------------ delivery race fix

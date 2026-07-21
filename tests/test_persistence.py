@@ -152,6 +152,80 @@ def test_migration_0002_backfills_and_reverses(tmp_path):
     con.close()
 
 
+def test_migration_0002_dedupes_duplicate_pendings(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "dup.db"
+    r = _alembic(db, "upgrade", "0001_persistence_core")
+    assert r.returncode == 0, r.stderr
+
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    # M2 had no unique-amount offset: two pending orders share (pay_to, amount) and
+    # would collide on the partial unique index the migration builds.
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, baseline_micro, status,"
+        " created_at) VALUES ('dup1',1,'0xabc',9000000,0,'pending','2026')"
+    )
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, baseline_micro, status,"
+        " created_at) VALUES ('dup2',1,'0xabc',9000000,0,'pending','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr  # index build must not fail on the duplicate
+
+    con = sqlite3.connect(db)
+    statuses = sorted(row[0] for row in con.execute("SELECT status FROM orders"))
+    # exactly one kept pending, the other parked outside the index predicate
+    assert statuses == ["canceled", "pending"]
+    con.close()
+
+
+def test_migration_0002_downgrade_backfills_null_baseline(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "nullbase.db"
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    # an M3 order leaves baseline_micro NULL, as the live app now does
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, expected_micro,"
+        " paid_micro, overpaid_micro, baseline_micro, status, created_at)"
+        " VALUES ('m3ord',1,'0xabc',9000000,9000123,0,0,NULL,'pending','2026')"
+    )
+    con.commit()
+    con.close()
+
+    # downgrade restores baseline_micro NOT NULL; without the backfill it aborts
+    r = _alembic(db, "downgrade", "0001_persistence_core")
+    assert r.returncode == 0, r.stderr
+
+    con = sqlite3.connect(db)
+    val = con.execute("SELECT baseline_micro FROM orders WHERE id='m3ord'").fetchone()[
+        0
+    ]
+    assert val == 0  # NULL backfilled before the NOT NULL restore
+    con.close()
+
+
 # ---------- model CRUD ----------
 def test_model_crud_roundtrip():
     addr_mixed = "0x" + "Ab" * 20

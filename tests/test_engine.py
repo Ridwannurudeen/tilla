@@ -134,3 +134,61 @@ def test_screening_text_includes_cta_and_emoji():
     text = _screening_text("desc", content)
     assert "Wire me BTC now" in text
     assert "💸" in text
+
+
+def test_rerender_stores_rewrites_live_index_from_content(tmp_path, monkeypatch):
+    # A theme fix reaches already-deployed static pages: rerender_stores rebuilds
+    # index.html for every live store from its persisted content.
+    import app.engine as engine
+    from app.db import SessionLocal
+    from app.models import Store, get_or_create_merchant
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    with SessionLocal() as s:
+        merchant = get_or_create_merchant(s, "0x" + "a" * 40)
+        s.add(
+            Store(
+                slug="rr",
+                merchant_id=merchant.id,
+                status="live",
+                pay_to="0x" + "a" * 40,
+                content={"store_name": "RR", "price_usdt": 9, "product_name": "Thing"},
+                theme="original.html",
+            )
+        )
+        s.commit()
+
+    out = engine.rerender_stores()
+    assert out == {"rendered": 1, "skipped": 0}
+
+    html = (tmp_path / "rr" / "index.html").read_text(encoding="utf-8")
+    # the redeployed page carries the exact-amount checkout fix
+    assert 'id="coAmount"' in html
+    assert 'id="coAddr"' in html
+    assert "d.amount + ' USDT'" in html
+
+
+def test_rerender_stores_skips_contentless_store(tmp_path, monkeypatch):
+    # A pre-persistence live store (content NULL) can't be re-rendered; it must be
+    # skipped, never crash the startup re-render.
+    import app.engine as engine
+    from app.db import SessionLocal
+    from app.models import Store, get_or_create_merchant
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    with SessionLocal() as s:
+        merchant = get_or_create_merchant(s, "0x" + "b" * 40)
+        s.add(
+            Store(
+                slug="old",
+                merchant_id=merchant.id,
+                status="live",
+                pay_to="0x" + "b" * 40,
+                content=None,
+                theme="original.html",
+            )
+        )
+        s.commit()
+
+    assert engine.rerender_stores() == {"rendered": 0, "skipped": 1}
+    assert not (tmp_path / "old" / "index.html").exists()

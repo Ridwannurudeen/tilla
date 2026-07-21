@@ -197,7 +197,7 @@ def test_create_store_live_when_screening_allows(tmp_path, monkeypatch):
     slug = r.json()["slug"]
     slug_dir = tmp_path / slug
     assert (slug_dir / "index.html").exists()
-    meta = json.loads((slug_dir / "store.json").read_text())
+    meta = json.loads((slug_dir / "store.json").read_text(encoding="utf-8"))
     assert meta["status"] == "live"
 
 
