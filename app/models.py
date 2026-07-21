@@ -716,7 +716,8 @@ class GrowthDraft(Base):
     __tablename__ = "growth_drafts"
     __table_args__ = (
         CheckConstraint(
-            "channel IN ('social','email_subject','launch_tweet')",
+            "channel IN ('social','email_subject','launch_tweet',"
+            "'email_body','product_update')",
             name="ck_growth_drafts_channel",
         ),
         CheckConstraint(

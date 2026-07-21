@@ -668,3 +668,167 @@ def screen_and_store_scheduled(
         )
     )
     return "allow"
+
+
+# ================================================= multi-channel draft shapes (M17.4)
+# Two richer on-demand channels — a full email_body (subject + plain-text body) and a
+# product_update blurb — through the EXACT generate → screen → outbox pipeline as the
+# kit. Still nothing sends (INV-1). XSS-safe by construction: the shapes forbid HTML
+# ('<'/'>') at validation, so an LLM that emits a tag folds into GenerationUnavailable
+# → 503 (never a persisted draft), and the copy is only ever emitted as JSON.
+
+
+def _reject_html(v: str) -> str:
+    if "<" in v or ">" in v:
+        raise ValueError("HTML markup is not allowed")
+    return v
+
+
+class EmailBody(BaseModel):
+    """A full marketing email: a subject line + a plain-text body, no HTML."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: Annotated[str, Field(min_length=1, max_length=78)]
+    body: Annotated[str, Field(min_length=1, max_length=2000)]
+
+    _no_html = field_validator("subject", "body")(_reject_html)
+
+
+class ProductUpdate(BaseModel):
+    """A short product-update blurb, no HTML."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    blurb: Annotated[str, Field(min_length=1, max_length=500)]
+
+    _no_html = field_validator("blurb")(_reject_html)
+
+
+# The on-demand channels 17.4 adds (kit channels stay on the kit endpoint).
+_CHANNEL_INSTRUCTIONS = {
+    "email_body": (
+        "Output ONLY valid JSON (no markdown) with EXACTLY these keys: subject (an "
+        "email subject line, at most 78 characters) and body (the plain-text email "
+        "body, at most 2000 characters). Plain text ONLY — absolutely no HTML tags."
+    ),
+    "product_update": (
+        "Output ONLY valid JSON (no markdown) with EXACTLY this key: blurb (a short "
+        "product-update announcement, at most 500 characters). Plain text ONLY — "
+        "absolutely no HTML tags."
+    ),
+}
+
+
+def _channel_prompt(store: Store, slug: str, channel: str) -> str:
+    """Build a channel-specific prompt from the persisted, already-screened store
+    content only — the same injection-safe surface as ``_build_prompt``."""
+    c = _content(store)
+    url = f"{config.PUBLIC_BASE_URL.rstrip('/')}/s/{slug}/"
+    return (
+        "You are a growth marketer writing launch copy for a solo merchant's "
+        "one-product storefront. Using ONLY the store details below, write the "
+        "requested piece.\n\n"
+        f"Store name: {c.get('store_name', '')}\n"
+        f"Tagline: {c.get('tagline', '')}\n"
+        f"Headline: {c.get('hero_headline', '')}\n"
+        f"Subcopy: {c.get('hero_subcopy', '')}\n"
+        f"Product: {c.get('product_name', '')}\n"
+        f"Product description: {c.get('product_blurb', '')}\n"
+        f"Price: {c.get('price_usdt', '')} USDT\n"
+        f"Store URL: {url}\n\n" + _CHANNEL_INSTRUCTIONS[channel]
+    )
+
+
+def _generate_channel(channel: str, prompt: str) -> tuple[str, int, int]:
+    """Generate + validate one channel's draft. Any outage, malformed body, schema/
+    length violation, or HTML in the output raises GenerationUnavailable (→ 503) —
+    never a partial or unsafe draft. Returns the draft body text + token counts."""
+    resp = engine._post_generation(prompt)
+    try:
+        text = resp["content"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise GenerationUnavailable("growth LLM returned an unexpected shape") from exc
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise GenerationUnavailable("growth LLM did not return JSON: " + text[:200])
+    try:
+        raw = json.loads(m.group(0))
+        if channel == "email_body":
+            model = EmailBody.model_validate(raw)
+            body = f"{model.subject}\n\n{model.body}"
+        else:
+            body = ProductUpdate.model_validate(raw).blurb
+    except (json.JSONDecodeError, ValidationError) as exc:
+        raise GenerationUnavailable(
+            f"growth LLM returned unusable JSON: {exc}"
+        ) from exc
+    usage = resp.get("usage") or {}
+    return (
+        body,
+        int(usage.get("input_tokens", 0) or 0),
+        int(usage.get("output_tokens", 0) or 0),
+    )
+
+
+class ChannelDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel: Literal["email_body", "product_update"]
+
+
+@router.post("/api/stores/{slug}/growth/draft")
+@limiter.limit("6/hour")
+def growth_channel_draft(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    payload: ChannelDraftRequest = Body(...),
+    session: Session = Depends(get_session),
+):
+    """Generate one multi-channel draft (email_body | product_update) from the store's
+    persisted content, screen it fail-closed, and queue it in the outbox. Merchant-
+    gated, 6/hour, re-screened (BLOCK → 422, unavailable → 503). Sends nothing."""
+    store = _load_owned_live_store(request, slug, session)
+    channel = payload.channel
+    try:
+        body, _llm_in, _llm_out = _generate_channel(
+            channel, _channel_prompt(store, slug, channel)
+        )
+    except GenerationUnavailable as exc:
+        raise HTTPException(
+            503,
+            "growth draft generation temporarily unavailable — retry shortly",
+            headers={"Retry-After": "60"},
+        ) from exc
+    try:
+        outcome = screening.screen(body)
+    except screening.ScreeningBlocked as exc:
+        raise HTTPException(
+            422, "generated draft did not pass safety screening"
+        ) from exc
+    if outcome.status != "allow":
+        raise HTTPException(
+            503,
+            "content screening temporarily unavailable — retry shortly",
+            headers={"Retry-After": "60"},
+        )
+    draft = GrowthDraft(
+        store_id=store.id,
+        channel=channel,
+        body=body,
+        source="manual",
+        status="pending",
+        content_sha256=hashlib.sha256(body.encode()).hexdigest(),
+        screening_status="allow",
+    )
+    session.add(draft)
+    log_event(
+        session,
+        "growth",
+        "growth.channel_draft_generated",
+        store_id=store.id,
+        data={"channel": channel},
+    )
+    session.commit()
+    session.refresh(draft)
+    return JSONResponse(_draft_view(draft), headers=_KIT_HEADERS)
