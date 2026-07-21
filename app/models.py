@@ -139,6 +139,11 @@ class Order(Base):
         ),
         # Buyer library lookup: orders for a given on-chain payer wallet.
         Index("ix_orders_from_addr", "from_addr"),
+        # M13 affiliate attribution: orders carrying a referring agent's payout
+        # wallet (first-write-wins, immutable after creation). The dashboard/summary
+        # aggregates accruals, not this column, but the index keeps referrer lookups
+        # cheap; SQLite allows unlimited NULLs, so unreferred orders are unaffected.
+        Index("ix_orders_referrer_addr", "referrer_addr"),
         # x402 agent buys: the EIP-3009 authorization nonce is the idempotency /
         # replay key. UNIQUE dedupes order creation; SQLite allows unlimited NULLs
         # here, so human (web) orders — which never set it — are unaffected.
@@ -186,6 +191,11 @@ class Order(Base):
     x402_nonce: Mapped[str | None] = mapped_column(String(66), nullable=True)
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     from_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # M13 affiliate attribution: the referring agent's payout wallet, captured at
+    # order creation (first-write-wins, immutable afterwards). Lowercased + zero-
+    # address-rejected at every capture path. NULL for unreferred orders (every
+    # pre-M13 order), so the accrual ledger is only ever written for referred sales.
+    referrer_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Chain head captured at order creation. A buyer-submitted txhash whose
     # transfer is mined below this floor is a historical transfer, never this
@@ -513,6 +523,134 @@ class WebhookDelivery(Base):
         DateTime, nullable=False, default=_utcnow
     )
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AffiliatePayout(Base):
+    """One verified on-chain USDT0 payout the merchant/operator sent to a referring
+    agent from their OWN wallet (non-custodial). Tilla NEVER moves funds — this row
+    is verify-and-record only, byte-identical philosophy to the M9 Refund table.
+    UNIQUE(tx_hash, log_index) makes one on-chain transfer creditable to a single
+    payout ever (the ProcessedTransfer/Refund pattern), so a resubmit is a no-op and
+    a tx already consumed by a refund/payout 409s."""
+
+    __tablename__ = "affiliate_payouts"
+    __table_args__ = (
+        UniqueConstraint("tx_hash", "log_index", name="uq_affiliate_payouts_tx_log"),
+        Index("ix_affiliate_payouts_referrer", "referrer_addr"),
+        Index("ix_affiliate_payouts_merchant", "merchant_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), nullable=False)
+    referrer_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    tx_hash: Mapped[str] = mapped_column(String(66), nullable=False)
+    log_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    block_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
+class AffiliateAccrual(Base):
+    """One rev-share ledger row per referred, settled/delivered order. A pure DB
+    number — no code can turn it into a fund movement. UNIQUE(order_id) makes accrual
+    idempotent under the deliver()/record_settlement() begin_nested pattern (the
+    Entitlement precedent). ``status`` walks accrued -> void (a full M9 refund voids
+    it) or accrued -> paid (a verified on-chain payout covers it)."""
+
+    __tablename__ = "affiliate_accruals"
+    __table_args__ = (
+        UniqueConstraint("order_id", name="uq_affiliate_accruals_order_id"),
+        CheckConstraint(
+            "status IN ('accrued','void','paid')",
+            name="ck_affiliate_accruals_status",
+        ),
+        Index("ix_affiliate_accruals_referrer", "referrer_addr"),
+        Index("ix_affiliate_accruals_merchant_status", "merchant_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), nullable=False)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), nullable=False)
+    referrer_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    basis_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    rate_bps: Mapped[int] = mapped_column(Integer, nullable=False)
+    accrued_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="accrued", server_default="accrued"
+    )
+    payout_id: Mapped[int | None] = mapped_column(
+        ForeignKey("affiliate_payouts.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
+class EmailSubscriber(Base):
+    """One store-level email subscriber. Captured via the public waitlist endpoint
+    (source='waitlist') or a buyer checkout (source='checkout'). UNIQUE(store_id,
+    email) makes a duplicate a silent no-op (no membership oracle). PII: emails never
+    appear in feeds, discovery, logs, or any unauthenticated response — only behind
+    the merchant IDOR gate. ``removed_at`` soft-deletes on a removal request while
+    keeping the unique slot honest."""
+
+    __tablename__ = "email_subscribers"
+    __table_args__ = (
+        UniqueConstraint("store_id", "email", name="uq_email_subscribers_store_email"),
+        CheckConstraint(
+            "source IN ('checkout','waitlist')",
+            name="ck_email_subscribers_source",
+        ),
+        Index("ix_email_subscribers_store_id", "store_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default="waitlist")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AcpSession(Base):
+    """One ACP (Agentic Commerce Protocol) checkout session wrapping the proven M3
+    order machinery. The high-entropy id is the bearer handle. UNIQUE(store_id,
+    idempotency_key) honors the ACP Idempotency-Key replay requirement per store (no
+    cross-tenant replay). ``order_id`` is set once a payable order is allocated."""
+
+    __tablename__ = "acp_sessions"
+    __table_args__ = (
+        UniqueConstraint("order_id", name="uq_acp_sessions_order_id"),
+        UniqueConstraint(
+            "store_id", "idempotency_key", name="uq_acp_sessions_store_idem"
+        ),
+        CheckConstraint(
+            "status IN "
+            "('not_ready_for_payment','ready_for_payment','completed','canceled')",
+            name="ck_acp_sessions_status",
+        ),
+        Index("ix_acp_sessions_store_id", "store_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    order_id: Mapped[str | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    buyer: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    items: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    api_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
 
 
 class EventLog(Base):

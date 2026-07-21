@@ -228,6 +228,25 @@ ATTEST_MAX_PER_TICK = int(os.environ.get("TILLA_ATTEST_MAX_PER_TICK", "5"))
 # attest), so ordinary operation never trips it but a fee spike is refused.
 TILLA_ATTEST_MAX_GAS_WEI = int(os.environ.get("TILLA_ATTEST_MAX_GAS_WEI", str(10**16)))
 
+# ---------- M13 growth: affiliates, external feeds, embeds, ACP checkout -------
+# Affiliate rev-share basis points on the settled sale amount, written as a pure DB
+# ledger row at the delivered seam. Default 200 = 2%. Accrual is a NUMBER ONLY: no
+# fund-moving code exists — a payout is a manual on-chain USDT0 send the operator
+# makes from their own wallet, then verify-and-recorded (the M9 refund pattern).
+TILLA_AFFILIATE_BPS = int(os.environ.get("TILLA_AFFILIATE_BPS", "200"))
+# ACP (Agentic Commerce Protocol) /checkout_sessions surface. Mounted DORMANT: every
+# endpoint 503s until the flag flips (the MPP/subscriptions dormant-mount pattern),
+# so the new surface can be smoke-tested before exposure. Flipped ON in the VPS .env
+# only after a live smoke of the tx-hash complete path.
+ACP_ENABLED = _flag("TILLA_ACP_ENABLED")
+# Optional HMAC request-signature secret. When set, ACP requests must carry a valid
+# signature header; when empty (the default) signature verification is skipped and
+# the surface relies on the same rate-limited public-allocator exposure as /checkout.
+TILLA_ACP_SIGNING_SECRET = os.environ.get("TILLA_ACP_SIGNING_SECRET", "")
+# Per-store subscriber row cap: the waitlist endpoint 429s once a store holds this
+# many active subscribers (abuse bound, alongside the tightest slowapi limiter).
+TILLA_SUBSCRIBERS_MAX = int(os.environ.get("TILLA_SUBSCRIBERS_MAX", "5000"))
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
 
