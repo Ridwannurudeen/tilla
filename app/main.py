@@ -199,7 +199,15 @@ class TxBody(BaseModel):
         return v.lower()
 
 
-def _order_response(session: Session, order: Order) -> dict:
+# The neutral message the UNAUTH poll returns in place of an entitlement-backed
+# order's real delivery payload (which IS the license key / text secret): the
+# buyer signs with their purchase wallet to claim the goods via /api/library.
+CLAIM_DELIVERY_MESSAGE = "Paid — sign with your purchase wallet to claim your delivery."
+
+
+def _order_response(
+    session: Session, order: Order, include_gated: bool = False
+) -> dict:
     # Surface terminal (delivered / legacy paid) as "paid" so every already-
     # rendered store's poll (`d.status === 'paid'`) keeps working unchanged.
     terminal = order.status in checkout.TERMINAL_DELIVERED
@@ -207,14 +215,40 @@ def _order_response(session: Session, order: Order) -> dict:
         "id": order.id,
         "status": "paid" if terminal else order.status,
         "amount": order.expected_micro / 1e6,
+        "amount_micro": order.expected_micro,
         "pay_to": order.pay_to,
     }
     if terminal:
         delivery_row = session.scalar(
             select(Delivery).where(Delivery.order_id == order.id)
         )
-        out["delivery"] = delivery_row.payload if delivery_row else DEFAULT_DELIVERY
-        _augment_gated(session, order, out)
+        out["tx_hash"] = order.tx_hash
+        if include_gated:
+            # Capability surface (wallet session / magic link): the authorized
+            # owner may see the full payload and freshly minted gated keys.
+            out["delivery"] = delivery_row.payload if delivery_row else DEFAULT_DELIVERY
+            _augment_gated(session, order, out)
+        else:
+            # Unauth surface (the 64-bit cid is a bearer key that leaks via
+            # history/logs/Referer): never surface download_url/license_key, and
+            # gate the `delivery` field itself, because Delivery.payload IS the
+            # license key for a license order and IS the text secret for an
+            # entitlement-backed text order. Rule: if an Entitlement exists, the
+            # payload is replaced by the neutral claim message + kind/claim so the
+            # page renders the sign-to-claim UI; a pure legacy store.delivery text
+            # order (no entitlement) passes through unchanged so every already-
+            # deployed static page keeps its delivered state.
+            ent = session.scalar(
+                select(Entitlement).where(Entitlement.order_id == order.id)
+            )
+            if ent is not None:
+                out["delivery"] = CLAIM_DELIVERY_MESSAGE
+                out["kind"] = delivery_row.kind if delivery_row else "text"
+                out["claim"] = True
+            else:
+                out["delivery"] = (
+                    delivery_row.payload if delivery_row else DEFAULT_DELIVERY
+                )
     return out
 
 
@@ -268,7 +302,13 @@ def create_checkout(
         "id": order.id,
         "pay_to": store.pay_to,
         "amount": order.expected_micro / 1e6,
-        "expires_at": order.expires_at.isoformat(),
+        # Exact base-unit amount so the browser builds ERC-20 calldata with BigInt
+        # only (amount*1e6 in JS can be off by one micro, which the exact-match
+        # sweeper would treat as an unmatched transfer).
+        "amount_micro": order.expected_micro,
+        # A naive-UTC isoformat with no 'Z' parses as LOCAL time in JS Date; append
+        # 'Z' so the buyer's countdown ticks against real UTC expiry.
+        "expires_at": order.expires_at.isoformat() + "Z",
         "network": "X Layer (chainId 196)",
         "token": "USDT",
     }
@@ -616,6 +656,10 @@ def library(request: Request, session: Session = Depends(get_session)):
             "amount": order.expected_micro / 1e6,
             "paid_at": order.paid_at.isoformat() if order.paid_at else None,
             "kind": delivery_row.kind if delivery_row else "text",
+            # The authenticated wallet owner may see the full Delivery payload —
+            # this is the ONLY post-gating path to an entitlement-backed text
+            # secret (file/license also get download_url/license_key below).
+            "delivery": delivery_row.payload if delivery_row else DEFAULT_DELIVERY,
         }
         _augment_gated(session, order, item)
         purchases.append(item)
@@ -676,7 +720,10 @@ def redeliver(request: Request, token: str, session: Session = Depends(get_sessi
         raise HTTPException(410, "order refunded")
     if order.status not in checkout.TERMINAL_DELIVERED:
         raise HTTPException(409, "order not yet delivered")
-    return _order_response(session, order)
+    # Possession of the signed, salted, 7-day magic-link token IS the capability
+    # (it is only ever mailed to a payer-authorized email), so serve the full
+    # payload + gated keys — the exchange-buyer path keeps working post-gating.
+    return _order_response(session, order, include_gated=True)
 
 
 def _license_context(session: Session, license_key: str):
