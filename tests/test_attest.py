@@ -439,6 +439,53 @@ def test_sending_reconcile_nonce_consumed_reattests_fresh(monkeypatch, make_stor
     assert prep.count == 0 and bcast.count == 0  # no re-broadcast at the dead nonce
 
 
+def test_sending_reconcile_flaked_notfound_does_not_double_attest(
+    monkeypatch, make_store
+):
+    # nonce consumed AND the first receipt read flakes to None (RPC error swallowed),
+    # but our tx actually mined. The re-check receipt read finds it => resolve to
+    # attested, NEVER re-attest fresh (which would double-attest = wasted OKB gas).
+    seq = iter([None, _receipt(1, UID)])  # first read flakes None, re-check finds it
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
+    monkeypatch.setattr(attest, "_get_receipt", _Spy(lambda *a, **k: next(seq)))
+    monkeypatch.setattr(attest, "_confirmed_nonce", lambda att: ATTEST_NONCE + 2)
+    _seed(make_store, attest_status="sending")
+    with SessionLocal() as s:
+        o = s.get(Order, "ordattest0000001")
+        o.attest_tx = ATTEST_TX
+        o.attest_nonce = ATTEST_NONCE
+        s.commit()
+    attest._reconcile_sending(object())
+    status, uid, _ = _order("ordattest0000001")
+    assert status == "attested" and uid == UID  # resolved, not re-attested
+    assert prep.count == 0 and bcast.count == 0  # no second broadcast
+
+
+def test_sending_reconcile_mine_in_gap_uses_same_nonce(monkeypatch, make_store):
+    # The nonce is read BEFORE the receipt, so a tx that mines in the read gap is seen
+    # as still-pending (confirmed == attest_nonce) and takes the safe same-nonce
+    # rebroadcast path — never the fresh-reattest path that would double-attest.
+    prep = _Spy(_prep(tx=ATTEST_TX2))
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
+    monkeypatch.setattr(attest, "_get_receipt", _Spy(None))  # not seen yet by our read
+    monkeypatch.setattr(attest, "_confirmed_nonce", lambda att: ATTEST_NONCE)  # pending
+    _seed(make_store, attest_status="sending")
+    with SessionLocal() as s:
+        o = s.get(Order, "ordattest0000001")
+        o.attest_tx = ATTEST_TX
+        o.attest_nonce = ATTEST_NONCE
+        s.commit()
+    attest._reconcile_sending(object())
+    # same-nonce rebroadcast (dedup), never a fresh re-attest
+    assert prep.calls[0][1].get("nonce") == ATTEST_NONCE
+    assert _order("ordattest0000001")[0] == "sent"
+
+
 def test_sending_reconcile_reverted_marks_failed(monkeypatch, make_store):
     monkeypatch.setattr(attest, "_get_receipt", _Spy(_receipt(status=0)))
     _seed(make_store, attest_status="sending")

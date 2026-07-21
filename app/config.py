@@ -223,7 +223,12 @@ SCHEMA_REGISTRY_ADDR = "0x4200000000000000000000000000000000000020"
 ATTEST_SCHEMA = "address buyer,string storeId,uint256 amountUsdt6,bytes32 paymentTxHash"
 # Worker cadence + burst bound (mirrors the webhook loop knobs).
 ATTEST_INTERVAL = float(os.environ.get("TILLA_ATTEST_INTERVAL", "30"))
-ATTEST_MAX_PER_TICK = int(os.environ.get("TILLA_ATTEST_MAX_PER_TICK", "5"))
+# One attestation broadcast per tick: two orders in the same tick would fetch the
+# same account nonce (the first's tx is still unmined), collide on that nonce, and
+# either churn sending->pending or — if gas rose and one replaced the other in the
+# mempool — strand the replaced order in a never-mining 'sent' that reconcile marks
+# terminally 'failed'. Serializing to one broadcast per tick sidesteps both.
+ATTEST_MAX_PER_TICK = int(os.environ.get("TILLA_ATTEST_MAX_PER_TICK", "1"))
 # Per-tx gas-cost cap in wei (estimate_gas * gas_price). Over this the tick REFUSES
 # to sign and leaves the order 'pending' for a calmer fee window — refuse, never
 # overspend (the TILLA_WARDEN_MAX_MICRO philosophy). Default 0.01 OKB (~30x a normal

@@ -613,6 +613,18 @@ def _reconcile_sending_one(attester: _Attester, order_id: str, store_id: int) ->
     if confirmed is None:
         return  # RPC hiccup — retry on a later tick
     if confirmed > attest_nonce:
+        # The nonce slot is filled and our hash isn't on chain — BUT the receipt read
+        # above and this nonce read are not atomic: our tx could have mined in the gap
+        # (receipt None, then nonce advanced), and _get_receipt swallows RPC errors to
+        # None, so a transient flake looks identical to a real not-found. Re-check the
+        # receipt ONCE before the irreversible fresh re-attest — only a confirmed real
+        # not-found re-attests; a just-mined/flake-recovered receipt resolves instead.
+        # This closes the double-attest window without gating the resolve path on the
+        # nonce RPC.
+        recheck = _get_receipt(attester, attest_tx)
+        if recheck is not None:
+            _resolve_receipt(order_id, store_id, recheck)
+            return
         # The nonce slot was filled by a different mined tx (our hash is not on chain).
         # Our attestation is definitively not on chain — re-attest fresh (new nonce).
         _reconcile_seen.pop(order_id, None)
