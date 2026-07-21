@@ -143,6 +143,8 @@ class Order(Base):
         # replay key. UNIQUE dedupes order creation; SQLite allows unlimited NULLs
         # here, so human (web) orders — which never set it — are unaffected.
         Index("ux_orders_x402_nonce", "x402_nonce", unique=True),
+        # M11 EAS attester worker query: pending orders awaiting attestation.
+        Index("ix_orders_attest_status", "attest_status"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -197,6 +199,18 @@ class Order(Base):
         DateTime, nullable=False, default=_utcnow
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # M11 on-chain depth: the EAS receipt attestation for this order. attest_status
+    # walks none -> pending -> sent -> attested | failed, driven ONLY by the dormant
+    # attester worker (app.attest) — a single writer, so no CHECK constraint (which
+    # would force an orders-table rebuild and endanger ux_orders_active_amount). Every
+    # existing row stays 'none' (never queued), so enabling later attests only
+    # post-enable sales. attest_tx is the on-chain attestation tx; attestation_uid is
+    # the EAS UID parsed from its Attested log.
+    attestation_uid: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    attest_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    attest_status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="none", server_default="none"
+    )
 
 
 class Delivery(Base):
