@@ -52,6 +52,29 @@ def test_unique_slug_no_collision_passthrough(tmp_path, monkeypatch):
     assert engine.unique_slug("brand-new") == "brand-new"
 
 
+def test_unique_slug_db_row_without_disk_dir_gets_suffix(tmp_path, monkeypatch):
+    # A blocked store leaves its stores.slug row behind after its disk dir is
+    # removed; unique_slug must still treat that slug as taken (disk OR db).
+    import app.engine as engine
+    from app.db import SessionLocal
+    from app.models import Store, get_or_create_merchant
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)  # empty dir -> no disk hit
+    with SessionLocal() as s:
+        merchant = get_or_create_merchant(s, "0x" + "a" * 40)
+        s.add(
+            Store(
+                slug="x",
+                merchant_id=merchant.id,
+                status="blocked",
+                pay_to="0x" + "a" * 40,
+                theme="original.html",
+            )
+        )
+        s.commit()
+    assert engine.unique_slug("x") == "x-2"
+
+
 def test_unique_slug_maxlen_collision_stays_within_pattern(tmp_path, monkeypatch):
     import app.engine as engine
 

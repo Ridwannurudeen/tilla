@@ -206,7 +206,6 @@ def test_pending_store_resumes_live_and_checkout_works(tmp_path, monkeypatch):
     import app.engine as engine
 
     monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
-    monkeypatch.setattr(app.main, "balance_of", lambda addr: 0.0)
     _mock_llm(monkeypatch, {"store_name": "Resumable Store", "price_usdt": 9})
 
     screen_state = {"available": False}
@@ -241,19 +240,22 @@ def test_checkout_409_on_pending_screening_store(make_store):
     assert r.status_code == 409
 
 
-def test_checkout_returns_pay_to_and_consistent_float_amount(make_store, monkeypatch):
-    # Defect fixes: pay_to is present in BOTH the POST and GET responses, and the
-    # amount is the same float in both (POST used to echo the store.json int).
+def test_checkout_returns_pay_to_unique_amount_and_expiry(make_store):
+    # pay_to is present in BOTH the POST and GET responses; the amount is the
+    # exact unique expected amount (price + offset), identical in both; and the
+    # POST response carries the expiry the buyer's page needs.
     make_store(slug="contract-store", pay_to="0x" + "b" * 40, price_micro=9_000_000)
-    monkeypatch.setattr(app.main, "balance_of", lambda addr: 0.0)
     post = client.post("/api/checkout/contract-store")
     assert post.status_code == 200
     pb = post.json()
     assert pb["pay_to"] == "0x" + "b" * 40
+    assert "expires_at" in pb
     assert isinstance(pb["amount"], float)
+    # price 9.0 + offset in [0.000001, 0.004999]
+    assert 9.0 < pb["amount"] < 9.005
     get = client.get(f"/api/checkout/{pb['id']}")
     assert get.status_code == 200
     gb = get.json()
     assert gb["pay_to"] == "0x" + "b" * 40
-    assert isinstance(gb["amount"], float)
-    assert pb["amount"] == gb["amount"] == 9.0
+    assert gb["amount"] == pb["amount"]
+    assert gb["status"] == "pending"

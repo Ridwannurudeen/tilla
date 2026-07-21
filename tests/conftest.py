@@ -11,6 +11,9 @@ import pytest
 _TMP = pathlib.Path(tempfile.mkdtemp(prefix="tilla-tests-"))
 os.environ["TILLA_DB_PATH"] = str(_TMP / "test.db")
 os.environ["TILLA_STORES_DIR"] = str(_TMP / "stores")
+# Never start the background sweeper / hit the RPC network from tests; the M3
+# tests drive chain.py directly through respx-mocked httpx instead.
+os.environ["TILLA_SWEEP_ENABLED"] = "0"
 os.environ.pop("OKX_API_KEY", None)
 os.environ.pop("TILLA_LLM_KEY", None)
 

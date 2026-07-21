@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, func, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 import app.main as main
+from app import checkout
 from app.db import SessionLocal, engine
 from app.models import (
     Delivery,
@@ -22,6 +23,25 @@ from app.models import (
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 TABLES = {"merchants", "stores", "products", "orders", "deliveries", "event_log"}
+M3_TABLES = {"processed_transfers", "chain_cursor"}
+
+
+def _confirm(cid, tx_hash="0x" + "1" * 64):
+    """Apply an exact, fully-confirmed on-chain payment to an order via the real
+    state machine — no network. Confirms and delivers in one shot."""
+    with SessionLocal() as s:
+        order = s.get(Order, cid)
+        checkout.apply_transfer(
+            s,
+            order,
+            order.expected_micro - (order.paid_micro or 0),
+            tx_hash=tx_hash,
+            log_index=0,
+            block_number=1,
+            from_addr="0x" + "2" * 40,
+            head=10**9,
+        )
+        s.commit()
 
 
 # ---------- alembic migration up/down (BUILD.md acceptance) ----------
@@ -60,6 +80,76 @@ def test_migration_up_down_reentrant(tmp_path):
     r = _alembic(db, "upgrade", "head")
     assert r.returncode == 0, r.stderr
     assert TABLES <= _table_names(db)
+
+
+def test_migration_0002_backfills_and_reverses(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m3.db"
+    r = _alembic(db, "upgrade", "0001_persistence_core")
+    assert r.returncode == 0, r.stderr
+
+    # seed legacy rows against the 0001 schema (no expected_micro yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, baseline_micro, status,"
+        " created_at) VALUES ('leg_pending',1,'0xabc',9000000,0,'pending','2026')"
+    )
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, baseline_micro, status,"
+        " created_at) VALUES ('leg_paid',1,'0xabc',5000000,0,'paid','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    assert M3_TABLES <= _table_names(db)
+
+    con = sqlite3.connect(db)
+    cols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert {
+        "expected_micro",
+        "paid_micro",
+        "overpaid_micro",
+        "from_addr",
+        "block_number",
+    } <= cols
+    # expected_micro backfilled to the exact price; legacy 'paid' status untouched
+    assert (
+        con.execute(
+            "SELECT expected_micro FROM orders WHERE id='leg_pending'"
+        ).fetchone()[0]
+        == 9000000
+    )
+    assert (
+        con.execute("SELECT status FROM orders WHERE id='leg_paid'").fetchone()[0]
+        == "paid"
+    )
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "downgrade", "0001_persistence_core")
+    assert r.returncode == 0, r.stderr
+    assert not (M3_TABLES & _table_names(db))
+    con = sqlite3.connect(db)
+    cols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "expected_micro" not in cols
+    assert (
+        con.execute("SELECT status FROM orders WHERE id='leg_paid'").fetchone()[0]
+        == "paid"
+    )
+    con.close()
 
 
 # ---------- model CRUD ----------
@@ -130,7 +220,7 @@ def test_product_price_micro_must_be_positive():
 
 
 # ---------- order survives a simulated process restart ----------
-def test_order_survives_simulated_restart(make_store, monkeypatch):
+def test_order_survives_simulated_restart(make_store):
     make_store(
         slug="persist-store",
         pay_to="0x" + "d" * 40,
@@ -138,7 +228,6 @@ def test_order_survives_simulated_restart(make_store, monkeypatch):
         delivery="download here",
     )
     client = TestClient(main.app)
-    monkeypatch.setattr(main, "balance_of", lambda addr: 0.0)
 
     cid = client.post("/api/checkout/persist-store").json()["id"]
 
@@ -149,21 +238,21 @@ def test_order_survives_simulated_restart(make_store, monkeypatch):
     assert poll.status_code == 200
     assert poll.json()["status"] == "pending"
 
-    # payment lands
-    monkeypatch.setattr(main, "balance_of", lambda addr: 5.0)
+    # payment lands (confirmed on-chain, delivered)
+    _confirm(cid)
     paid = client.get(f"/api/checkout/{cid}").json()
-    assert paid["status"] == "paid"
+    assert paid["status"] == "paid"  # delivered, surfaced as "paid" to clients
     assert paid["delivery"] == "download here"
 
-    # restart again: still paid, delivery still recorded (read from deliveries row)
+    # restart again: still terminal, delivery still recorded (read from deliveries)
     engine.dispose()
     after = client.get(f"/api/checkout/{cid}").json()
     assert after["status"] == "paid"
     assert after["delivery"] == "download here"
 
 
-# ---------- paid transition is idempotent ----------
-def test_paid_flow_is_idempotent(make_store, monkeypatch):
+# ---------- delivery transition is idempotent ----------
+def test_paid_flow_is_idempotent(make_store):
     make_store(
         slug="idem-store",
         pay_to="0x" + "e" * 40,
@@ -171,10 +260,9 @@ def test_paid_flow_is_idempotent(make_store, monkeypatch):
         delivery="thanks!",
     )
     client = TestClient(main.app)
-    monkeypatch.setattr(main, "balance_of", lambda addr: 0.0)
     cid = client.post("/api/checkout/idem-store").json()["id"]
 
-    monkeypatch.setattr(main, "balance_of", lambda addr: 3.0)
+    _confirm(cid)
     first = client.get(f"/api/checkout/{cid}").json()
     second = client.get(f"/api/checkout/{cid}").json()
     assert first["status"] == second["status"] == "paid"
@@ -189,20 +277,18 @@ def test_paid_flow_is_idempotent(make_store, monkeypatch):
 
 
 # ---------- event_log audit spine ----------
-def test_event_log_records_order_lifecycle(make_store, monkeypatch):
+def test_event_log_records_order_lifecycle(make_store):
     make_store(slug="events-store", pay_to="0x" + "f" * 40, price_micro=2_000_000)
     client = TestClient(main.app)
-    monkeypatch.setattr(main, "balance_of", lambda addr: 0.0)
     cid = client.post("/api/checkout/events-store").json()["id"]
-    monkeypatch.setattr(main, "balance_of", lambda addr: 2.0)
-    client.get(f"/api/checkout/{cid}")
+    _confirm(cid)
 
     with SessionLocal() as s:
         events = [
             e.event for e in s.scalars(select(EventLog).where(EventLog.order_id == cid))
         ]
     assert "order.created" in events
-    assert "order.paid" in events
+    assert "order.confirmed" in events
     assert "order.delivered" in events
 
 

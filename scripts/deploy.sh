@@ -23,11 +23,14 @@ FILES=(
   app/screening.py
   app/db.py
   app/models.py
+  app/chain.py
+  app/checkout.py
   app/import_stores.py
   alembic.ini
   alembic/env.py
   alembic/script.py.mako
   alembic/versions/0001_persistence_core.py
+  alembic/versions/0002_hardened_checkout.py
   scripts/backup_db.sh
   themes/original.html
   themes/bold.html
