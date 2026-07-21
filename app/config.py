@@ -110,6 +110,28 @@ AMOUNT_ALLOC_RETRIES = 10
 ALLOWED_THEMES = frozenset({"original", "bold", "editorial"})
 DEFAULT_THEME = "original.html"
 
+
+# ---------- M8 payment methods (aggr_deferred / MPP / subscriptions) ----------
+# Every rail beyond exact ships flag-OFF; a flag is flipped ONLY in the VPS .env
+# after its read-only creds/support probe passes (see docs/spikes.md), never by a
+# code default. OFF = byte-identical exact checkout, no new payment promises.
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# aggr_deferred: adds a SECOND accepts-entry on /s/{slug}/buy for batch products.
+# Flipping this on while the facilitator /supported does NOT list aggr_deferred on
+# eip155:196 makes the middleware's lazy initialize raise -> 502 on ALL protected
+# routes, so only flip after the /supported probe confirms the scheme.
+AGGR_DEFERRED_ENABLED = _flag("TILLA_AGGR_DEFERRED")
+# MPP pay-as-you-go: /s/{slug}/mpp/* endpoints. OFF -> every endpoint 503s.
+MPP_ENABLED = _flag("TILLA_MPP_ENABLED")
+# Subscriptions (x402 period, JS sidecar): /s/{slug}/subscribe. OFF -> 503.
+SUBSCRIPTIONS_ENABLED = _flag("TILLA_SUBSCRIPTIONS_ENABLED")
+# The always-on localhost Node sidecar the subscribe proxy talks to (never nginx-
+# exposed). The proxy 503s if it is unreachable, never a false 402/200.
+SUBSCRIPTION_SIDECAR_URL = os.environ.get("TILLA_SIDECAR_URL", "http://127.0.0.1:8790")
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
 

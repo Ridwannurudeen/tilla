@@ -153,6 +153,27 @@ def _usdt_str(micro: int) -> str:
     return str(Decimal(micro) / Decimal(1_000_000))
 
 
+def _pricing_model(product: Product) -> str:
+    return product.pricing_model or "one_time"
+
+
+def enabled_schemes(product: Product) -> list[str]:
+    """The x402 schemes actually OFFERED on this product's /buy route, given the
+    live server flags. 'exact' is always present; 'aggr_deferred' appears ONLY for
+    a batch product AND only when TILLA_AGGR_DEFERRED is on — so feeds/MCP never
+    advertise a rail that cannot settle. Metered (MPP) and subscription (period)
+    are separate endpoints, not x402 buy schemes, so they do not appear here."""
+    schemes = ["exact"]
+    if _pricing_model(product) == "batch" and config.AGGR_DEFERRED_ENABLED:
+        schemes.append("aggr_deferred")
+    return schemes
+
+
+def _pricing_block(product: Product) -> dict:
+    params = product.pricing_params if isinstance(product.pricing_params, dict) else {}
+    return {"model": _pricing_model(product), "params": params}
+
+
 # ============================================================================
 # Per-request x402 resolvers (spike-8 dynamic accepts) — NEVER raise
 # ============================================================================
@@ -711,10 +732,12 @@ def _tool_get_product(
         "currency": CURRENCY,
         "network": NETWORK,
         "deliverable_kind": deliverable.kind if deliverable else "text",
+        "pricing": _pricing_block(product),
         "x402": {
             "endpoint": f"/s/{slug}/buy",
             "network": NETWORK,
             "asset": ASSET,
+            "schemes": enabled_schemes(product),
         },
     }
 
@@ -876,10 +899,12 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
         "link": store_url,
         "price": {"amount": _usdt_str(product.price_micro), "currency": CURRENCY},
         "availability": "in_stock",
+        "pricing": _pricing_block(product),
         "x402": {
             "endpoint": f"/s/{slug}/buy",
             "network": NETWORK,
             "asset": ASSET,
+            "schemes": enabled_schemes(product),
         },
     }
 
@@ -934,7 +959,9 @@ def llms_txt(
         lines += [desc, ""]
     lines.append("## Products")
     for p in products:
-        lines.append(f"- {p.name} — {_usdt_str(p.price_micro)} {CURRENCY}")
+        lines.append(
+            f"- {p.name} — {_usdt_str(p.price_micro)} {CURRENCY} [{_pricing_model(p)}]"
+        )
     lines += [
         "",
         "## Machine endpoints",

@@ -12,12 +12,13 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from typing import Literal
 from xml.sax.saxutils import escape
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from itsdangerous import BadSignature, SignatureExpired
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select, update
@@ -504,6 +505,106 @@ class LicenseActionBody(BaseModel):
 class LicenseValidateBody(BaseModel):
     license_key: str = Field(min_length=1, max_length=64)
     device_id: str = Field(default="", max_length=128)
+
+
+# ================= M8 payment-method declaration =================
+class _MeteredParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    unit: str = Field(min_length=1, max_length=20)
+    price_per_unit_micro: int = Field(gt=0)
+    min_deposit_micro: int = Field(gt=0)
+
+
+class _SubscriptionParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    amount_per_period_micro: int = Field(gt=0)
+    period_sec: int = Field(ge=3600)
+    max_periods: int = Field(ge=0)  # 0 = open-ended
+    plan_id: str = Field(min_length=1, max_length=64)
+    plan_tier: int = Field(ge=1, le=255)
+    plan_name: str = Field(min_length=1, max_length=120)
+
+
+class PricingBody(BaseModel):
+    pricing_model: Literal["one_time", "batch", "metered", "subscription"]
+    params: dict | None = None
+
+
+_PRICING_PARAM_MODELS = {
+    "metered": _MeteredParams,
+    "subscription": _SubscriptionParams,
+}
+
+
+def _validate_pricing_params(model: str, params: dict | None) -> dict | None:
+    """Normalize the per-model params or raise 422. one_time/batch take NO params
+    (price_micro is the price / per-unit price); metered + subscription validate
+    against their pydantic shape (unknown keys forbidden)."""
+    if model in ("one_time", "batch"):
+        if params:
+            raise HTTPException(422, f"{model} pricing takes no params")
+        return None
+    schema = _PRICING_PARAM_MODELS[model]
+    try:
+        return schema.model_validate(params or {}).model_dump()
+    except ValidationError as exc:
+        first = exc.errors(include_url=False)[0]
+        loc = ".".join(str(p) for p in first.get("loc", ()))
+        raise HTTPException(
+            422, f"invalid {model} params ({loc}): {first.get('msg')}"
+        ) from None
+
+
+@app.post("/api/stores/{slug}/pricing")
+@limiter.limit("30/hour")
+async def set_pricing(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Declare the active product's payment method (manage-key gated, same seam as
+    /deliverable). Pure metadata: it never moves funds and — with every rail flag
+    off — never changes the served 402. Default 'one_time' is unchanged exact
+    checkout; 'batch' only unlocks the aggr_deferred accepts-entry when its flag is
+    on; 'metered'/'subscription' only unlock their (dormant) endpoints."""
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None:
+        raise HTTPException(404, "store not found")
+    _require_store_key(request, store)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422, "invalid JSON body") from None
+    try:
+        parsed = PricingBody.model_validate(body)
+    except ValidationError:
+        raise HTTPException(
+            422,
+            "pricing_model must be one of: one_time, batch, metered, subscription",
+        ) from None
+    params = _validate_pricing_params(parsed.pricing_model, parsed.params)
+    product = session.scalar(
+        select(Product)
+        .where(Product.store_id == store.id, Product.active.is_(True))
+        .order_by(Product.id)
+    )
+    if product is None:
+        raise HTTPException(409, "store has no active product")
+    product.pricing_model = parsed.pricing_model
+    product.pricing_params = params
+    log_event(
+        session,
+        "api",
+        "pricing.updated",
+        store_id=store.id,
+        data={"product_id": product.id, "pricing_model": parsed.pricing_model},
+    )
+    session.commit()
+    return {
+        "product_id": product.id,
+        "pricing_model": parsed.pricing_model,
+        "params": params,
+    }
 
 
 @app.post("/api/stores/{slug}/deliverable")
