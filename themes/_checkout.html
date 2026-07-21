@@ -1,0 +1,533 @@
+{# Shared checkout partial: panel markup + scoped styles (theme CSS vars) + vanilla
+   JS. Included by every theme. No build step, no CDN, everything inline (CSP-safe).
+   Template interpolation is limited to SLUG (via |tojson) and ADDR (a server-
+   validated hex address); USDT0 + chain 0xc4 are hardcoded JS constants. #}
+<div class="checkout" id="co">
+  <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
+  <div class="row"><span>Network</span><b>X Layer (OKX)</b></div>
+  <div class="row"><span>Pay to</span></div>
+  <div class="addr" id="coAddr">{{ ADDR }}</div>
+  <div class="co-count" id="coCountdown"></div>
+
+  <button class="co-btn" id="payWalletBtn" style="display:none" onclick="payWithWallet()">Pay with wallet</button>
+
+  <div class="co-manual" id="coManual">
+    <div class="co-qrwrap"><canvas id="coQR" class="co-qr"></canvas></div>
+    <div class="co-copyrow">
+      <button class="co-copy" id="copyAmountBtn" onclick="copyAmount()">Copy amount</button>
+      <button class="co-copy" id="copyAddrBtn" onclick="copyAddr()">Copy address</button>
+    </div>
+    <div class="co-warn">Send EXACTLY this amount of USDT0 on X Layer — a different amount will not match your order.</div>
+  </div>
+
+  <div class="status" id="coStatus">⏳ Waiting for payment… (auto-verified on-chain)</div>
+  <div class="co-receipt" id="coReceipt" style="display:none"></div>
+
+  <button class="co-btn" id="claimBtn" style="display:none" onclick="claimPurchase()">Claim your purchase — sign with the wallet you paid from</button>
+  <div class="co-hint" id="coClaimHint" style="display:none">Paid from an exchange and can't sign? Keep your order id and tx hash — the merchant can redeliver.</div>
+  <div class="co-claim" id="coClaim" style="display:none"></div>
+  <div class="status" id="coDelivery" style="display:none;color:var(--accent)"></div>
+</div>
+
+<style>
+  #co .co-count{ margin-top:10px; font-size:12.5px; font-weight:700; letter-spacing:.02em;
+    color:color-mix(in srgb,var(--text) 60%,transparent); }
+  #co .co-btn{ display:block; width:100%; margin-top:14px; border:0; cursor:pointer; padding:14px;
+    border-radius:12px; font-size:14.5px; font-weight:800; line-height:1.25; color:#fff;
+    background:linear-gradient(135deg,var(--primary),var(--accent));
+    box-shadow:0 10px 28px color-mix(in srgb,var(--primary) 40%,transparent); transition:transform .12s, opacity .12s; }
+  #co .co-btn:hover{ transform:translateY(-1px); }
+  #co .co-btn:disabled{ opacity:.55; cursor:default; transform:none; }
+  #co .co-manual{ margin-top:16px; }
+  #co .co-qrwrap{ display:flex; justify-content:center; }
+  #co .co-qr{ width:200px; height:200px; max-width:100%; image-rendering:pixelated;
+    background:#fff; padding:10px; border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.25); }
+  #co .co-copyrow{ display:flex; gap:10px; margin-top:14px; }
+  #co .co-copy{ flex:1; cursor:pointer; padding:10px; border-radius:10px; font-size:13px; font-weight:700;
+    color:var(--text); background:color-mix(in srgb,var(--text) 8%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 20%,transparent); transition:background .12s; }
+  #co .co-copy:hover{ background:color-mix(in srgb,var(--text) 14%,transparent); }
+  #co .co-warn{ margin-top:12px; font-size:12.5px; font-weight:700; line-height:1.4;
+    color:color-mix(in srgb,var(--accent) 85%, var(--text)); }
+  #co .co-receipt{ margin-top:16px; padding:14px 16px; border-radius:12px;
+    background:color-mix(in srgb,var(--text) 5%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 14%,transparent); }
+  #co .co-receipt .co-rtitle{ font-size:13px; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+    margin-bottom:8px; color:color-mix(in srgb,var(--text) 70%,transparent); }
+  #co .co-receipt a{ color:var(--accent); font-weight:700; text-decoration:none; }
+  #co .co-receipt a:hover{ text-decoration:underline; }
+  #co .co-hint{ margin-top:12px; font-size:12.5px; line-height:1.45;
+    color:color-mix(in srgb,var(--text) 60%,transparent); }
+  #co .co-claim{ margin-top:14px; }
+  #co .co-claim .co-clabel{ font-size:12.5px; font-weight:700;
+    color:color-mix(in srgb,var(--text) 70%,transparent); margin-bottom:6px; }
+  #co .co-claim .co-mono{ font-family:ui-monospace,Consolas,monospace; font-size:14px; font-weight:700;
+    word-break:break-all; color:var(--accent); padding:10px 12px; border-radius:10px;
+    background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 16%,transparent); }
+  #co .co-claim .co-dl{ display:block; text-align:center; text-decoration:none; padding:14px; border-radius:12px;
+    font-size:14.5px; font-weight:800; color:#fff;
+    background:linear-gradient(135deg,var(--primary),var(--accent));
+    box-shadow:0 10px 28px color-mix(in srgb,var(--primary) 40%,transparent); }
+  #co .co-claim .co-copy{ margin-top:10px; width:100%; }
+  #co .co-claim .co-deliver{ color:var(--accent); font-weight:700; word-break:break-word; }
+</style>
+
+<script>
+  const SLUG = {{ SLUG | tojson }};
+  const USDT0 = "0x779ded0c9e1022225f8e0630b35a9b54be713736";
+  const CHAIN_HEX = "0xc4"; // X Layer chainId 196
+  const CHAIN_PARAMS = {
+    chainId: "0xc4", chainName: "X Layer",
+    nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 },
+    rpcUrls: ["https://rpc.xlayer.tech"],
+    blockExplorerUrls: ["https://www.oklink.com/x-layer"]
+  };
+  const OKLINK_TX = "https://www.oklink.com/x-layer/tx/";
+  const TX_RE = /^0x[0-9a-fA-F]{64}$/;
+
+  const CO = {
+    cid: null, payTo: null, micro: 0n, amountStr: "", expiresAt: 0,
+    account: null, txHash: null, kind: null, paid: false, expired: false,
+    pollTimer: null, countTimer: null
+  };
+
+  // ---- EIP-6963 provider discovery ----
+  const providers = [];
+  window.addEventListener("eip6963:announceProvider", function (e) { if (e.detail) providers.push(e.detail); });
+  try { window.dispatchEvent(new Event("eip6963:requestProvider")); } catch (e) {}
+
+  function pickProvider() {
+    for (var i = 0; i < providers.length; i++) {
+      var rdns = ((providers[i].info && providers[i].info.rdns) || "").toLowerCase();
+      if (rdns.indexOf("okex") !== -1 || rdns.indexOf("okx") !== -1) return providers[i].provider;
+    }
+    if (window.okxwallet) return window.okxwallet;
+    if (providers.length) return providers[0].provider;
+    if (window.ethereum) return window.ethereum;
+    return null;
+  }
+  function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
+
+  // ---- helpers ----
+  function byId(id) { return document.getElementById(id); }
+  function setStatus(msg) { byId("coStatus").textContent = msg; }
+  function setClaim(msg) { var el = byId("coClaim"); el.textContent = msg; el.style.display = "block"; }
+  function txt(sel) { var el = document.querySelector(sel); return el ? el.textContent.trim() : ""; }
+
+  function formatAmount(micro) {
+    var whole = micro / 1000000n;
+    var frac = (micro % 1000000n).toString().padStart(6, "0");
+    return whole.toString() + "." + frac;
+  }
+  function buildTransferData(payTo, micro) {
+    return "0xa9059cbb" + payTo.slice(2).toLowerCase().padStart(64, "0") + micro.toString(16).padStart(64, "0");
+  }
+
+  // ---- checkout ----
+  async function startCheckout() {
+    byId("co").classList.add("on");
+    var buy = byId("buyBtn"); if (buy) buy.disabled = true;
+    var d;
+    try {
+      var r = await fetch("/api/checkout/" + SLUG, { method: "POST" });
+      d = await r.json();
+      if (!r.ok || !d.id) throw new Error("checkout");
+    } catch (e) {
+      setStatus("Could not start checkout — please retry.");
+      if (buy) buy.disabled = false;
+      return;
+    }
+    CO.cid = d.id;
+    CO.payTo = d.pay_to;
+    CO.micro = BigInt(d.amount_micro);
+    CO.amountStr = formatAmount(CO.micro);
+    CO.expiresAt = Date.parse(d.expires_at);
+    byId("coAmount").textContent = CO.amountStr + " USDT0";
+    byId("coAddr").textContent = CO.payTo;
+    renderQR();
+    updatePayButton();
+    startCountdown();
+    poll();
+  }
+
+  function updatePayButton() {
+    var btn = byId("payWalletBtn");
+    if (pickProvider()) { btn.style.display = ""; btn.disabled = false; }
+    else { btn.style.display = "none"; }
+  }
+
+  function renderQR() {
+    var uri = "ethereum:" + USDT0 + "@196/transfer?address=" + CO.payTo + "&uint256=" + CO.micro.toString();
+    try {
+      var m = qrMatrix(uri);
+      var canvas = byId("coQR"), quiet = 4, scale = 4, dim = (m.size + 2 * quiet) * scale;
+      canvas.width = dim; canvas.height = dim;
+      var ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, dim, dim);
+      ctx.fillStyle = "#000000";
+      for (var row = 0; row < m.size; row++) for (var col = 0; col < m.size; col++)
+        if (m.get(row, col)) ctx.fillRect((col + quiet) * scale, (row + quiet) * scale, scale, scale);
+    } catch (e) { byId("coQR").style.display = "none"; }
+  }
+
+  async function payWithWallet() {
+    var provider = pickProvider();
+    if (!provider) { updatePayButton(); return; }
+    var btn = byId("payWalletBtn");
+    btn.disabled = true;
+    var account;
+    try {
+      var accts = await provider.request({ method: "eth_requestAccounts" });
+      account = accts && accts[0];
+    } catch (e) {
+      setStatus(isReject(e) ? "Connection declined — you can pay manually below." : "Could not connect wallet — pay manually below.");
+      btn.disabled = false; return;
+    }
+    if (!account) { btn.disabled = false; return; }
+    CO.account = account;
+    if (!(await ensureChain(provider))) { btn.disabled = false; return; }
+    var txHash;
+    try {
+      var data = buildTransferData(CO.payTo, CO.micro);
+      txHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: account, to: USDT0, value: "0x0", data: data }] });
+    } catch (e) {
+      setStatus(isReject(e) ? "Transaction canceled — retry or pay manually below." : "Wallet error — you can pay manually below.");
+      btn.disabled = false; return;
+    }
+    onTxSent(txHash);
+  }
+
+  async function ensureChain(provider) {
+    try {
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+      return true;
+    } catch (e) {
+      if (isReject(e)) { setStatus("Network switch declined — you can pay manually below."); return false; }
+      try {
+        await provider.request({ method: "wallet_addEthereumChain", params: [CHAIN_PARAMS] });
+        await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+        return true;
+      } catch (e2) {
+        setStatus(isReject(e2) ? "Network switch declined — you can pay manually below." : "Could not switch to X Layer — you can pay manually below.");
+        return false;
+      }
+    }
+  }
+
+  function onTxSent(txHash) {
+    CO.txHash = txHash;
+    setStatus("Transaction sent — confirming on X Layer…");
+    // Fast-path accelerator; ANY failure is non-fatal (the sweeper still matches).
+    try {
+      fetch("/api/checkout/" + CO.cid + "/tx", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx_hash: txHash })
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  // ---- copy ----
+  function execCopy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      var ok = document.execCommand("copy"); document.body.removeChild(ta); return ok;
+    } catch (e) { return false; }
+  }
+  async function copyText(text, btn) {
+    var ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) { ok = execCopy(text); }
+    if (ok && btn) { var orig = btn.textContent; btn.textContent = "Copied"; setTimeout(function () { btn.textContent = orig; }, 1500); }
+  }
+  function copyAmount() { copyText(CO.amountStr, byId("copyAmountBtn")); }
+  function copyAddr() { copyText(CO.payTo, byId("copyAddrBtn")); }
+
+  // ---- countdown ----
+  function startCountdown() {
+    if (CO.countTimer) clearInterval(CO.countTimer);
+    tickCountdown();
+    CO.countTimer = setInterval(tickCountdown, 1000);
+  }
+  function tickCountdown() {
+    var el = byId("coCountdown");
+    if (CO.paid) { el.textContent = ""; clearInterval(CO.countTimer); return; }
+    var remain = Math.floor((CO.expiresAt - Date.now()) / 1000);
+    if (isNaN(remain)) { el.textContent = ""; return; }
+    if (remain <= 0) { el.textContent = ""; clearInterval(CO.countTimer); onExpired(); return; }
+    var mm = Math.floor(remain / 60), ss = remain % 60;
+    el.textContent = "Expires in " + mm + ":" + (ss < 10 ? "0" : "") + ss;
+  }
+  function onExpired() {
+    if (CO.paid) return;
+    CO.expired = true;
+    if (CO.pollTimer) clearTimeout(CO.pollTimer);
+    setStatus("Order expired — start a new checkout.");
+    byId("payWalletBtn").style.display = "none";
+    var buy = byId("buyBtn"); if (buy) buy.disabled = false;
+  }
+
+  // ---- polling ----
+  async function poll() {
+    if (CO.paid || CO.expired) return;
+    var d;
+    try {
+      var r = await fetch("/api/checkout/" + CO.cid);
+      d = await r.json();
+    } catch (e) { CO.pollTimer = setTimeout(poll, 4000); return; }
+    var s = d.status;
+    if (s === "paid") { onPaid(d); return; }
+    if (s === "expired") { onExpired(); return; }
+    if (s === "detected") setStatus("Payment detected — waiting for confirmations (3 blocks)…");
+    else if (s === "underpaid") setStatus("Amount received is less than the exact total — send the remainder to the same address.");
+    else setStatus("⏳ Waiting for payment… (auto-verified on-chain)");
+    CO.pollTimer = setTimeout(poll, 4000);
+  }
+
+  function onPaid(d) {
+    CO.paid = true;
+    if (CO.pollTimer) clearTimeout(CO.pollTimer);
+    if (CO.countTimer) clearInterval(CO.countTimer);
+    byId("coCountdown").textContent = "";
+    byId("payWalletBtn").style.display = "none";
+    byId("coManual").style.display = "none";
+    setStatus("✅ Payment received & verified on X Layer");
+    renderReceipt(d);
+    if (d.claim) {
+      CO.kind = d.kind;
+      byId("claimBtn").style.display = "";
+      byId("coClaimHint").style.display = "block";
+    } else {
+      var del = byId("coDelivery");
+      del.style.display = "block";
+      del.textContent = d.delivery || "Delivered — thank you!";
+    }
+  }
+
+  function receiptRow(k, v, href) {
+    var row = document.createElement("div"); row.className = "row";
+    var s = document.createElement("span"); s.textContent = k; row.appendChild(s);
+    if (href) {
+      var a = document.createElement("a"); a.href = href; a.textContent = v;
+      a.target = "_blank"; a.rel = "noopener noreferrer"; row.appendChild(a);
+    } else {
+      var b = document.createElement("b"); b.textContent = v; row.appendChild(b);
+    }
+    return row;
+  }
+  function renderReceipt(d) {
+    var el = byId("coReceipt"); el.textContent = "";
+    var title = document.createElement("div"); title.className = "co-rtitle"; title.textContent = "Receipt";
+    el.appendChild(title);
+    var store = txt(".brand"), product = txt(".card h2");
+    if (store) el.appendChild(receiptRow("Store", store));
+    if (product) el.appendChild(receiptRow("Item", product));
+    el.appendChild(receiptRow("Order", CO.cid));
+    el.appendChild(receiptRow("Paid", CO.amountStr + " USDT0"));
+    el.appendChild(receiptRow("Network", "X Layer (chainId 196)"));
+    var tx = CO.txHash || d.tx_hash;
+    if (tx && TX_RE.test(tx)) el.appendChild(receiptRow("Transaction", "View on OKLink", OKLINK_TX + tx));
+    el.style.display = "block";
+  }
+
+  // ---- sign-to-claim (reuses M4 auth endpoints) ----
+  async function claimPurchase() {
+    var btn = byId("claimBtn"); btn.disabled = true;
+    var provider = pickProvider();
+    if (!provider) { setClaim("No wallet detected — open this page in your wallet's browser to claim, or use your emailed link."); btn.disabled = false; return; }
+    var account;
+    try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
+    catch (e) { setClaim(isReject(e) ? "Sign-in declined — click claim to try again." : "Could not connect wallet — please retry."); btn.disabled = false; return; }
+    if (!account) { btn.disabled = false; return; }
+    var message;
+    try {
+      var nr = await fetch("/api/auth/nonce", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: account }) });
+      if (!nr.ok) throw new Error("nonce");
+      message = (await nr.json()).message;
+    } catch (e) { setClaim("Could not start sign-in — please retry."); btn.disabled = false; return; }
+    var signature;
+    try { signature = await provider.request({ method: "personal_sign", params: [message, account] }); }
+    catch (e) { setClaim(isReject(e) ? "Signature declined — click claim to try again." : "Could not sign — please retry."); btn.disabled = false; return; }
+    var token;
+    try {
+      var vr = await fetch("/api/auth/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: account, signature: signature }) });
+      if (vr.status === 401) { setClaim("Signature could not be verified — click claim to try again."); btn.disabled = false; return; }
+      if (!vr.ok) throw new Error("verify");
+      token = (await vr.json()).session_token;
+    } catch (e) { setClaim("Could not verify signature — please retry."); btn.disabled = false; return; }
+    var lib;
+    try {
+      var lr = await fetch("/api/library", { headers: { "Authorization": "Bearer " + token } });
+      if (!lr.ok) throw new Error("library");
+      lib = await lr.json();
+    } catch (e) { setClaim("Could not load your purchases — please retry."); btn.disabled = false; return; }
+    var item = null, list = lib.purchases || [];
+    for (var i = 0; i < list.length; i++) if (list[i].order_id === CO.cid) { item = list[i]; break; }
+    if (!item) { setClaim("This wallet didn't pay for this order — sign with the paying wallet."); btn.disabled = false; return; }
+    renderClaim(item);
+    btn.style.display = "none";
+    byId("coClaimHint").style.display = "none";
+  }
+
+  function renderClaim(item) {
+    var el = byId("coClaim"); el.textContent = "";
+    if (item.kind === "file" && item.download_url) {
+      var a = document.createElement("a"); a.className = "co-dl"; a.href = item.download_url;
+      a.textContent = "Download your file"; a.rel = "noopener"; el.appendChild(a);
+    } else if (item.kind === "license" && item.license_key) {
+      var lbl = document.createElement("div"); lbl.className = "co-clabel"; lbl.textContent = "Your license key"; el.appendChild(lbl);
+      var mono = document.createElement("div"); mono.className = "co-mono"; mono.textContent = item.license_key; el.appendChild(mono);
+      var cb = document.createElement("button"); cb.className = "co-copy"; cb.textContent = "Copy license";
+      cb.onclick = function () { copyText(item.license_key, cb); }; el.appendChild(cb);
+    } else {
+      var d = document.createElement("div"); d.className = "co-deliver"; d.textContent = item.delivery || "Delivered — thank you!"; el.appendChild(d);
+    }
+    el.style.display = "block";
+  }
+
+  // ---- inline byte-mode QR encoder (EC level M, versions 1-10, auto-version +
+  // best-mask). Reduced transcription of the QR spec (ISO/IEC 18004) in the MIT
+  // qrcode-generator lineage; verified byte-identical to a reference encoder and
+  // round-trip-decoded. Self-contained: zero external requests, CSP-safe. ----
+  function qrMatrix(text) {
+    var EXP = new Array(256), LOG = new Array(256);
+    (function () { var x = 1; for (var i = 0; i < 255; i++) { EXP[i] = x; LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; } })();
+    function gmul(a, b) { return (a === 0 || b === 0) ? 0 : EXP[(LOG[a] + LOG[b]) % 255]; }
+    function ecPoly(deg) { var p = [1]; for (var i = 0; i < deg; i++) { var np = new Array(p.length + 1); for (var k = 0; k < np.length; k++) np[k] = 0; for (var j = 0; j < p.length; j++) { np[j] ^= p[j]; np[j + 1] ^= gmul(p[j], EXP[i]); } p = np; } return p; }
+    function ecBytes(data, deg) { var g = ecPoly(deg), res = data.slice(); for (var i = 0; i < deg; i++) res.push(0); for (var i2 = 0; i2 < data.length; i2++) { var c = res[i2]; if (c !== 0) for (var j = 0; j <= deg; j++) res[i2 + j] ^= gmul(g[j], c); } return res.slice(data.length); }
+
+    var TOTAL_CW = [26, 44, 70, 100, 134, 172, 196, 242, 292, 346];
+    var EC_TOTAL = [10, 16, 26, 36, 48, 64, 72, 88, 110, 130];
+    var BLOCKS = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5];
+    var ALIGN = [[], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34], [6, 22, 38], [6, 24, 42], [6, 26, 46], [6, 28, 50]];
+
+    var bytes = [];
+    for (var ci = 0; ci < text.length; ci++) {
+      var cp = text.charCodeAt(ci);
+      if (cp < 0x80) bytes.push(cp);
+      else if (cp < 0x800) { bytes.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f)); }
+      else { bytes.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f)); }
+    }
+
+    var version = 0;
+    for (var v = 1; v <= 10; v++) { var cc = v < 10 ? 8 : 16; var dataCW = TOTAL_CW[v - 1] - EC_TOTAL[v - 1]; if (4 + cc + 8 * bytes.length <= dataCW * 8) { version = v; break; } }
+    if (!version) throw new Error("payload too large for QR");
+    var vi = version - 1, size = version * 4 + 17;
+    var ccBits = version < 10 ? 8 : 16;
+    var totalCW = TOTAL_CW[vi], ecTotal = EC_TOTAL[vi], blocks = BLOCKS[vi];
+    var dataTotal = totalCW - ecTotal;
+
+    var buf = [];
+    function put(val, len) { for (var i = len - 1; i >= 0; i--) buf.push((val >> i) & 1); }
+    put(4, 4);
+    put(bytes.length, ccBits);
+    for (var bi = 0; bi < bytes.length; bi++) put(bytes[bi], 8);
+    var capBits = dataTotal * 8;
+    if (buf.length + 4 <= capBits) put(0, 4);
+    while (buf.length % 8 !== 0) buf.push(0);
+    var pads = [0xec, 0x11], pi = 0;
+    while (buf.length < capBits) { put(pads[pi % 2], 8); pi++; }
+    var dataCodewords = [];
+    for (var q = 0; q < buf.length; q += 8) { var bv = 0; for (var b2 = 0; b2 < 8; b2++) bv = (bv << 1) | buf[q + b2]; dataCodewords.push(bv); }
+
+    var group2 = totalCW % blocks, group1 = blocks - group2;
+    var dcInG1 = Math.floor(dataTotal / blocks);
+    var ecCount = Math.floor(totalCW / blocks) - dcInG1;
+    var dc = [], ec = [], off = 0, maxData = 0;
+    for (var bk = 0; bk < blocks; bk++) {
+      var dsize = bk < group1 ? dcInG1 : dcInG1 + 1;
+      var block = dataCodewords.slice(off, off + dsize);
+      dc.push(block); ec.push(ecBytes(block, ecCount));
+      off += dsize; if (dsize > maxData) maxData = dsize;
+    }
+    var codewords = [];
+    for (var d1 = 0; d1 < maxData; d1++) for (var r0 = 0; r0 < blocks; r0++) if (d1 < dc[r0].length) codewords.push(dc[r0][d1]);
+    for (var e1 = 0; e1 < ecCount; e1++) for (var r1 = 0; r1 < blocks; r1++) codewords.push(ec[r1][e1]);
+
+    var data = new Uint8Array(size * size), reserved = new Uint8Array(size * size);
+    function idx(row, col) { return row * size + col; }
+    function set(row, col, val, res) { data[idx(row, col)] = val ? 1 : 0; if (res) reserved[idx(row, col)] = 1; }
+    function get(row, col) { return data[idx(row, col)]; }
+
+    var fpos = [[0, 0], [size - 7, 0], [0, size - 7]];
+    for (var fp = 0; fp < 3; fp++) {
+      var fr = fpos[fp][0], fc = fpos[fp][1];
+      for (var rr = -1; rr <= 7; rr++) { if (fr + rr <= -1 || fr + rr >= size) continue; for (var cc2 = -1; cc2 <= 7; cc2++) { if (fc + cc2 <= -1 || fc + cc2 >= size) continue; var dk = (rr >= 0 && rr <= 6 && (cc2 === 0 || cc2 === 6)) || (cc2 >= 0 && cc2 <= 6 && (rr === 0 || rr === 6)) || (rr >= 2 && rr <= 4 && cc2 >= 2 && cc2 <= 4); set(fr + rr, fc + cc2, dk, true); } }
+    }
+    for (var tp = 8; tp < size - 8; tp++) { var tv = tp % 2 === 0; set(tp, 6, tv, true); set(6, tp, tv, true); }
+    var ap = ALIGN[vi], apLen = ap.length;
+    for (var ai = 0; ai < apLen; ai++) for (var aj = 0; aj < apLen; aj++) {
+      if ((ai === 0 && aj === 0) || (ai === 0 && aj === apLen - 1) || (ai === apLen - 1 && aj === 0)) continue;
+      var arow = ap[ai], acol = ap[aj];
+      for (var dr = -2; dr <= 2; dr++) for (var dc3 = -2; dc3 <= 2; dc3++) { var ad = (dr === -2 || dr === 2 || dc3 === -2 || dc3 === 2 || (dr === 0 && dc3 === 0)); set(arow + dr, acol + dc3, ad, true); }
+    }
+
+    function bchDigit(d) { var n = 0; while (d !== 0) { n++; d >>>= 1; } return n; }
+    var G15 = 0x537, G15_MASK = 0x5412, G15_BCH = bchDigit(G15);
+    var G18 = 0x1f25, G18_BCH = bchDigit(G18);
+    function formatBits(mask) { var d0 = (0 << 3) | mask, d = d0 << 10; while (bchDigit(d) - G15_BCH >= 0) d ^= (G15 << (bchDigit(d) - G15_BCH)); return ((d0 << 10) | d) ^ G15_MASK; }
+    function versionBitsFn(ver) { var d = ver << 12; while (bchDigit(d) - G18_BCH >= 0) d ^= (G18 << (bchDigit(d) - G18_BCH)); return (ver << 12) | d; }
+
+    function setupFormat(mask) {
+      var bits = formatBits(mask);
+      for (var i = 0; i < 15; i++) {
+        var mod = ((bits >> i) & 1) === 1;
+        if (i < 6) set(i, 8, mod, true); else if (i < 8) set(i + 1, 8, mod, true); else set(size - 15 + i, 8, mod, true);
+        if (i < 8) set(8, size - i - 1, mod, true); else if (i < 9) set(8, 15 - i - 1 + 1, mod, true); else set(8, 15 - i - 1, mod, true);
+      }
+      set(size - 8, 8, 1, true);
+    }
+    function setupVersion() { var bits = versionBitsFn(version); for (var i = 0; i < 18; i++) { var row = Math.floor(i / 3), col = (i % 3) + size - 8 - 3, mod = ((bits >> i) & 1) === 1; set(row, col, mod, true); set(col, row, mod, true); } }
+
+    setupFormat(0);
+    if (version >= 7) setupVersion();
+
+    (function () {
+      var inc = -1, row = size - 1, bitIndex = 7, byteIndex = 0;
+      for (var col = size - 1; col > 0; col -= 2) {
+        if (col === 6) col--;
+        while (true) {
+          for (var c = 0; c < 2; c++) {
+            if (!reserved[idx(row, col - c)]) {
+              var dark = false;
+              if (byteIndex < codewords.length) dark = (((codewords[byteIndex] >>> bitIndex) & 1) === 1);
+              set(row, col - c, dark, false);
+              bitIndex--; if (bitIndex === -1) { byteIndex++; bitIndex = 7; }
+            }
+          }
+          row += inc;
+          if (row < 0 || row >= size) { row -= inc; inc = -inc; break; }
+        }
+      }
+    })();
+
+    function maskAt(m, i, j) {
+      switch (m) {
+        case 0: return (i + j) % 2 === 0;
+        case 1: return i % 2 === 0;
+        case 2: return j % 3 === 0;
+        case 3: return (i + j) % 3 === 0;
+        case 4: return (Math.floor(i / 2) + Math.floor(j / 3)) % 2 === 0;
+        case 5: return ((i * j) % 2) + ((i * j) % 3) === 0;
+        case 6: return (((i * j) % 2) + ((i * j) % 3)) % 2 === 0;
+        case 7: return (((i * j) % 3) + ((i + j) % 2)) % 2 === 0;
+      }
+    }
+    function applyMask(m) { for (var col = 0; col < size; col++) for (var row = 0; row < size; row++) { if (reserved[idx(row, col)]) continue; if (maskAt(m, row, col)) data[idx(row, col)] ^= 1; } }
+    function penalty() {
+      var pts = 0, i, j;
+      for (i = 0; i < size; i++) { var scC = 0, scR = 0, lC = -1, lR = -1; for (j = 0; j < size; j++) { var mc = get(i, j); if (mc === lC) scC++; else { if (scC >= 5) pts += 3 + (scC - 5); lC = mc; scC = 1; } var mr = get(j, i); if (mr === lR) scR++; else { if (scR >= 5) pts += 3 + (scR - 5); lR = mr; scR = 1; } } if (scC >= 5) pts += 3 + (scC - 5); if (scR >= 5) pts += 3 + (scR - 5); }
+      for (i = 0; i < size - 1; i++) for (j = 0; j < size - 1; j++) { var s = get(i, j) + get(i, j + 1) + get(i + 1, j) + get(i + 1, j + 1); if (s === 4 || s === 0) pts += 3; }
+      for (i = 0; i < size; i++) { var bc = 0, br = 0; for (j = 0; j < size; j++) { bc = ((bc << 1) & 0x7ff) | get(i, j); if (j >= 10 && (bc === 0x5d0 || bc === 0x05d)) pts += 40; br = ((br << 1) & 0x7ff) | get(j, i); if (j >= 10 && (br === 0x5d0 || br === 0x05d)) pts += 40; } }
+      var dark = 0; for (i = 0; i < data.length; i++) dark += data[i]; var kk = Math.abs(Math.ceil((dark * 100 / data.length) / 5) - 10); pts += kk * 10;
+      return pts;
+    }
+
+    var best = 0, low = Infinity;
+    for (var m = 0; m < 8; m++) { setupFormat(m); applyMask(m); var p = penalty(); applyMask(m); if (p < low) { low = p; best = m; } }
+    applyMask(best);
+    setupFormat(best);
+
+    return { size: size, version: version, mask: best, get: get };
+  }
+</script>

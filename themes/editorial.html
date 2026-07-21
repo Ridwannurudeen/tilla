@@ -81,40 +81,8 @@
     <div class="price"><span class="n">{{PRICE}}</span><span class="u">USDT</span></div>
     <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}}</button>
     <div class="xlayer">Instant settlement in USDT on OKX X Layer · non-custodial</div>
-    <div class="checkout" id="co">
-      <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
-      <div class="row"><span>Network</span><b>X Layer (OKX)</b></div>
-      <div class="row"><span>Pay to</span></div>
-      <div class="addr" id="coAddr">{{ADDR}}</div>
-      <div class="status" id="coStatus">⏳ Waiting for payment… (auto-verified on-chain)</div>
-      <div class="status" id="coDelivery" style="display:none;color:var(--accent)"></div>
-    </div>
+    {% include "_checkout.html" %}
   </section>
-  <script>
-    const SLUG = {{ SLUG | tojson }};
-    async function startCheckout(){
-      document.getElementById('co').classList.add('on');
-      document.getElementById('buyBtn').disabled = true;
-      let r = await fetch('/api/checkout/'+SLUG, {method:'POST'});
-      let d = await r.json();
-      document.getElementById('coAmount').textContent = d.amount + ' USDT';
-      document.getElementById('coAddr').textContent = d.pay_to;
-      poll(d.id);
-    }
-    async function poll(id){
-      try{
-        let r = await fetch('/api/checkout/'+id);
-        let d = await r.json();
-        if(d.status === 'paid'){
-          document.getElementById('coStatus').textContent = '✅ Payment received & verified on X Layer';
-          const del = document.getElementById('coDelivery');
-          del.style.display='block'; del.textContent = d.delivery || 'Delivered — thank you!';
-          return;
-        }
-      }catch(e){}
-      setTimeout(()=>poll(id), 4000);
-    }
-  </script>
 
   <footer>Powered by <b>Tilla</b> · your storefront on the agent economy · settled on X Layer</footer>
 </div>
