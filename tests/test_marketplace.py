@@ -212,10 +212,15 @@ def test_upgrade_store_no_llm_key_503(make_store, monkeypatch):
     assert r.status_code == 503
 
 
-def test_upgrade_store_get_usage_json():
-    r = client.get("/upgrade-store")
-    assert r.status_code == 200
-    assert r.json()["service"] == "Tilla · upgrade-store"
+def test_paid_get_refused_before_settle():
+    # A PAID GET must be refused 405 (>=400 skips x402 settlement — no funds can
+    # move on GET). The test app has no paywall, so GET reaches the handler
+    # directly, exactly like a paid GET does in prod.
+    for path in ("/create-store", "/upgrade-store", "/add-product"):
+        r = client.get(path)
+        assert r.status_code == 405, path
+        assert r.headers["allow"] == "POST"
+        assert "POST" in r.json()["how"]
 
 
 # ======================================================= add-product
