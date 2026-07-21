@@ -270,7 +270,7 @@ def _store_theme(slug):
 @respx.mock
 def test_create_store_explicit_theme_persists_and_renders(tmp_path, monkeypatch):
     # Caller picks the theme: it wins over the LLM's suggestion, is persisted, and
-    # the store renders on it (bold's `.bolt` backdrop). og.svg is written too.
+    # the store renders on it (bold's `.stamp` mark). og.svg is written too.
     monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
     _mock_llm(
         monkeypatch, {"store_name": "Chosen", "price_usdt": 9, "theme": "original"}
@@ -286,7 +286,7 @@ def test_create_store_explicit_theme_persists_and_renders(tmp_path, monkeypatch)
     assert _store_theme(slug) == "bold.html"
     slug_dir = tmp_path / slug
     html = (slug_dir / "index.html").read_text(encoding="utf-8")
-    assert 'class="bolt"' in html
+    assert 'class="stamp mono"' in html
     assert (slug_dir / "og.svg").exists()
     meta = json.loads((slug_dir / "store.json").read_text(encoding="utf-8"))
     assert meta["theme"] == "bold.html"
@@ -307,7 +307,7 @@ def test_create_store_uses_llm_theme_when_unspecified(tmp_path, monkeypatch):
     slug = r.json()["slug"]
     assert _store_theme(slug) == "editorial.html"
     html = (tmp_path / slug / "index.html").read_text(encoding="utf-8")
-    assert 'class="rule"' in html
+    assert 'class="folio mono"' in html
 
 
 def test_create_store_invalid_theme_422():

@@ -5,45 +5,223 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex, nofollow" />
 <title>Tilla · Merchant dashboard</title>
+{% include "_fonts.html" %}
 <style>
-  :root { --bg:#0b0b12; --panel:#15151f; --line:#26263a; --text:#f5f5fa; --muted:#9a9ab0; --primary:#6c5ce7; --accent:#00d1b2; --danger:#ff5c72; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text); }
-  a { color:var(--accent); }
-  header { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; }
-  header h1 { font-size:16px; margin:0; letter-spacing:.02em; }
-  .wrap { max-width:960px; margin:0 auto; padding:20px; }
-  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:8px; padding:9px 14px; }
-  button.primary { background:var(--primary); border-color:var(--primary); }
-  button.ghost { background:transparent; }
-  button:disabled { opacity:.5; cursor:default; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
-  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
-  .stat { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
-  .stat .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-  .stat .v { font-size:22px; font-weight:600; margin-top:4px; word-break:break-word; }
-  table { width:100%; border-collapse:collapse; font-size:14px; }
-  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; }
-  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; word-break:break-all; }
-  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted); }
-  .muted { color:var(--muted); }
-  .err { color:var(--danger); }
-  .ok { color:var(--accent); }
-  input, select { font:inherit; background:#0f0f18; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 11px; }
-  input { width:100%; }
-  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
-  .hide { display:none; }
-  .clickable { cursor:pointer; }
-  .clickable:hover td { background:#1b1b28; }
-  .scroll { overflow-x:auto; }
+  /* Ops shell scheme — deliberately NOT merchant-palette-driven.
+     OKD-style surface ladder (near-black ground) + fixed rail tokens. */
+  :root{
+    --bg:#121212; --surface:#1a1a1e; --pressed:#26262c;
+    --hairline:#2b2b31; --text:#f2f2f6; --muted:#9a9aa6;
+    --xlayer:#BCFF2F; --on-xlayer:#000; --xlayer-tint:#e6ffb0;
+    --profit:#31bd65; --danger:#f5384f; --warning:#ffb117;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; font-family:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif;
+    font-size:14px; line-height:1.55; background:var(--bg); color:var(--text);
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  .mono{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; font-size:12.5px; word-break:break-all;
+  }
+  a{ color:var(--text); text-underline-offset:2px;
+    text-decoration-color:color-mix(in srgb,var(--text) 40%,transparent); }
+  a:hover{ text-decoration-color:var(--text); }
+  ::selection{ background:var(--text); color:var(--bg); }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible{
+    outline:2px solid var(--text); outline-offset:2px; }
+
+  /* ---------- header rail ---------- */
+  header{
+    position:sticky; top:0; z-index:5;
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+    height:56px; padding:0 20px; border-bottom:1px solid var(--hairline);
+    background:color-mix(in srgb,var(--bg) 88%,transparent);
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+  }
+  .brand{ display:flex; align-items:center; gap:11px; min-width:0; }
+  header h1{ font-size:15px; font-weight:700; margin:0; letter-spacing:-.01em; white-space:nowrap; }
+  .mark{ flex:none; display:grid; grid-template-columns:1fr 1fr; gap:2px; width:22px; height:22px; }
+  .mark i{ background:color-mix(in srgb,var(--text) 88%,transparent); border-radius:1px; }
+  .mark i:nth-child(2){ background:color-mix(in srgb,var(--text) 42%,transparent); }
+  .mark i:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
+  .mark i:nth-child(4){ background:color-mix(in srgb,var(--text) 64%,transparent); }
+  .head-right{ flex:none; }
+  #whoami{ max-width:15ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11.5px; }
+
+  /* ---------- chips: lime = on-chain only (dot or bg-chip + black text) ---------- */
+  .chip{
+    display:inline-flex; align-items:center; gap:7px; padding:5px 10px;
+    border:1px solid var(--hairline); border-radius:999px;
+    font-size:10.5px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 76%,transparent); white-space:nowrap; word-break:normal;
+  }
+  .dot{ flex:none; width:7px; height:7px; border-radius:50%; }
+  .dot-chain{ background:var(--xlayer);
+    box-shadow:0 0 8px color-mix(in srgb,var(--xlayer) 55%,transparent); }
+  .dot-warn{ background:var(--warning); }
+  .settle-chip{
+    display:inline-flex; align-items:center; gap:7px; padding:5px 10px; border-radius:4px;
+    background:var(--xlayer); color:var(--on-xlayer);
+    font-size:10.5px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; word-break:normal;
+  }
+
+  /* ---------- layout ---------- */
+  .wrap{ max-width:1060px; margin:0 auto; padding:24px 20px 72px; }
+  .row{ display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  .row.head{ justify-content:space-between; margin-bottom:2px; }
+  .cols{ display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:start; }
+  .cols .card{ margin-bottom:0; }
+
+  h3{ display:flex; align-items:center; gap:8px; margin:28px 0 10px;
+    font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.16em;
+    color:color-mix(in srgb,var(--text) 66%,transparent); }
+  h3::after{ content:""; flex:1; height:1px; background:var(--hairline); }
+  #storeTitle{ display:block; margin:16px 0 12px; font-size:16px; font-weight:600;
+    text-transform:none; letter-spacing:0; color:var(--text);
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; }
+  #storeTitle::after{ content:none; }
+
+  /* ---------- buttons: pill primaries, 4px small elements ---------- */
+  button{
+    font:inherit; font-size:13px; font-weight:600; cursor:pointer;
+    color:var(--text); background:var(--surface);
+    border:1px solid var(--hairline); border-radius:4px; padding:8px 14px;
+    transition:transform .12s ease, opacity .12s ease;
+  }
+  button:hover{ background:var(--pressed); }
+  button:active{ transform:translateY(1px); }
+  button.primary{
+    background:var(--text); border-color:var(--text); color:var(--bg);
+    border-radius:999px; padding:8px 18px;
+  }
+  button.primary:hover{ transform:translateY(-1px); }
+  button.ghost{ background:transparent; }
+  button.ghost:hover{ background:var(--surface);
+    border-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  button:disabled{ opacity:.5; cursor:default; transform:none; }
+  td button{ padding:5px 10px; font-size:12px; }
+  #csvOrders, #csvCustomers{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace; font-weight:500; }
+
+  /* ---------- cards & stats ---------- */
+  .card{ background:var(--surface); border:1px solid var(--hairline);
+    border-radius:8px; padding:16px; margin-bottom:14px; }
+  .card.err{ border-color:color-mix(in srgb,var(--danger) 45%,transparent);
+    background:color-mix(in srgb,var(--danger) 8%,var(--surface)); }
+  #msg{ font-size:13px; font-weight:500; }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  #summary{ margin-bottom:8px; }
+  .stat{ background:var(--surface); border:1px solid var(--hairline); border-radius:8px; padding:14px 16px; }
+  .stat .k{ color:var(--muted); font-size:10.5px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.12em; }
+  .stat .v{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; font-size:25px; font-weight:600;
+    letter-spacing:-.01em; margin-top:7px; word-break:break-word; }
+
+  /* ---------- tables: money reads in mono, tabular ---------- */
+  table{ width:100%; border-collapse:collapse; }
+  th, td{ text-align:left; padding:9px 10px; border-bottom:1px solid var(--hairline); vertical-align:top; }
+  th{ color:var(--muted); font-weight:600; font-size:10.5px;
+    text-transform:uppercase; letter-spacing:.1em; }
+  td{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; font-size:12.5px; }
+  tbody tr:last-child td{ border-bottom:0; }
+  .clickable{ cursor:pointer; }
+  .clickable:hover td{ background:var(--pressed); }
+  .scroll{ overflow-x:auto; }
+  .card.scroll{ padding:6px 14px; }
+
+  .pill{ display:inline-block; padding:3px 9px; border-radius:999px;
+    border:1px solid var(--hairline);
+    background:color-mix(in srgb,var(--text) 5%,transparent);
+    color:color-mix(in srgb,var(--text) 72%,transparent);
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+    word-break:normal; }
+
+  /* ---------- forms ---------- */
+  input, select{ font:inherit; font-size:13px; background:var(--bg); color:var(--text);
+    border:1px solid var(--hairline); border-radius:4px; padding:9px 11px; }
+  input{ width:100%;
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:12.5px; }
+  input::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
+  label{ display:block; font-size:10.5px; font-weight:600; text-transform:uppercase;
+    letter-spacing:.12em; color:var(--muted); margin:12px 0 6px; }
+
+  /* ---------- text utilities (JS-assigned classes) ---------- */
+  .muted{ color:var(--muted); }
+  .err{ color:var(--danger); }
+  .ok{ color:var(--profit); }
+  .hide{ display:none; }
+  .small{ font-size:12.5px; margin:8px 0 12px; }
+  strong{ font-weight:650; letter-spacing:.01em; }
+  .muted + strong{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; }
+  pre{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:11.5px; line-height:1.6; margin:0;
+    background:var(--bg); border:1px solid var(--hairline); border-radius:4px;
+    padding:10px 12px; }
+  #whStatus{ font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; word-break:normal; }
+  #whSecret{ margin-top:12px; padding:12px; border:1px dashed var(--hairline); border-radius:4px; }
+  #whSecret .mono.ok{ margin-top:6px; font-size:12.5px; }
+  #backToMain, #backFromOrder{ margin:2px 0 4px; }
+
+  /* ---------- intentional empty states ---------- */
+  #underpaid > .muted, .card.muted{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:11.5px; letter-spacing:.08em; text-transform:uppercase;
+    text-align:center; color:var(--muted); }
+  #underpaid > .muted{ margin:10px 0; padding:22px 12px;
+    border:1px dashed var(--hairline); border-radius:4px; }
+  .card.muted{ padding:26px 16px; border-style:dashed; background:transparent; }
+
+  /* ---------- signed-out console ---------- */
+  #viewLogin{ padding:clamp(22px,4.5vw,40px); }
+  .eyebrow{ display:inline-flex; align-items:center; gap:8px; margin:0;
+    font-size:10.5px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .eyebrow::before{ content:""; flex:none; width:7px; height:7px; background:var(--text); }
+  .lead{ margin:12px 0 8px; max-width:46rem; font-size:17px; line-height:1.5; letter-spacing:-.01em; }
+  .note{ margin:0 0 20px; max-width:42rem; font-size:13px; }
+  .login-rail{ display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+    padding-top:16px; border-top:1px solid var(--hairline); }
+
+  /* ---------- motion: transform/opacity only, gated ---------- */
+  @media (prefers-reduced-motion: no-preference){
+    .dot-chain{ animation:live 2.4s ease-in-out infinite; }
+    @keyframes live{ 50%{ opacity:.45; } }
+    #viewLogin, #viewMain, #viewStore, #viewOrder{ animation:view-in .18s ease-out; }
+    @keyframes view-in{ from{ opacity:0; transform:translateY(4px); } }
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{ transition:none !important; animation:none !important; }
+  }
+
+  @media (max-width:760px){
+    .cols{ grid-template-columns:1fr; }
+  }
+  @media (max-width:640px){
+    .chip.chain{ display:none; }
+    #whoami{ max-width:9ch; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>Tilla · Merchant</h1>
-  <div class="row">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <h1>Tilla · Merchant</h1>
+  </div>
+  <div class="row head-right">
+    <span class="chip chain mono"><span class="dot dot-chain" aria-hidden="true"></span>X Layer · chainId 196</span>
     <span id="whoami" class="muted mono"></span>
     <button id="signBtn" class="primary">Connect wallet</button>
     <button id="signOut" class="ghost hide">Sign out</button>
@@ -55,44 +233,59 @@
 
   <!-- signed-out -->
   <div id="viewLogin" class="card">
-    <p>Sign in with your store's receive wallet to see every store you own, its
+    <p class="eyebrow mono">Merchant console</p>
+    <p class="lead">Sign in with your store's receive wallet to see every store you own, its
        orders and revenue, issue non-custodial refunds, export CSV, and configure
        a webhook. Nothing is stored — you re-sign on refresh.</p>
-    <p class="muted">This dashboard never holds funds. A refund is a transfer you
+    <p class="note muted">This dashboard never holds funds. A refund is a transfer you
        send from your own wallet; paste the tx hash and Tilla verifies it on X Layer.</p>
+    <div class="login-rail">
+      <span class="settle-chip mono">Settles on X Layer</span>
+      <span class="chip mono">Non-custodial</span>
+      <span class="chip mono">USDT0 · chainId 196</span>
+    </div>
   </div>
 
   <!-- signed-in -->
   <div id="viewMain" class="hide">
     <div id="summary" class="grid"></div>
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <strong>Webhook</strong>
-        <span id="whStatus" class="muted"></span>
+
+    <h3><span class="dot dot-warn" aria-hidden="true"></span>Underpaid orders needing refund</h3>
+    <div id="underpaid" class="card scroll"></div>
+
+    <h3>Your stores</h3>
+    <div id="stores"></div>
+
+    <h3>Marketplace</h3>
+    <div id="marketplace"></div>
+
+    <h3>Configuration</h3>
+    <div class="cols">
+      <div class="card">
+        <div class="row head">
+          <strong>Webhook</strong>
+          <span id="whStatus" class="muted mono"></span>
+        </div>
+        <label for="whUrl">Endpoint URL (https only)</label>
+        <input id="whUrl" placeholder="https://example.com/tilla/webhook" />
+        <div class="row" style="margin-top:12px">
+          <button id="whSave">Save / rotate</button>
+          <button id="whDelete" class="ghost">Remove</button>
+        </div>
+        <div id="whSecret" class="hide"></div>
       </div>
-      <label for="whUrl">Endpoint URL (https only)</label>
-      <input id="whUrl" placeholder="https://example.com/tilla/webhook" />
-      <div class="row" style="margin-top:10px">
-        <button id="whSave">Save / rotate</button>
-        <button id="whDelete" class="ghost">Remove</button>
-      </div>
-      <div id="whSecret" class="hide" style="margin-top:10px"></div>
-    </div>
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <strong>Export</strong>
+      <div class="card">
+        <div class="row head">
+          <strong>Export</strong>
+          <span class="muted mono">CSV</span>
+        </div>
+        <p class="muted small">Orders and customers for this wallet, scoped to your stores.</p>
         <div class="row">
           <button id="csvOrders" class="ghost">orders.csv</button>
           <button id="csvCustomers" class="ghost">customers.csv</button>
         </div>
       </div>
     </div>
-    <h3>Underpaid orders needing refund</h3>
-    <div id="underpaid" class="card scroll"></div>
-    <h3>Your stores</h3>
-    <div id="stores"></div>
-    <h3>Marketplace</h3>
-    <div id="marketplace"></div>
   </div>
 
   <!-- one store's orders -->

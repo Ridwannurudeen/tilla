@@ -17,102 +17,221 @@
 <meta name="twitter:description" content="{{META_DESCRIPTION}}">
 <meta name="twitter:image" content="{{OG_IMAGE}}">
 <script type="application/ld+json">{{ PRODUCT_JSONLD | tojson }}</script>
+{% include "_fonts.html" %}
 <style>
   :root{ --primary:{{C_PRIMARY}}; --accent:{{C_ACCENT}}; --bg:{{C_BG}}; --text:{{C_TEXT}}; }
+  :root{
+    --on-primary:{{C_ON_PRIMARY}};
+    --xlayer:#BCFF2F; --on-xlayer:#000; --xlayer-tint:#e6ffb0;
+    --surface:color-mix(in oklab,var(--bg) 92%,var(--text));
+    --pressed:color-mix(in oklab,var(--bg) 84%,var(--text));
+    --hairline:color-mix(in srgb,var(--text) 16%,transparent);
+    --tint:color-mix(in srgb,var(--primary) 8%,var(--bg));
+  }
+  @property --tint{ syntax:'<color>'; inherits:true; initial-value:transparent; }
+
   *{ box-sizing:border-box; margin:0; padding:0; }
-  body{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-        background:var(--bg); color:var(--text); line-height:1.5; -webkit-font-smoothing:antialiased;
-        overflow-x:hidden; }
+  body{
+    font-family:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.5;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
   a{ color:inherit; }
-  .wrap{ max-width:980px; margin:0 auto; padding:0 24px; position:relative; z-index:1; }
+  ::selection{ background:var(--primary); color:var(--on-primary); }
+  button:focus-visible, a:focus-visible{ outline:3px solid var(--text); outline-offset:3px; }
+  .mono{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums;
+  }
+  .wrap{ position:relative; z-index:1; max-width:1040px; margin:0 auto;
+    padding-left:clamp(18px,4vw,40px); padding-right:clamp(18px,4vw,40px); }
 
-  /* animated bold backdrop */
-  .bolt{ position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden; }
-  .bolt::before{ content:""; position:absolute; width:140%; height:140%; left:-20%; top:-60%;
-    background:conic-gradient(from 180deg at 50% 50%, var(--primary), var(--accent), var(--primary));
-    opacity:.35; filter:blur(70px); animation:spin 26s linear infinite; }
-  .bolt::after{ content:""; position:absolute; inset:0;
-    background:linear-gradient(180deg, transparent 0%, var(--bg) 78%); }
-  @keyframes spin{ to{ transform:rotate(360deg); } }
-  @media (prefers-reduced-motion:reduce){ .bolt::before{ animation:none; } }
+  /* ---------- top bar: thick rule, block mark, chain chip ---------- */
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+    padding:14px clamp(16px,3vw,32px);
+    border-bottom:3px solid var(--text); background:var(--bg);
+  }
+  .brand{ display:flex; align-items:center; gap:12px; min-width:0;
+    font-weight:700; font-size:18px; letter-spacing:.02em; text-transform:uppercase; }
+  .brand .mark{ flex:none; width:40px; height:40px; display:grid; place-items:center;
+    font-size:20px; line-height:1; border:2px solid var(--text); background:var(--surface); }
+  .brand .brand-name{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chip{
+    flex:none; display:inline-flex; align-items:center; gap:8px; padding:8px 12px;
+    border:2px solid var(--text);
+    font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
+    white-space:nowrap;
+  }
+  .chip .dot{ width:8px; height:8px; background:var(--xlayer);
+    box-shadow:0 0 0 1px rgba(0,0,0,.28); }
+  .chip .dot{ animation:live 2.4s ease-in-out infinite; }
+  @keyframes live{ 50%{ opacity:.45; } }
 
-  header{ display:flex; align-items:center; justify-content:space-between; padding:28px 0; }
-  .brand{ display:flex; align-items:center; gap:13px; font-weight:900; font-size:21px; letter-spacing:-.02em;
-    text-transform:uppercase; }
-  .logo{ width:48px; height:48px; display:grid; place-items:center; font-size:26px; border-radius:14px;
-    background:linear-gradient(135deg, var(--primary), var(--accent));
-    box-shadow:0 0 0 2px color-mix(in srgb,var(--text) 10%,transparent), 0 10px 34px color-mix(in srgb,var(--primary) 55%,transparent); }
-  .pill{ font-size:11.5px; font-weight:800; padding:8px 15px; border-radius:999px; text-transform:uppercase; letter-spacing:.06em;
-    background:linear-gradient(135deg, color-mix(in srgb,var(--primary) 30%,transparent), color-mix(in srgb,var(--accent) 30%,transparent));
-    border:1px solid color-mix(in srgb,var(--accent) 45%,transparent); color:var(--text); }
+  /* ---------- masthead: the headline IS the layout ---------- */
+  .mast{ position:relative; overflow:hidden; border-bottom:3px solid var(--text);
+    padding:clamp(56px,9vh,110px) 0 clamp(56px,9vh,104px); }
+  .tiles{ position:absolute; top:0; right:0; z-index:0; pointer-events:none; }
+  .tiles i{ position:absolute; display:block; }
+  .tiles .ta{ width:170px; height:170px; top:0; right:0; background:var(--primary); }
+  .tiles .tb{ width:100px; height:100px; top:0; right:170px; background:var(--accent); }
+  .tiles .tc{ width:110px; height:110px; top:170px; right:0; background:var(--tint);
+    border:2px solid var(--hairline); }
+  .kicker{ display:inline-flex; align-items:center; gap:10px;
+    font-size:12px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 70%,transparent); }
+  .kicker::before{ content:""; flex:none; width:10px; height:10px; background:var(--primary); }
+  .mast h1{
+    margin-top:20px; max-width:12ch;
+    font-size:clamp(2.8rem,11vw,8.5rem); font-weight:700; text-transform:uppercase;
+    line-height:.92; letter-spacing:-.02em; overflow-wrap:anywhere; text-wrap:balance;
+  }
+  .stamp{ display:inline-block; margin-top:34px; padding:12px 18px;
+    border:3px solid var(--text); transform:rotate(-4deg);
+    font-size:13px; font-weight:700; letter-spacing:.22em; text-transform:uppercase;
+    box-shadow:8px 8px 0 var(--primary); background:var(--bg); }
+  .mast-price{ display:flex; align-items:baseline; flex-wrap:wrap; gap:14px;
+    margin-top:clamp(30px,5vh,52px); }
+  .mast-price .n{ font-size:clamp(2.6rem,7vw,5rem); font-weight:700;
+    letter-spacing:-.02em; line-height:1; }
+  .mast-price .u{ font-size:1.1rem; font-weight:700; letter-spacing:.08em;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .mast-sub{ margin-top:20px; max-width:34rem; font-size:1.125rem;
+    color:color-mix(in srgb,var(--text) 72%,transparent); }
 
-  .hero{ text-align:center; padding:78px 0 24px; }
-  .hero .kicker{ display:inline-block; font-size:12.5px; font-weight:800; letter-spacing:.14em; text-transform:uppercase;
-    color:var(--accent); margin-bottom:18px; }
-  .hero h1{ font-size:clamp(40px,8vw,78px); font-weight:900; letter-spacing:-.045em; line-height:.98;
-    background:linear-gradient(120deg, var(--text) 20%, var(--accent) 55%, var(--primary) 90%);
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .hero p{ margin:22px auto 0; max-width:580px; font-size:19px; font-weight:500; color:color-mix(in srgb,var(--text) 68%,transparent); }
+  /* ---------- proof / ledger band: dot-leader facts, lime = chain ---------- */
+  .ledger{ background:var(--surface); border-bottom:3px solid var(--text); }
+  .ledger .wrap{ padding-top:clamp(44px,7vh,72px); padding-bottom:clamp(44px,7vh,72px); }
+  .ledger-title{ display:inline-flex; align-items:center; gap:10px;
+    font-size:11px; font-weight:700; letter-spacing:.2em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .ledger-title::before{ content:""; flex:none; width:10px; height:10px; background:var(--xlayer); }
+  .ledger h2{ margin-top:14px; font-size:clamp(1.5rem,3.4vw,2.3rem); font-weight:700;
+    text-transform:uppercase; letter-spacing:-.01em; line-height:1.1; max-width:24ch; }
+  .facts{ margin-top:26px; font-size:14px; }
+  .fact{ display:flex; align-items:baseline; gap:14px; padding:16px 0;
+    border-bottom:2px solid color-mix(in srgb,var(--text) 24%,transparent); }
+  .fact:first-child{ border-top:2px solid color-mix(in srgb,var(--text) 24%,transparent); }
+  .fact dt{ flex:none; font-size:11px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 58%,transparent); }
+  .fact .lead{ flex:1; min-width:24px;
+    border-bottom:2px dotted color-mix(in srgb,var(--text) 36%,transparent);
+    transform:translateY(-4px); }
+  .fact dd{ font-weight:700; text-align:right; letter-spacing:.01em; }
+  .vchip{ display:inline-block; padding:5px 10px;
+    background:var(--xlayer); color:var(--on-xlayer); font-weight:700; letter-spacing:.06em; }
 
-  .card{ margin:44px auto 0; max-width:560px; border-radius:26px; padding:6px;
-    background:linear-gradient(135deg, var(--primary), var(--accent));
-    box-shadow:0 30px 90px -20px color-mix(in srgb,var(--primary) 60%,transparent); }
-  .card-inner{ border-radius:22px; padding:34px; background:color-mix(in srgb,var(--bg) 92%, black); }
-  .card h2{ font-size:26px; font-weight:900; letter-spacing:-.02em; }
-  .card .blurb{ margin-top:11px; color:color-mix(in srgb,var(--text) 72%,transparent); font-size:16px; }
-  .price{ margin-top:26px; display:flex; align-items:baseline; gap:10px; }
-  .price .n{ font-size:48px; font-weight:900; letter-spacing:-.03em;
-    background:linear-gradient(120deg,var(--text),var(--accent)); -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .price .u{ font-size:15px; font-weight:800; color:var(--accent); letter-spacing:.04em; }
-  .buy{ margin-top:26px; width:100%; border:0; cursor:pointer; padding:19px; border-radius:16px; font-size:17px; font-weight:900;
-    letter-spacing:.01em; text-transform:uppercase; color:#fff;
-    background:linear-gradient(135deg,var(--primary),var(--accent));
-    box-shadow:0 16px 40px color-mix(in srgb,var(--primary) 55%,transparent); transition:transform .12s, box-shadow .12s; }
-  .buy:hover{ transform:translateY(-3px) scale(1.01); box-shadow:0 22px 50px color-mix(in srgb,var(--primary) 65%,transparent); }
-  .buy:active{ transform:translateY(0); }
-  .xlayer{ margin-top:16px; text-align:center; font-size:12.5px; font-weight:600; color:color-mix(in srgb,var(--text) 55%,transparent); }
-  .checkout{ display:none; margin-top:22px; padding:20px; border-radius:16px; background:color-mix(in srgb,var(--bg) 60%,#000);
-    border:1px dashed color-mix(in srgb,var(--accent) 45%,transparent); font-size:14px; }
-  .checkout.on{ display:block; }
-  .row{ display:flex; justify-content:space-between; gap:10px; margin:6px 0; }
-  .addr{ font-family:ui-monospace,Consolas,monospace; font-size:12px; word-break:break-all; color:var(--accent); font-weight:700; }
-  .status{ margin-top:10px; font-weight:700; color:color-mix(in srgb,var(--text) 70%,transparent); }
-  footer{ text-align:center; padding:60px 0 44px; font-size:13px; font-weight:600; color:color-mix(in srgb,var(--text) 45%,transparent); }
-  footer b{ color:var(--accent); }
+  /* ---------- product + buy block: palette-dominant, hard offset shadow ---------- */
+  .shop{ padding:clamp(60px,10vh,120px) 0; }
+  .card{ position:relative; max-width:720px; margin:0 auto;
+    border:3px solid var(--text); background:var(--tint);
+    box-shadow:10px 10px 0 var(--primary);
+    padding:clamp(26px,4vw,48px); }
+  .card .blocks{ position:absolute; top:18px; right:18px; display:flex; gap:6px; }
+  .card .blocks span{ width:12px; height:12px; }
+  .card .blocks span:nth-child(1){ background:var(--primary); }
+  .card .blocks span:nth-child(2){ background:var(--accent); }
+  .card .blocks span:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
+  .card h2{ font-size:clamp(1.8rem,4.5vw,3.2rem); font-weight:700; text-transform:uppercase;
+    line-height:1.02; letter-spacing:-.02em; color:var(--primary);
+    max-width:16ch; text-wrap:balance; }
+  .card .blurb{ margin-top:14px; font-size:1.05rem; max-width:32rem;
+    color:color-mix(in srgb,var(--text) 76%,transparent); }
+  .price-row{ display:flex; align-items:baseline; gap:12px; margin-top:26px;
+    padding-top:22px; border-top:2px solid color-mix(in srgb,var(--text) 24%,transparent); }
+  .price-row .p{ font-size:clamp(2.4rem,6vw,4.2rem); font-weight:700;
+    letter-spacing:-.02em; line-height:1; }
+  .price-row .u{ font-size:1rem; font-weight:700; letter-spacing:.06em; color:var(--accent); }
+  .buy{
+    display:block; width:100%; margin-top:24px; border:0; cursor:pointer;
+    padding:18px 30px; border-radius:999px; font:inherit; font-size:17px; font-weight:700;
+    text-transform:uppercase; letter-spacing:.04em;
+    color:var(--on-primary); background:var(--primary);
+    box-shadow:6px 6px 0 var(--accent);
+    transition:transform .15s ease, opacity .15s ease;
+  }
+  .buy:hover{ transform:translate(-2px,-2px); }
+  .buy:active{ transform:translate(0,0); }
+  .buy:disabled{ opacity:.5; cursor:default; transform:none; }
+  .buy-note{ margin-top:14px; text-align:center; font-size:10.5px; font-weight:700;
+    letter-spacing:.14em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 56%,transparent); }
 
-  @media (max-width:480px){
-    .brand{ font-size:17px; } .logo{ width:40px; height:40px; font-size:22px; }
-    .pill{ display:none; }
-    .card-inner{ padding:24px; }
+  /* ---------- stark mono footer ---------- */
+  footer{ border-top:3px solid var(--text); }
+  footer .wrap{ display:flex; align-items:center; justify-content:space-between; gap:14px;
+    flex-wrap:wrap; padding-top:30px; padding-bottom:38px;
+    font-size:10.5px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 52%,transparent); }
+  footer b{ font-weight:700; color:color-mix(in srgb,var(--text) 80%,transparent); }
+
+  @media (max-width:860px){
+    .tiles{ transform:scale(.6); transform-origin:top right; }
+  }
+  @media (max-width:560px){
+    .brand{ font-size:15px; }
+    .brand .mark{ width:34px; height:34px; font-size:17px; }
+    .chip{ padding:6px 9px; letter-spacing:.08em; }
+  }
+  @media (prefers-reduced-motion: reduce){
+    .chip .dot{ animation:none; }
+    .buy{ transition:none; }
+    .buy:hover, .buy:active{ transform:none; }
   }
 </style>
 </head>
 <body>
-<div class="bolt"></div>
-<div class="wrap">
-  <header>
-    <div class="brand"><span class="logo">{{EMOJI}}</span> {{STORE_NAME}}</div>
-    <span class="pill">Pay with crypto · X Layer</span>
-  </header>
+<header class="topbar">
+  <div class="brand"><span class="mark" aria-hidden="true">{{EMOJI}}</span> <span class="brand-name">{{STORE_NAME}}</span></div>
+  <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · 196</span>
+</header>
 
-  <section class="hero">
-    <span class="kicker">{{TAGLINE}}</span>
-    <h1>{{HERO_HEADLINE}}</h1>
-    <p>{{HERO_SUBCOPY}}</p>
-  </section>
-
-  <section class="card">
-    <div class="card-inner">
-      <h2>{{PRODUCT_NAME}}</h2>
-      <div class="blurb">{{PRODUCT_BLURB}}</div>
-      <div class="price"><span class="n">{{PRICE}}</span><span class="u">USDT</span></div>
-      <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}} →</button>
-      <div class="xlayer">Instant settlement in USDT on OKX X Layer · non-custodial</div>
-      {% include "_checkout.html" %}
+<main>
+  <section class="mast">
+    <div class="tiles" aria-hidden="true"><i class="ta"></i><i class="tb"></i><i class="tc"></i></div>
+    <div class="wrap">
+      {% if TAGLINE %}<p class="kicker mono">{{TAGLINE}}</p>{% endif %}
+      <h1>{{HERO_HEADLINE}}</h1>
+      <div class="stamp mono">Agent-buyable</div>
+      <div class="mast-price">
+        <span class="n mono">{{PRICE}}</span><span class="u mono">USDT</span>
+      </div>
+      <p class="mast-sub">{{HERO_SUBCOPY}}</p>
     </div>
   </section>
 
-  <footer>Powered by <b>Tilla</b> · your storefront on the agent economy · settled on X Layer</footer>
-</div>
+  <section class="ledger">
+    <div class="wrap">
+      <p class="ledger-title mono">Proof · on-chain</p>
+      <h2>Every sale settles on-chain. Nothing here can be faked.</h2>
+      <dl class="facts mono">
+        <div class="fact"><dt>Settlement</dt><i class="lead" aria-hidden="true"></i><dd>USDT0 · X Layer · chainId 196</dd></div>
+        <div class="fact"><dt>Agent checkout</dt><i class="lead" aria-hidden="true"></i><dd>x402 · HTTP 402</dd></div>
+        <div class="fact"><dt>Status</dt><i class="lead" aria-hidden="true"></i><dd><span class="vchip">✓ Verified on-chain</span></dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="shop" id="buy">
+    <div class="wrap">
+      <div class="card">
+        <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
+        <h2>{{PRODUCT_NAME}}</h2>
+        <p class="blurb">{{PRODUCT_BLURB}}</p>
+        <div class="price-row mono"><span class="p">{{PRICE}}</span><span class="u">USDT</span></div>
+        <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}}</button>
+        <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
+        {% include "_checkout.html" %}
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap mono">
+    <span>Powered by <b>Tilla</b></span>
+    <span>Settled on X Layer · chainId 196</span>
+  </div>
+</footer>
 </body>
 </html>
