@@ -155,6 +155,28 @@ def build_payment_option(rail: PaymentRail) -> PaymentOption:
     )
 
 
+def build_fee_payment_option(rail: PaymentRail, amount: str) -> PaymentOption:
+    """A static exact PaymentOption for a fixed PLATFORM FEE (M10 upgrade-store /
+    add-product), mirroring :func:`build_payment_option` with the amount overridden.
+    payTo is Tilla's own ``rail.pay_to`` — Tilla earning its platform fee, identical
+    to create-store (store SALES stay non-custodial payTo=merchant on /s/:slug/buy).
+    `amount` is micro-USDT as a string (e.g. "1000000" = 1 USDT)."""
+    return PaymentOption(
+        scheme=rail.scheme,
+        price=AssetAmount(
+            amount=amount,
+            asset=rail.asset,
+            extra={
+                "name": rail.eip712_name,
+                "version": rail.eip712_version,
+            },
+        ),
+        network=rail.network,
+        pay_to=rail.pay_to,
+        max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
+    )
+
+
 def _dynamic_store_hooks(rail: PaymentRail):
     """The shared per-request pay_to/price resolvers for the wildcard store buy
     route. Both hooks are ASYNC (``asyncio.to_thread`` around a sync DB read) on
