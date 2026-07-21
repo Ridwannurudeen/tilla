@@ -70,6 +70,10 @@ class Product(Base):
     __tablename__ = "products"
     __table_args__ = (
         CheckConstraint("price_micro > 0", name="ck_products_price_micro_positive"),
+        CheckConstraint(
+            "pricing_model IN ('one_time','batch','metered','subscription')",
+            name="ck_products_pricing_model",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -77,6 +81,15 @@ class Product(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     price_micro: Mapped[int] = mapped_column(Integer, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # M8 payment methods: which x402/MPP rail this product declares. 'one_time'
+    # (the default, every existing product) is byte-identical exact checkout;
+    # 'batch' unlocks the aggr_deferred accepts-entry; 'metered' unlocks MPP
+    # session channels; 'subscription' unlocks the period sidecar. pricing_params
+    # holds the per-model config, validated by pydantic at the declaration seam.
+    pricing_model: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="one_time", server_default="one_time"
+    )
+    pricing_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -320,6 +333,51 @@ class ChainCursor(Base):
     last_block: Mapped[int] = mapped_column(Integer, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
+    )
+
+
+class MppChannel(Base):
+    """One MPP (Merchant Payment Protocol) pay-as-you-go session channel. State
+    lives here, NOT in the SDK's FileStore, so every transition is a race-proof
+    conditional UPDATE (the M3 pattern) and the state machine unit-tests as pure
+    functions over this row with the SA client mocked. A channel is the only
+    fund-moving act (open deposits real USDT into the escrow contract), so the
+    endpoints stay fail-closed (503) until TILLA_MPP_ENABLED + SA creds are set —
+    no synthetic close/settle is ever written."""
+
+    __tablename__ = "mpp_channels"
+    __table_args__ = (
+        UniqueConstraint("channel_id", name="uq_mpp_channels_channel_id"),
+        CheckConstraint(
+            "status IN ('open','closing','closed','failed')",
+            name="ck_mpp_channels_status",
+        ),
+        Index("ix_mpp_channels_store_id", "store_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    # The SA-issued channel/session id — the idempotency key for every transition.
+    channel_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    buyer_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # NON-CUSTODIAL: always the merchant wallet, never Tilla (same as exact).
+    pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
+    deposit_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    spent_micro: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    unit_price_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="open", server_default="open"
+    )
+    last_voucher_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
     )
 
 
