@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import timedelta
@@ -61,6 +62,7 @@ from app.models import (
     log_event,
 )
 from app.payment import (
+    PAYMENT_AMOUNT,
     PAYMENT_ASSET,
     PAYMENT_EIP712_NAME,
     PAYMENT_EIP712_VERSION,
@@ -292,6 +294,68 @@ def _pricing_block(product: Product) -> dict:
     if raw.get("tiers"):
         block["wholesale"] = True
     return block
+
+
+# ============================================================================
+# Offering envelope: the two agent-buyer fields every purchasable offering carries.
+# `requiredFunds` = the exact x402 charge; `nextActions` = how to transact. Additive
+# (existing consumers ignore both keys); shared verbatim by feed.json, get_product,
+# and the agent card so an agent buyer sees one consistent shape everywhere.
+# ============================================================================
+def _required_funds(store: Store, product: Product) -> dict:
+    """The exact funds an agent must transfer to buy ``product`` — byte-identical to
+    what the x402 challenge on ``/s/{slug}/buy/{id}`` actually demands. The amount is
+    the base ``product.price_micro`` that :func:`resolve_price` returns for a public
+    request (per-buyer wholesale tiers are NEVER quoted on a public surface — M16
+    INV-B — so the advertised amount is always the one that settles); asset/network
+    are the canonical X Layer USDT0 rail; ``pay_to`` is the merchant wallet
+    :func:`resolve_pay_to` returns. NON-CUSTODIAL: pay_to is the merchant, never
+    Tilla."""
+    return {
+        "amount_micro": product.price_micro,
+        "amount": _usdt_str(product.price_micro),
+        "currency": CURRENCY,
+        "asset": ASSET,
+        "network": NETWORK,
+        "pay_to": store.pay_to,
+    }
+
+
+def _next_actions(slug: str, product: Product) -> list[dict]:
+    """The concrete steps an agent can take to acquire ``product``, most-direct
+    first: the x402 buy POST (pay + receive the deliverable in one call) and the MCP
+    confirm-before-pay path. Each names a real, reachable endpoint/tool on THIS
+    store."""
+    return [
+        {
+            "type": "x402_buy",
+            "method": "POST",
+            "endpoint": f"/s/{slug}/buy/{product.id}",
+            "protocol": "x402-v2",
+            "description": (
+                "POST an x402 payment to buy and receive the deliverable in-band."
+            ),
+        },
+        {
+            "type": "mcp",
+            "endpoint": f"/s/{slug}/mcp",
+            "tools": ["preview_order", "create_checkout", "pay"],
+            "description": (
+                "Confirm-before-pay: preview_order (read-only), then create_checkout "
+                "(reserve an exact amount), then pay (submit the tx hash)."
+            ),
+        },
+    ]
+
+
+def _offering_envelope(store: Store, slug: str, product: Product) -> dict:
+    """The offering envelope every agent-facing surface embeds per purchasable
+    product: ``requiredFunds`` (the exact x402 charge, non-custodial payTo=merchant)
+    and ``nextActions`` (how to transact)."""
+    return {
+        "requiredFunds": _required_funds(store, product),
+        "nextActions": _next_actions(slug, product),
+    }
 
 
 # ============================================================================
@@ -1286,6 +1350,7 @@ def _tool_get_product(
             "asset": ASSET,
             "schemes": enabled_schemes(product),
         },
+        **_offering_envelope(store, slug, product),
     }
     # M16 B2B: echo the advisory wholesale quote for a presented agent id. Pass it
     # to /buy as ?agent_id=<id> to have the tier priced into the 402 (INV-1 grants
@@ -1669,6 +1734,7 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
             "asset": ASSET,
             "schemes": enabled_schemes(product),
         },
+        **_offering_envelope(store, slug, product),
     }
 
 
@@ -1828,6 +1894,22 @@ def agent_card(request: Request):
     # trial and error (the ACP 'requirement schema' idea, applied to our own service).
     from app.main import CreateStoreBody
 
+    # create-store's requiredFunds is the fixed platform charge — amount derived from
+    # the SAME PAYMENT_AMOUNT constant build_payment_option feeds the /create-store
+    # x402 route, so it can never drift from the real 402. payTo is Tilla's own rail
+    # wallet (Tilla earning its service fee); omitted when PAY_TO_ADDRESS is unset
+    # (no middleware — e.g. tests) rather than advertising a wallet we cannot honor.
+    create_store_funds: dict = {
+        "amount_micro": int(PAYMENT_AMOUNT),
+        "amount": _usdt_str(int(PAYMENT_AMOUNT)),
+        "currency": CURRENCY,
+        "asset": ASSET,
+        "network": NETWORK,
+    }
+    tilla_pay_to = os.environ.get("PAY_TO_ADDRESS")
+    if tilla_pay_to:
+        create_store_funds["pay_to"] = tilla_pay_to
+
     body = {
         "name": "Tilla",
         "description": (
@@ -1848,6 +1930,19 @@ def agent_card(request: Request):
                     "theme": "original",
                 },
                 "sla_minutes": DELIVERY_SLA_MINUTES,
+                "requiredFunds": create_store_funds,
+                "nextActions": [
+                    {
+                        "type": "x402_buy",
+                        "method": "POST",
+                        "endpoint": "/create-store",
+                        "protocol": "x402-v2",
+                        "description": (
+                            "POST {description, theme} with an x402 payment (1 USDT) "
+                            "to spin up a live store."
+                        ),
+                    }
+                ],
             },
             {
                 "id": "buy",
@@ -1873,6 +1968,35 @@ def agent_card(request: Request):
                     },
                 },
                 "sla_minutes": DELIVERY_SLA_MINUTES,
+                # requiredFunds is per-offering (varies by store/product), so it is
+                # resolved from the store's own feed.json / get_product envelope —
+                # nextActions names exactly how to reach it and then pay.
+                "nextActions": [
+                    {
+                        "type": "discover",
+                        "method": "GET",
+                        "endpoint": "/discovery/resources",
+                        "description": "List live stores to pick a slug.",
+                    },
+                    {
+                        "type": "feed",
+                        "method": "GET",
+                        "endpoint": "/s/{slug}/feed.json",
+                        "description": (
+                            "Fetch a store's per-product requiredFunds + buy endpoints."
+                        ),
+                    },
+                    {
+                        "type": "x402_buy",
+                        "method": "POST",
+                        "endpoint": "/s/{slug}/buy",
+                        "protocol": "x402-v2",
+                        "description": (
+                            "POST an x402 payment; payTo is the merchant "
+                            "(non-custodial)."
+                        ),
+                    },
+                ],
             },
         ],
         "payment": {
@@ -1969,6 +2093,35 @@ def _discovery_row(
         "review_avg": round(float(review_avg), 2) if review_avg is not None else None,
         "review_count": review_count or 0,
         "created_at": store.created_at.isoformat() + "Z",
+        # nextActions routes an agent to the per-store surfaces that carry each
+        # offering's exact requiredFunds (feed.json / MCP get_product). A store-level
+        # requiredFunds cannot be exact here (a store may list several products) and
+        # the merchant wallet is deliberately never bulk-exported in discovery, so
+        # the envelope's funds half is resolved one hop deeper, per offering.
+        "nextActions": [
+            {
+                "type": "feed",
+                "method": "GET",
+                "endpoint": f"/s/{store.slug}/feed.json",
+                "description": (
+                    "Fetch per-product requiredFunds + x402 buy endpoints."
+                ),
+            },
+            {
+                "type": "mcp",
+                "method": "POST",
+                "endpoint": f"/s/{store.slug}/mcp",
+                "tools": ["list_products", "get_product", "create_checkout", "pay"],
+                "description": "Browse products and check out via JSON-RPC.",
+            },
+            {
+                "type": "x402_buy",
+                "method": "POST",
+                "endpoint": f"/s/{store.slug}/buy",
+                "protocol": "x402-v2",
+                "description": "Buy the primary product; payTo is the merchant.",
+            },
+        ],
     }
 
 
