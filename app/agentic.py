@@ -1506,15 +1506,40 @@ def agent_card(request: Request):
 # ============================================================================
 # Discovery: Tilla-wide index of live stores (no merchant wallets leaked)
 # ============================================================================
+# Graduation-style trust ladder (Phase 1.5). Thresholds sit below Virtuals' 10-sale
+# graduation, matched to Tilla's volume. It is computed ONLY from terminal,
+# un-fakeable outcomes: delivered count = earned volume; success_rate (delivered vs
+# refunded) = quality. A refund-heavy store is demoted to 'watch' regardless of
+# volume — the auto-demote. Checkout expiries are deliberately NOT an input: an
+# expired checkout is buyer abandonment, not store fault (the same reason they are
+# excluded from success_rate), so they can never unfairly demote a store.
+TRUST_TIERS = ("new", "watch", "emerging", "established", "trusted")
+
+
+def _trust_tier(sold: int, success_rate: float | None) -> str:
+    if sold == 0:
+        return "new"
+    # sold >= 1 => at least one delivery => success_rate is a real float here.
+    if success_rate is not None and success_rate < 0.5:
+        return "watch"
+    if sold >= 8 and success_rate is not None and success_rate >= 0.95:
+        return "trusted"
+    if sold >= 3 and success_rate is not None and success_rate >= 0.9:
+        return "established"
+    return "emerging"
+
+
 def _discovery_row(store: Store, pmin, pmax, sold, buyers, last_sale, refunded) -> dict:
     # Reputation signals an agent buyer can rank on, computed from terminal orders:
     # sold = delivered count; success_rate = delivered / (delivered + refunded), the
     # clean-delivery rate (None until a sale completes); unique_buyer_count = distinct
-    # payer addresses; last_sale_at = most recent delivery. Abandoned/expired checkouts
-    # are the buyer's doing, not the store's, so they are excluded from the rate.
+    # payer addresses; last_sale_at = most recent delivery; trust_tier = the graduation
+    # ladder above. Abandoned/expired checkouts are the buyer's doing, not the store's,
+    # so they are excluded from the rate.
     sold = sold or 0
     refunded = refunded or 0
     completed = sold + refunded
+    success_rate = round(sold / completed, 4) if completed else None
     return {
         "slug": store.slug,
         "name": _store_name(store),
@@ -1529,9 +1554,10 @@ def _discovery_row(store: Store, pmin, pmax, sold, buyers, last_sale, refunded) 
         "currency": CURRENCY,
         "network": NETWORK,
         "sold_count": sold,
-        "success_rate": round(sold / completed, 4) if completed else None,
+        "success_rate": success_rate,
         "unique_buyer_count": buyers or 0,
         "last_sale_at": (last_sale.isoformat() + "Z") if last_sale else None,
+        "trust_tier": _trust_tier(sold, success_rate),
         "created_at": store.created_at.isoformat() + "Z",
     }
 

@@ -478,6 +478,34 @@ def test_discovery_sort_unknown_falls_back_to_sold():
     assert set(body["sorts"]) == {"sold", "success", "buyers", "recent", "new"}
 
 
+def test_discovery_trust_tier_graduation_and_demote():
+    def deliver(sid, n):
+        for i in range(n):
+            _order(sid, "delivered", from_addr="0x" + str(i) * 40, oid=f"{sid}d{i}")
+
+    fresh = _seed(slug="tier-new")  # 0 sales
+    emerging = _seed(slug="tier-emerging")
+    deliver(emerging, 1)
+    established = _seed(slug="tier-established")
+    deliver(established, 3)
+    trusted = _seed(slug="tier-trusted")
+    deliver(trusted, 8)
+    # high volume but refund-heavy -> demoted to 'watch' despite the sales
+    watch = _seed(slug="tier-watch")
+    deliver(watch, 2)
+    for i in range(3):
+        _order(watch, "refunded", from_addr="0x" + str(i) * 40, oid=f"{watch}r{i}")
+
+    rows = {
+        r["slug"]: r for r in client.get("/discovery/resources").json()["resources"]
+    }
+    assert rows["tier-new"]["trust_tier"] == "new"
+    assert rows["tier-emerging"]["trust_tier"] == "emerging"
+    assert rows["tier-established"]["trust_tier"] == "established"
+    assert rows["tier-trusted"]["trust_tier"] == "trusted"
+    assert rows["tier-watch"]["trust_tier"] == "watch"  # auto-demoted (refunds)
+
+
 def test_discovery_search_escapes_like_and_bounds_query():
     _seed(slug="alpha", description="widgets and gadgets")
     # length bounds
