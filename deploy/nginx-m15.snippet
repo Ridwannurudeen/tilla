@@ -1,0 +1,27 @@
+# M15 nginx routing — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# PREPARE ONLY — NOT YET APPLIED on the live VPS. Apply during the next deploy.
+#
+# ---------------------------------------------------------------------------
+# Proxy the root MCP (POST /mcp) — the Tilla-wide concierge JSON-RPC server.
+#
+# A new app route `POST /mcp` (app/agentic.py) lets one agent runtime browse and
+# search every live store and list a store's products, then route the buy to the
+# per-store /s/{slug}/mcp or /s/{slug}/buy each result advertises. Like /ready, a
+# brand-new top-level path falls through to the www static block and 404s at the
+# edge until nginx proxies it. Add beside the /health and /ready lines:
+#
+#     location = /mcp { proxy_pass http://127.0.0.1:8040/mcp; }
+#
+# `location = /mcp` is an exact match — it never shadows the per-store
+# `location /s/` block, so /s/{slug}/mcp is untouched. GET /mcp returns 405 from
+# the app (advertised in the agent card's discovery.mcp); only POST is used.
+#
+# ---------------------------------------------------------------------------
+# PRE-FLIGHT + APPLY: back up first, edit, `nginx -t`, then `systemctl reload nginx`.
+#
+# VERIFY (edge, through nginx):
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/mcp          # 405 (GET)
+#   curl -s -X POST https://tilla.gudman.xyz/mcp \
+#     -H 'content-type: application/json' \
+#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | grep -c browse_stores  # 1

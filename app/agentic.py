@@ -13,6 +13,8 @@ discovery paths + the well-known agent card past the static ``/s/`` alias):
 - ``GET /s/{slug}/feed.json`` / ``llms.txt`` — machine-readable catalog.
 - ``GET /.well-known/agent-card.json`` — A2A card for Tilla as a whole.
 - ``GET /discovery/resources`` + ``/discovery/search`` — Tilla-wide store index.
+- ``POST /mcp`` — the Tilla-wide root MCP: browse/search stores + list a store's
+  products, so one agent runtime is the concierge across every store.
 
 Every JSON surface is a ``JSONResponse`` (json-encoded, no HTML context) and every
 text surface is ``text/plain``; all carry ``X-Content-Type-Options: nosniff``.
@@ -1159,6 +1161,182 @@ async def mcp_get(
 
 
 # ============================================================================
+# Root MCP: a Tilla-wide JSON-RPC server so any agent runtime is the concierge —
+# browse/search across every live store and route to the right one. Buying then
+# happens on the per-store endpoints each result advertises (its `mcp` / `buy`).
+# NOTE (deploy): a new root path needs an nginx proxy location, like /ready —
+# see deploy/nginx-m15.snippet. Until then it is reachable in-app / via tests.
+# ============================================================================
+class _BrowseArgs(BaseModel):
+    sort: str = "sold"
+    limit: int = 20
+    offset: int = 0
+
+
+class _SearchStoresArgs(BaseModel):
+    query: str
+    limit: int = 20
+
+
+class _StoreSlugArgs(BaseModel):
+    slug: str
+
+
+def _root_mcp_tools() -> list[dict]:
+    return [
+        {
+            "name": "browse_stores",
+            "description": (
+                "List live Tilla stores ranked by performance. Each result carries "
+                "its page URL, per-store MCP + x402 buy endpoints, and reputation "
+                "(sold_count, success_rate, unique_buyer_count, last_sale_at)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sort": {"type": "string", "enum": list(DISCOVERY_SORTS)},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "search_stores",
+            "description": "Keyword-search live stores by slug or description.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "list_products",
+            "description": (
+                "List one store's active products by slug; then buy via that "
+                "store's mcp/buy endpoint from browse_stores."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def _root_mcp_tools_call(session: Session, req_id, params) -> dict:
+    if not isinstance(params, dict):
+        return _rpc_error(req_id, -32602, "params must be an object")
+    name = params.get("name")
+    raw_args = params.get("arguments") or {}
+    if not isinstance(raw_args, dict):
+        return _rpc_error(req_id, -32602, "arguments must be an object")
+    try:
+        if name == "browse_stores":
+            a = _BrowseArgs.model_validate(raw_args)
+            sort = a.sort if a.sort in DISCOVERY_SORTS else "sold"
+            rows = _discovery_rows(
+                session,
+                [],
+                max(1, min(a.limit, 50)),
+                max(0, min(a.offset, 100_000)),
+                sort,
+            )
+            result = {"resources": rows, "sort": sort}
+        elif name == "search_stores":
+            a = _SearchStoresArgs.model_validate(raw_args)
+            q = a.query.strip()
+            if len(q) < 2 or len(q) > 100:
+                raise _ToolError("query must be 2 to 100 characters")
+            result = {
+                "resources": _search_discovery(session, q, max(1, min(a.limit, 50)))
+            }
+        elif name == "list_products":
+            a = _StoreSlugArgs.model_validate(raw_args)
+            store = session.scalar(select(Store).where(Store.slug == a.slug))
+            if store is None or store.status != "live":
+                raise _ToolError("store not found")
+            result = _tool_list_products(session, store)
+        else:
+            return _rpc_error(req_id, -32602, f"unknown tool: {name}")
+    except ValidationError as exc:
+        return _rpc_error(
+            req_id, -32602, "invalid tool arguments", data=json.loads(exc.json())
+        )
+    except _ToolError as exc:
+        return _rpc_tool_error(req_id, str(exc))
+    return _rpc_result(
+        req_id,
+        {
+            "content": [{"type": "text", "text": json.dumps(result)}],
+            "structuredContent": result,
+        },
+    )
+
+
+def _handle_root_mcp(payload):
+    """Sync JSON-RPC dispatch for the Tilla-wide root MCP (no slug)."""
+    with SessionLocal() as session:
+        if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+            req_id = payload.get("id") if isinstance(payload, dict) else None
+            return _rpc_error(req_id, -32600, "invalid JSON-RPC request")
+        method = payload.get("method")
+        req_id = payload.get("id")
+        params = payload.get("params") or {}
+        if method == "notifications/initialized":
+            return _MCP_NO_CONTENT
+        if method == "initialize":
+            proto = (
+                params.get("protocolVersion") if isinstance(params, dict) else None
+            ) or MCP_PROTOCOL_VERSION
+            return _rpc_result(
+                req_id,
+                {
+                    "protocolVersion": proto,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "tilla", "version": TILLA_VERSION},
+                },
+            )
+        if method == "ping":
+            return _rpc_result(req_id, {})
+        if method == "tools/list":
+            return _rpc_result(req_id, {"tools": _root_mcp_tools()})
+        if method == "tools/call":
+            return _root_mcp_tools_call(session, req_id, params)
+        return _rpc_error(req_id, -32601, "method not found")
+
+
+@router.post("/mcp")
+@limiter.limit("30/minute")
+async def root_mcp_post(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            _rpc_error(None, -32700, "parse error"), headers=_AGENT_HEADERS
+        )
+    result = await asyncio.to_thread(_handle_root_mcp, payload)
+    if result is _MCP_NO_CONTENT:
+        return Response(status_code=202)
+    return JSONResponse(result, headers=_AGENT_HEADERS)
+
+
+@router.get("/mcp")
+async def root_mcp_get(request: Request):
+    return JSONResponse(
+        {"error": "method not allowed; use POST"},
+        status_code=405,
+        headers={"Allow": "POST", **_AGENT_HEADERS},
+    )
+
+
+# ============================================================================
 # Feeds: feed.json (ACP product-feed shape) + llms.txt
 # ============================================================================
 def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> dict:
@@ -1307,6 +1485,7 @@ def agent_card(request: Request):
         "discovery": {
             "resources": "/discovery/resources",
             "search": "/discovery/search",
+            "mcp": "/mcp",
         },
     }
     return JSONResponse(body, headers=_AGENT_HEADERS)
@@ -1449,6 +1628,19 @@ def discovery_resources(
     )
 
 
+def _search_discovery(session: Session, q: str, limit: int) -> list[dict]:
+    """Keyword search over live stores (slug + merchant description). LIKE
+    metacharacters are escaped so a '%'/'_' in the query is a literal, not a
+    wildcard. Shared by /discovery/search and the root MCP search_stores tool."""
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like = f"%{esc}%"
+    clause = or_(
+        Store.slug.like(like, escape="\\"),
+        Store.description.like(like, escape="\\"),
+    )
+    return _discovery_rows(session, [clause], limit, 0)
+
+
 @router.get("/discovery/search")
 @limiter.limit("30/minute")
 def discovery_search(
@@ -1460,16 +1652,7 @@ def discovery_search(
     q = q.strip()
     if len(q) < 2 or len(q) > 100:
         raise HTTPException(422, "q must be 2 to 100 characters")
-    limit = max(1, min(limit, 50))
-    # Escape LIKE metacharacters so a '%'/'_' in the query is a literal, not a
-    # wildcard (ESCAPE clause), then match slug or merchant description.
-    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    like = f"%{esc}%"
-    clause = or_(
-        Store.slug.like(like, escape="\\"),
-        Store.description.like(like, escape="\\"),
-    )
-    resources = _discovery_rows(session, [clause], limit, 0)
+    resources = _search_discovery(session, q, max(1, min(limit, 50)))
     return JSONResponse(
         {
             "service": SERVICE,

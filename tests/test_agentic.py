@@ -455,3 +455,83 @@ def test_discovery_search_escapes_like_and_bounds_query():
     r2 = client.get("/discovery/search?q=a%25")  # 'a%'
     assert r2.status_code == 200
     assert r2.json()["resources"] == []
+
+
+# ------------------------------------------------------------ root MCP (concierge)
+def _root_mcp(method, params=None, req_id=1):
+    body = {"jsonrpc": "2.0", "id": req_id, "method": method}
+    if params is not None:
+        body["params"] = params
+    return client.post("/mcp", json=body)
+
+
+def _root_call(name, arguments=None, req_id=1):
+    params = {"name": name}
+    if arguments is not None:
+        params["arguments"] = arguments
+    return _root_mcp("tools/call", params, req_id=req_id).json()
+
+
+def test_root_mcp_initialize_and_tools_list():
+    r = _root_mcp("initialize", {"protocolVersion": "2025-06-18"})
+    assert r.status_code == 200
+    res = r.json()["result"]
+    assert res["protocolVersion"] == "2025-06-18"
+    assert res["serverInfo"]["name"] == "tilla"  # Tilla-wide, not per-store
+    tools = _root_mcp("tools/list").json()["result"]["tools"]
+    assert {t["name"] for t in tools} == {
+        "browse_stores",
+        "search_stores",
+        "list_products",
+    }
+
+
+def test_root_mcp_browse_stores_ranks_and_carries_endpoints():
+    a = _seed(slug="rootclean")
+    _order(a, "delivered", from_addr="0x" + "1" * 40)
+    b = _seed(slug="rootbusy")
+    for i in range(3):
+        _order(b, "delivered", from_addr="0x" + str(i) * 40)
+        _order(b, "refunded", from_addr="0x" + str(i) * 40)
+
+    default = _root_call("browse_stores")["result"]["structuredContent"]
+    slugs = [x["slug"] for x in default["resources"]]
+    assert slugs.index("rootbusy") < slugs.index("rootclean")  # sold desc
+    row = next(x for x in default["resources"] if x["slug"] == "rootclean")
+    assert row["mcp"] == "/s/rootclean/mcp" and row["buy"] == "/s/rootclean/buy"
+    assert "pay_to" not in row
+
+    ranked = _root_call("browse_stores", {"sort": "success"})["result"]
+    body = ranked["structuredContent"]
+    assert body["sort"] == "success"
+    order = [x["slug"] for x in body["resources"]]
+    assert order.index("rootclean") < order.index("rootbusy")  # rate desc
+
+
+def test_root_mcp_search_and_list_products():
+    sid = _seed(slug="rootsearch", description="rare vinyl records")
+    with SessionLocal() as s:
+        pid = s.scalar(select(Product.id).where(Product.store_id == sid))
+    found = _root_call("search_stores", {"query": "vinyl"})["result"]
+    assert {x["slug"] for x in found["structuredContent"]["resources"]} == {
+        "rootsearch"
+    }
+    lp = _root_call("list_products", {"slug": "rootsearch"})["result"]
+    assert lp["structuredContent"]["products"][0]["id"] == pid
+
+
+def test_root_mcp_list_products_dead_store_is_tool_error():
+    _seed(slug="rootpending", status="pending_screening")
+    for slug in ("ghosttown", "rootpending"):
+        res = _root_call("list_products", {"slug": slug})
+        assert res["result"]["isError"] is True
+
+
+def test_root_mcp_unknown_tool_and_bad_args():
+    assert _root_call("does_not_exist")["error"]["code"] == -32602
+    short = _root_call("search_stores", {"query": "a"})
+    assert short["result"]["isError"] is True  # min length enforced
+
+
+def test_root_mcp_get_is_405():
+    assert client.get("/mcp").status_code == 405
