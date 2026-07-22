@@ -76,6 +76,14 @@ class Store(Base):
     # sha256 hex of the per-store manage key (capability secret handed to the
     # paid create-store caller once). NULL for legacy stores until minted.
     manage_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase 1.7 sandbox/hidden mode: 'public' (default, every existing store) shows in
+    # discovery / the aggregate feed / the sitemap; 'hidden' keeps a live store out of
+    # those bulk surfaces while it stays fully reachable by direct link (owner + agent
+    # preview). A hidden store auto-graduates to 'public' on its first delivered sale —
+    # the "clears a threshold" gate — and the owner can toggle it from the dashboard.
+    visibility: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="public", server_default="public"
+    )
     delivery: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[dict | None] = mapped_column(JSON, nullable=True)

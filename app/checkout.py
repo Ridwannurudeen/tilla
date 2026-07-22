@@ -149,6 +149,10 @@ def deliver(session: Session, order: Order):
     ):
         return session.scalar(select(Delivery).where(Delivery.order_id == order.id))
     store = session.get(Store, order.store_id)
+    # Phase 1.7: a hidden (sandbox) store graduates to public on its first real sale —
+    # it has cleared the proof threshold, so it may now show in bulk discovery.
+    if store is not None and store.visibility == "hidden":
+        store.visibility = "public"
     deliverable = _active_deliverable(session, order.store_id, order.product_id)
     if deliverable is None:
         kind = "text"

@@ -632,6 +632,57 @@ def test_library_evaluate_rejects_foreign_and_unauthed():
     assert r2.status_code == 401
 
 
+# ------------------------------------------------------------ hidden/sandbox (1.7)
+def _set_visibility(slug, vis):
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        store.visibility = vis
+        s.commit()
+
+
+def test_hidden_store_excluded_from_bulk_but_reachable_directly():
+    _seed(slug="pubshop")
+    _seed(slug="hidshop")
+    _set_visibility("hidshop", "hidden")
+
+    # bulk surfaces all skip the hidden store...
+    slugs = {r["slug"] for r in client.get("/discovery/resources").json()["resources"]}
+    assert "pubshop" in slugs and "hidshop" not in slugs
+    assert client.get("/discovery/search?q=hidshop").json()["resources"] == []
+    browse = _root_call("browse_stores")["result"]["structuredContent"]["resources"]
+    assert "hidshop" not in {r["slug"] for r in browse}
+    assert "/s/hidshop/" not in client.get("/sitemap.xml").text
+    agg = client.get("/feeds/openai.json").json()["products"]
+    assert all(p["store"] != "hidshop" for p in agg)
+
+    # ...but it stays fully reachable by direct link (owner + agent preview)
+    assert client.get("/s/hidshop/feed.json").status_code == 200
+    assert _mcp("hidshop", "tools/list").status_code == 200
+
+
+def test_hidden_store_graduates_to_public_on_first_sale():
+    from app import checkout
+
+    sid = _seed(slug="gradshop")
+    _set_visibility("gradshop", "hidden")
+    with SessionLocal() as s:
+        order = Order(
+            id="gradord",
+            store_id=sid,
+            pay_to="0x" + "a" * 40,
+            amount_micro=9_500_000,
+            expected_micro=9_500_100,
+            status="confirmed",
+        )
+        s.add(order)
+        s.commit()
+        checkout.deliver(s, order)
+        s.commit()
+    # the first delivered sale clears the threshold -> now shown in discovery
+    slugs = {r["slug"] for r in client.get("/discovery/resources").json()["resources"]}
+    assert "gradshop" in slugs
+
+
 def test_discovery_search_escapes_like_and_bounds_query():
     _seed(slug="alpha", description="widgets and gadgets")
     # length bounds

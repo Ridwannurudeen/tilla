@@ -286,12 +286,15 @@ def ready():
 @app.get("/sitemap.xml")
 @limiter.limit("60/minute")
 def sitemap(request: Request, session: Session = Depends(get_session)):
-    """XML sitemap of every LIVE store URL (pending/blocked stores are excluded —
-    their pages aren't served). Slugs are a restricted charset, but the <loc>
-    text is XML-escaped regardless."""
+    """XML sitemap of every LIVE, PUBLIC store URL (pending/blocked stores are excluded
+    — their pages aren't served; Phase 1.7 hidden/sandbox stores are excluded too, so
+    they stay unindexed). Slugs are a restricted charset, but the <loc> text is
+    XML-escaped regardless."""
     base = config.PUBLIC_BASE_URL.rstrip("/")
     slugs = session.scalars(
-        select(Store.slug).where(Store.status == "live").order_by(Store.slug)
+        select(Store.slug)
+        .where(Store.status == "live", Store.visibility == "public")
+        .order_by(Store.slug)
     ).all()
     # Hub pages first (nginx-served statics the crawler can't discover from the
     # store URLs alone), then every live store.

@@ -1656,7 +1656,8 @@ def _discovery_rows(
         )
         .outerjoin(price_sq, price_sq.c.sid == Store.id)
         .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
-        .where(Store.status == "live", *where_clauses)
+        # Phase 1.7: hidden (sandbox) stores stay out of bulk discovery.
+        .where(Store.status == "live", Store.visibility == "public", *where_clauses)
         .order_by(*order_by)
         .limit(limit)
         .offset(offset)

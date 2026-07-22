@@ -261,6 +261,7 @@ def merchant_stores(request: Request, session: Session = Depends(get_session)):
             {
                 "slug": s.slug,
                 "status": s.status,
+                "visibility": s.visibility,
                 "theme": s.theme,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
                 "order_counts": st["counts"],
@@ -270,6 +271,29 @@ def merchant_stores(request: Request, session: Session = Depends(get_session)):
             }
         )
     return {"merchant": merchant.wallet_address, "stores": out}
+
+
+class VisibilityBody(BaseModel):
+    visibility: Literal["public", "hidden"]
+
+
+@router.post("/api/merchant/stores/{slug}/visibility")
+@limiter.limit("30/minute")
+def merchant_store_visibility(
+    request: Request,
+    body: VisibilityBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Owner toggle for a store's Phase 1.7 discovery visibility. 'hidden' keeps a live
+    store out of discovery / the aggregate feed / the sitemap (still reachable by direct
+    link, for setup and agent preview); 'public' restores it. A hidden store also
+    auto-graduates to public on its first delivered sale. Owning-merchant only (404)."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    store.visibility = body.visibility
+    session.commit()
+    return {"slug": store.slug, "visibility": store.visibility}
 
 
 @router.get("/api/merchant/summary")

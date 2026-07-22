@@ -21,7 +21,7 @@ import app.main as main
 from app import checkout
 from app.config import WARDEN_SCREEN_URL
 from app.db import SessionLocal
-from app.models import Merchant, Order, Product
+from app.models import Merchant, Order, Product, Store
 
 client = TestClient(main.app)
 
@@ -594,7 +594,7 @@ def test_merchant_product_crud_is_idor_gated(make_store, tmp_path, monkeypatch):
 def test_merchant_list_deliverables_metadata_only_no_secret(make_store):
     from sqlalchemy import select
 
-    from app.models import Deliverable, Product, Store
+    from app.models import Deliverable, Product
 
     acct = Account.create()
     _owned_store(acct, "delui", make_store)
@@ -634,4 +634,41 @@ def test_merchant_list_deliverables_idor_gated(make_store):
             "/api/merchant/stores/delui2/deliverables", headers=_auth(other_tok)
         ).status_code
         == 404
+    )
+
+
+def test_store_visibility_toggle_owner_only(make_store):
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "vistoggle", make_store)
+    tok = _merchant_token(owner)
+
+    r = client.post(
+        "/api/merchant/stores/vistoggle/visibility",
+        json={"visibility": "hidden"},
+        headers=_auth(tok),
+    )
+    assert r.status_code == 200 and r.json()["visibility"] == "hidden"
+    with SessionLocal() as s:
+        assert (
+            s.scalar(select(Store.visibility).where(Store.slug == "vistoggle"))
+            == "hidden"
+        )
+    # a different merchant cannot touch it -> opaque 404 (the IDOR gate)
+    other_tok = _merchant_token(other)
+    assert (
+        client.post(
+            "/api/merchant/stores/vistoggle/visibility",
+            json={"visibility": "public"},
+            headers=_auth(other_tok),
+        ).status_code
+        == 404
+    )
+    # an invalid value is rejected by the Literal body -> 422
+    assert (
+        client.post(
+            "/api/merchant/stores/vistoggle/visibility",
+            json={"visibility": "bogus"},
+            headers=_auth(tok),
+        ).status_code
+        == 422
     )
