@@ -1,5 +1,5 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <title>Tilla avatar A - The Storefront</title>
+  <title>Tilla avatar - The Storefront</title>
   <defs>
     <radialGradient id="groundA" cx="50%" cy="32%" r="85%">
       <stop offset="0%" stop-color="#1B1B27"/>
@@ -19,12 +19,11 @@
     </filter>
   </defs>
 
-  <!-- ground: rounded-square app icon, subtle radial depth -->
-  <rect x="0" y="0" width="1024" height="1024" rx="180" fill="url(#groundA)"/>
-  <rect x="3" y="3" width="1018" height="1018" rx="177" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="2"/>
+  <!-- ground: full-bleed dark field, subtle radial depth (OKX applies its own crop/rounding) -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#groundA)"/>
 
-  <!-- storefront mark, optically centered -->
-  <g transform="translate(0,-18)">
+  <!-- storefront mark, optically centered, scaled to fill (safe within circular crop) -->
+  <g transform="translate(512 512) scale(1.08) translate(-512 -530)">
     <!-- soft cast shadow (flat black silhouette, blurred) -->
     <g filter="url(#shadowA)" transform="translate(0,16)" fill="#000000" opacity="0.55">
       <rect x="288" y="486" width="448" height="272" rx="18"/>
