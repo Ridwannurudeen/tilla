@@ -847,12 +847,43 @@ def _authorize_order_email(request: Request, session: Session, order: Order) -> 
     return False
 
 
-def _deactivate_deliverables(session: Session, store_id: int) -> None:
-    session.execute(
-        update(Deliverable)
-        .where(Deliverable.store_id == store_id, Deliverable.active.is_(True))
-        .values(active=False)
+def _deactivate_deliverables(
+    session: Session, store_id: int, product_id: int | None = None
+) -> None:
+    """Flip active deliverables inactive within one scope: the store-level default
+    (product_id NULL) when product_id is None, else just that product's — so
+    setting a per-product deliverable never disturbs the store default or other
+    products' deliverables (and vice versa)."""
+    stmt = update(Deliverable).where(
+        Deliverable.store_id == store_id, Deliverable.active.is_(True)
     )
+    if product_id is None:
+        stmt = stmt.where(Deliverable.product_id.is_(None))
+    else:
+        stmt = stmt.where(Deliverable.product_id == product_id)
+    session.execute(stmt.values(active=False))
+
+
+def _deliverable_product_id(session: Session, store: Store, raw: object) -> int | None:
+    """None (store-level default) when absent/empty; otherwise the int, validated
+    to be an ACTIVE product of THIS store (422 otherwise, so a merchant can't bind
+    a deliverable to a foreign or non-existent product)."""
+    if raw in (None, ""):
+        return None
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "product_id must be an integer") from None
+    product = session.scalar(
+        select(Product).where(
+            Product.id == pid,
+            Product.store_id == store.id,
+            Product.active.is_(True),
+        )
+    )
+    if product is None:
+        raise HTTPException(422, "product_id is not an active product of this store")
+    return pid
 
 
 def _positive_int(value, default: int) -> int:
@@ -1029,9 +1060,11 @@ async def create_deliverable(
             stored = await delivery.store_upload(upload)
         except delivery.UploadTooLarge:
             raise HTTPException(413, "file exceeds the size cap") from None
-        _deactivate_deliverables(session, store.id)
+        product_id = _deliverable_product_id(session, store, form.get("product_id"))
+        _deactivate_deliverables(session, store.id, product_id)
         deliverable = Deliverable(
             store_id=store.id,
+            product_id=product_id,
             kind="file",
             file_sha256=stored["sha256"],
             file_name=delivery.sanitize_filename(upload.filename),
@@ -1052,6 +1085,7 @@ async def create_deliverable(
             raise HTTPException(422, "invalid JSON body") from None
         if not isinstance(body, dict):
             raise HTTPException(422, "JSON body must be an object")
+        product_id = _deliverable_product_id(session, store, body.get("product_id"))
         kind = body.get("kind")
         if kind == "text":
             payload = body.get("payload")
@@ -1059,14 +1093,19 @@ async def create_deliverable(
                 raise HTTPException(
                     422, "text deliverable requires a non-empty payload"
                 )
-            _deactivate_deliverables(session, store.id)
-            deliverable = Deliverable(
-                store_id=store.id, kind="text", payload=payload, active=True
-            )
-        elif kind == "license":
-            _deactivate_deliverables(session, store.id)
+            _deactivate_deliverables(session, store.id, product_id)
             deliverable = Deliverable(
                 store_id=store.id,
+                product_id=product_id,
+                kind="text",
+                payload=payload,
+                active=True,
+            )
+        elif kind == "license":
+            _deactivate_deliverables(session, store.id, product_id)
+            deliverable = Deliverable(
+                store_id=store.id,
+                product_id=product_id,
                 kind="license",
                 max_activations=_positive_int(
                     body.get("max_activations"), config.LICENSE_ACTIVATIONS_DEFAULT

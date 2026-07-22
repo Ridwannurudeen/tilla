@@ -846,3 +846,56 @@ def test_checkout_foreign_or_unknown_product_id_fails_closed(make_store):
     assert client.post("/api/checkout/sa", json={"product_id": b_pid}).status_code == 404
     # a product id that doesn't exist -> 404
     assert client.post("/api/checkout/sa", json={"product_id": 10_000_000}).status_code == 404
+
+
+# ------------------------------------------------ per-product deliverables (C)
+def test_active_deliverable_prefers_product_then_store_default(make_store):
+    from sqlalchemy import select
+
+    import app.checkout as checkout
+    from app.models import Deliverable, Product
+
+    sid = make_store(slug="del", price_micro=9_000_000)  # primary "Thing"
+    _add_product(sid, "Deluxe", 20_000_000)
+    with SessionLocal() as s:
+        ids = s.scalars(
+            select(Product.id).where(Product.store_id == sid).order_by(Product.id)
+        ).all()
+        primary_id, deluxe_id = ids[0], ids[1]
+        s.add(Deliverable(store_id=sid, kind="text", payload="STORE DEFAULT", active=True))
+        s.add(
+            Deliverable(
+                store_id=sid, product_id=deluxe_id, kind="text",
+                payload="DELUXE ONLY", active=True,
+            )
+        )
+        s.commit()
+    with SessionLocal() as s:
+        # a deluxe order gets the deluxe-specific deliverable
+        assert checkout._active_deliverable(s, sid, deluxe_id).payload == "DELUXE ONLY"
+        # the primary order (no primary-specific deliverable) falls back to the default
+        assert checkout._active_deliverable(s, sid, primary_id).payload == "STORE DEFAULT"
+        # no product context -> store default (legacy behaviour)
+        assert checkout._active_deliverable(s, sid).payload == "STORE DEFAULT"
+
+
+def test_deliverable_product_id_rejects_foreign_product(make_store):
+    from sqlalchemy import select
+
+    import pytest
+    from fastapi import HTTPException
+
+    import app.main as main
+    from app.models import Product, Store
+
+    sid = make_store(slug="dpv", price_micro=9_000_000)
+    other = make_store(slug="dpv2", price_micro=5_000_000)
+    with SessionLocal() as s:
+        store = s.get(Store, sid)
+        pid = s.scalar(select(Product.id).where(Product.store_id == sid))
+        other_pid = s.scalar(select(Product.id).where(Product.store_id == other))
+        assert main._deliverable_product_id(s, store, None) is None
+        assert main._deliverable_product_id(s, store, str(pid)) == pid
+        with pytest.raises(HTTPException) as e:
+            main._deliverable_product_id(s, store, str(other_pid))
+        assert e.value.status_code == 422

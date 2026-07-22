@@ -96,12 +96,34 @@ def transition(
     return result.rowcount == 1
 
 
-def _active_deliverable(session: Session, store_id: int) -> Deliverable | None:
-    """The store's one active deliverable, if any. None → the legacy store.delivery
-    text path, unchanged for every existing store."""
+def _active_deliverable(
+    session: Session, store_id: int, product_id: int | None = None
+) -> Deliverable | None:
+    """The active deliverable to serve for an order: a deliverable bound to the
+    order's specific product wins; otherwise the store-level default (product_id
+    NULL). None → the legacy store.delivery text path. Existing deliverables all
+    have product_id NULL, so they resolve as the store default — unchanged for
+    every store that hasn't set a per-product deliverable."""
+    if product_id is not None:
+        specific = session.scalar(
+            select(Deliverable)
+            .where(
+                Deliverable.store_id == store_id,
+                Deliverable.product_id == product_id,
+                Deliverable.active.is_(True),
+            )
+            .order_by(Deliverable.id.desc())
+            .limit(1)
+        )
+        if specific is not None:
+            return specific
     return session.scalar(
         select(Deliverable)
-        .where(Deliverable.store_id == store_id, Deliverable.active.is_(True))
+        .where(
+            Deliverable.store_id == store_id,
+            Deliverable.product_id.is_(None),
+            Deliverable.active.is_(True),
+        )
         .order_by(Deliverable.id.desc())
         .limit(1)
     )
@@ -120,7 +142,7 @@ def deliver(session: Session, order: Order):
     if not transition(session, order.id, READY_TO_DELIVER, "delivered", paid_at=_now()):
         return session.scalar(select(Delivery).where(Delivery.order_id == order.id))
     store = session.get(Store, order.store_id)
-    deliverable = _active_deliverable(session, order.store_id)
+    deliverable = _active_deliverable(session, order.store_id, order.product_id)
     if deliverable is None:
         kind = "text"
         payload = store.delivery if store and store.delivery else DEFAULT_DELIVERY
