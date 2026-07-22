@@ -858,3 +858,72 @@ def test_legacy_text_delivery_unauth_poll_unchanged(make_store):
     assert poll["delivery"] == "Here is your link: x"
     assert "kind" not in poll and "claim" not in poll
     assert "download_url" not in poll and "license_key" not in poll
+
+
+def test_per_product_deliverable_delivered_end_to_end(make_store):
+    """The whole per-product seam: upload a per-product deliverable via the API,
+    buy THAT product, and the paid order's Entitlement resolves to the
+    product-specific deliverable — while a buyer of another product falls back to
+    the store default. Covers create_deliverable(product_id) -> deliver() ->
+    _active_deliverable(order.product_id), with the scoped deactivation intact."""
+    from app.models import Product
+
+    make_store(slug="pintg", pay_to="0x" + "a" * 40, delivery="LEGACY")
+    key = _give_key("pintg")
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "pintg"))
+        s.add(
+            Product(store_id=store.id, name="Deluxe", price_micro=20_000_000, active=True)
+        )
+        s.commit()
+        ids = s.scalars(
+            select(Product.id).where(Product.store_id == store.id).order_by(Product.id)
+        ).all()
+        primary_id, deluxe_id = ids[0], ids[1]
+    # A store-default deliverable AND a deluxe-specific one, both via the upload API.
+    # The scoped deactivation must leave BOTH active (different scopes).
+    assert (
+        client.post(
+            "/api/stores/pintg/deliverable",
+            headers=_auth(key),
+            json={"kind": "text", "payload": "STORE DEFAULT"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/stores/pintg/deliverable",
+            headers=_auth(key),
+            json={"kind": "text", "payload": "DELUXE ONLY", "product_id": deluxe_id},
+        ).status_code
+        == 200
+    )
+    with SessionLocal() as s:
+        store_id = s.scalar(select(Store.id).where(Store.slug == "pintg"))
+        default_dv = s.scalar(
+            select(Deliverable).where(
+                Deliverable.store_id == store_id,
+                Deliverable.product_id.is_(None),
+                Deliverable.active.is_(True),
+            )
+        )
+        deluxe_dv = s.scalar(
+            select(Deliverable).where(
+                Deliverable.store_id == store_id,
+                Deliverable.product_id == deluxe_id,
+                Deliverable.active.is_(True),
+            )
+        )
+        assert default_dv is not None and deluxe_dv is not None  # both active
+    # Buy the DELUXE product -> its Entitlement points at the deluxe deliverable.
+    cid_d = client.post("/api/checkout/pintg", json={"product_id": deluxe_id}).json()["id"]
+    _confirm(cid_d, "0x" + "b" * 40, "0x" + "1" * 64)
+    with SessionLocal() as s:
+        ent_d = s.scalar(select(Entitlement).where(Entitlement.order_id == cid_d))
+        assert ent_d is not None and ent_d.deliverable_id == deluxe_dv.id
+    # Buy the PRIMARY product -> no product-specific deliverable, falls back to the default.
+    cid_p = client.post("/api/checkout/pintg", json={"product_id": primary_id}).json()["id"]
+    _confirm(cid_p, "0x" + "c" * 40, "0x" + "2" * 64)
+    with SessionLocal() as s:
+        ent_p = s.scalar(select(Entitlement).where(Entitlement.order_id == cid_p))
+        assert ent_p is not None and ent_p.deliverable_id == default_dv.id
