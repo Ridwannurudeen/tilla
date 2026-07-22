@@ -1,0 +1,50 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <title>Tilla avatar A - The Storefront</title>
+  <defs>
+    <radialGradient id="groundA" cx="50%" cy="32%" r="85%">
+      <stop offset="0%" stop-color="#1B1B27"/>
+      <stop offset="55%" stop-color="#101018"/>
+      <stop offset="100%" stop-color="#0B0B12"/>
+    </radialGradient>
+    <linearGradient id="limeA" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#CFFF66"/>
+      <stop offset="100%" stop-color="#BCFF2F"/>
+    </linearGradient>
+    <linearGradient id="paperA" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FAF8EF"/>
+      <stop offset="100%" stop-color="#E8E6D8"/>
+    </linearGradient>
+    <filter id="shadowA" x="-40%" y="-40%" width="180%" height="180%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+  </defs>
+
+  <!-- ground: rounded-square app icon, subtle radial depth -->
+  <rect x="0" y="0" width="1024" height="1024" rx="180" fill="url(#groundA)"/>
+  <rect x="3" y="3" width="1018" height="1018" rx="177" fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="2"/>
+
+  <!-- storefront mark, optically centered -->
+  <g transform="translate(0,-18)">
+    <!-- soft cast shadow (flat black silhouette, blurred) -->
+    <g filter="url(#shadowA)" transform="translate(0,16)" fill="#000000" opacity="0.55">
+      <rect x="288" y="486" width="448" height="272" rx="18"/>
+      <rect x="232" y="308" width="560" height="162" rx="20"/>
+    </g>
+    <!-- facade -->
+    <rect x="288" y="486" width="448" height="272" rx="18" fill="url(#paperA)"/>
+    <!-- windows -->
+    <rect x="330" y="560" width="68" height="68" rx="12" fill="#0F0F16"/>
+    <rect x="626" y="560" width="68" height="68" rx="12" fill="#0F0F16"/>
+    <!-- doorway -->
+    <path d="M 450 758 L 450 574 Q 450 560 464 560 L 560 560 Q 574 560 574 574 L 574 758 Z" fill="#0F0F16"/>
+    <!-- door handle: the one lime touch on the facade -->
+    <rect x="533" y="646" width="12" height="42" rx="6" fill="#BCFF2F"/>
+
+    <!-- awning: block-print stripes, lime + off-white, crenellated valance -->
+    <path d="M 256 308 L 344 308 L 344 456 Q 344 470 330 470 L 246 470 Q 232 470 232 456 L 232 332 Q 232 308 256 308 Z" fill="url(#limeA)"/>
+    <path d="M 344 308 L 456 308 L 456 430 Q 456 444 442 444 L 358 444 Q 344 444 344 430 Z" fill="#F6F4EB"/>
+    <path d="M 456 308 L 568 308 L 568 456 Q 568 470 554 470 L 470 470 Q 456 470 456 456 Z" fill="url(#limeA)"/>
+    <path d="M 568 308 L 680 308 L 680 430 Q 680 444 666 444 L 582 444 Q 568 444 568 430 Z" fill="#F6F4EB"/>
+    <path d="M 680 308 L 768 308 Q 792 308 792 332 L 792 456 Q 792 470 778 470 L 694 470 Q 680 470 680 456 Z" fill="url(#limeA)"/>
+  </g>
+</svg>
