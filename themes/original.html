@@ -233,6 +233,32 @@
     letter-spacing:.12em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 56%,transparent); }
 
+  /* ---------- multi-product catalog (renders only with 2+ products; a single
+     product keeps the featured .card above). The Product Plate becomes a wide
+     store-intro band; catalog cards stay lighter/typographic — same palette
+     grammar (primary top rule, tint surface, pill buy), no per-card plate. */
+  .plate-banner{ aspect-ratio:auto; height:clamp(170px,24vw,250px); margin-bottom:0; }
+  .cat-eyebrow{ display:inline-flex; align-items:center; gap:10px;
+    margin:clamp(22px,3.5vw,32px) 0 18px;
+    font-size:11px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .cat-eyebrow::before{ content:""; flex:none; width:8px; height:8px; background:var(--primary); }
+  .catalog{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+    gap:clamp(14px,2vw,24px); }
+  .item{ display:flex; flex-direction:column;
+    border:1px solid var(--hairline); border-top:4px solid var(--primary);
+    border-radius:4px; background:var(--tint); padding:clamp(20px,3vw,30px); }
+  .item h3{ font-size:clamp(calc(1.3rem * var(--dna-ms)), calc(2vw * var(--dna-ms)), calc(1.6rem * var(--dna-ms)));
+    font-weight:calc(250 + var(--dna-weight)); line-height:1.15;
+    letter-spacing:-.02em; color:var(--primary); text-wrap:balance; }
+  .item .item-blurb{ margin-top:10px; flex:1; font-size:.95rem;
+    color:color-mix(in srgb,var(--text) 74%,transparent); }
+  .item .price-row{ margin-top:22px; }
+  .item .price-row .p{ font-size:clamp(calc(1.5rem * var(--dna-ms)), calc(2.4vw * var(--dna-ms)), calc(2rem * var(--dna-ms))); }
+  .item .buy{ margin-top:16px; padding:14px 22px; font-size:15px;
+    box-shadow:0 8px 22px color-mix(in srgb,var(--primary) 26%,transparent); }
+  .co-dock{ max-width:560px; margin:0 auto; }
+
   /* ---------- quiet mono footer ---------- */
   footer{ border-top:1px solid var(--hairline); }
   footer .wrap{ display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
@@ -316,6 +342,8 @@
 
   <section class="shop reveal" id="buy">
     <div class="wrap">
+      {% if PRODUCTS|length == 1 %}
+      {% for p in PRODUCTS %}
       <div class="card">
         <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
         <div class="card-grid">
@@ -324,16 +352,37 @@
               <canvas id="plateField"></canvas>
               <div class="plate-emoji"><span>{{EMOJI}}</span></div>
             </figure>
-            <h2>{{PRODUCT_NAME}}</h2>
-            <p class="blurb">{{PRODUCT_BLURB}}</p>
+            <h2>{{ p.name }}</h2>
+            <p class="blurb">{{ p.blurb }}</p>
           </div>
           <div>
-            <div class="price-row mono"><span class="p">{{PRICE}}</span><span class="u">USDT</span></div>
-            <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}}</button>
+            <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
+            <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} onclick="startCheckout({{ p.index }})">{{ p.cta }}</button>
             <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
-            {% include "_checkout.html" %}
           </div>
         </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <figure class="plate plate-banner" aria-hidden="true">
+        <canvas id="plateField"></canvas>
+        <div class="plate-emoji"><span>{{EMOJI}}</span></div>
+      </figure>
+      <p class="cat-eyebrow mono">The catalog</p>
+      <div class="catalog">
+        {% for p in PRODUCTS %}
+        <article class="item">
+          <h3>{{ p.name }}</h3>
+          <p class="item-blurb">{{ p.blurb }}</p>
+          <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
+          <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} onclick="startCheckout({{ p.index }})">{{ p.cta }}</button>
+        </article>
+        {% endfor %}
+      </div>
+      <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
+      {% endif %}
+      <div class="co-dock">
+      {% include "_checkout.html" %}
       </div>
     </div>
   </section>

@@ -174,6 +174,23 @@
     font-weight:var(--dna-w);
     letter-spacing:-.02em; line-height:1; }
   .price-row .u{ font-size:1rem; font-weight:700; letter-spacing:.06em; color:var(--accent); }
+  /* ---------- catalog: brutalist product blocks. One product = the classic
+     single card (the block chrome collapses via :only-child, so the 1-item
+     render matches the pre-catalog look); 2+ = a stack of hard-bordered
+     blocks, each with the offset --primary shadow and a mono index. ---------- */
+  .catalog{ display:grid; grid-template-columns:1fr; gap:clamp(22px,3.5vw,36px); }
+  .catalog .item{ position:relative; border:3px solid var(--text); background:var(--bg);
+    box-shadow:8px 8px 0 var(--primary); padding:clamp(20px,3vw,34px); }
+  .catalog .item:only-child{ border:0; background:none; box-shadow:none; padding:0; }
+  .item-no{ position:absolute; top:14px; right:16px; font-size:12px; font-weight:700;
+    letter-spacing:.18em; color:color-mix(in srgb,var(--text) 55%,transparent); }
+  .catalog .item:only-child .item-no{ display:none; }
+  .catalog .item:not(:only-child) h2{
+    font-size:clamp(calc(1.4rem*var(--dna-r)),calc(3.2vw*var(--dna-r)),calc(2.2rem*var(--dna-r))); }
+  .catalog .item:not(:only-child) .price-row{ margin-top:18px; padding-top:16px; }
+  .catalog .item:not(:only-child) .price-row .p{
+    font-size:clamp(calc(1.9rem*var(--dna-r)),calc(4.4vw*var(--dna-r)),calc(3rem*var(--dna-r))); }
+  .catalog .item:not(:only-child) .buy{ margin-top:18px; padding:15px 26px; font-size:15px; }
   .buy{
     display:block; width:100%; margin-top:24px; border:0; cursor:pointer;
     padding:18px 30px; border-radius:999px; font:inherit; font-size:17px; font-weight:700;
@@ -289,10 +306,17 @@
       <div class="card">
         <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
         <div class="plate" aria-hidden="true"><canvas id="plateField"></canvas><span class="plate-mark">{{EMOJI}}</span></div>
-        <h2>{{PRODUCT_NAME}}</h2>
-        <p class="blurb">{{PRODUCT_BLURB}}</p>
-        <div class="price-row mono"><span class="p">{{PRICE}}</span><span class="u">USDT</span></div>
-        <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}}</button>
+        <div class="catalog">
+        {% for p in PRODUCTS %}
+          <article class="item">
+            <span class="item-no mono" aria-hidden="true">{{ "%02d"|format(loop.index) }}</span>
+            <h2>{{ p.name }}</h2>
+            <p class="blurb">{{ p.blurb }}</p>
+            <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
+            <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} onclick="startCheckout({{ p.index }})">{{ p.cta }}</button>
+          </article>
+        {% endfor %}
+        </div>
         <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
         {% include "_checkout.html" %}
       </div>

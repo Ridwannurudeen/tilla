@@ -234,6 +234,37 @@
     color:color-mix(in srgb,var(--text) 52%,transparent);
   }
 
+  /* ---------- the product ledger: 2+ products as numbered rows (echoing the
+     01/02/03 index numerals); a single product keeps the plain card above ---------- */
+  .catalog{ border-top:var(--rule) solid var(--hairline); }
+  .item{
+    display:flex; gap:clamp(14px,2.5vw,26px);
+    padding:calc(clamp(20px,3vh,30px) * var(--dna-space)) 2px;
+    border-bottom:var(--rule) solid var(--hairline);
+  }
+  .item-num{
+    flex:none; padding-top:.3rem; font-weight:300; line-height:1;
+    font-size:calc(1.15rem * var(--numeral)); letter-spacing:.02em;
+    color:color-mix(in srgb,var(--text) 26%,transparent);
+  }
+  .item-body{ flex:1; min-width:0; }
+  .item-line{ display:flex; align-items:baseline; gap:clamp(12px,2vw,20px); }
+  .catalog .item-name{
+    min-width:0; font-size:calc(clamp(1.15rem,2.2vw,1.5rem) * var(--dna-k));
+    font-weight:var(--display-weight); line-height:1.25; letter-spacing:-.015em;
+    text-wrap:balance;
+  }
+  .item .leader{
+    flex:1 1 28px; min-width:28px;
+    border-bottom:1px dotted color-mix(in srgb,var(--text) 32%,transparent);
+  }
+  .item .price .n{ font-size:clamp(1.05rem,1.6vw,1.3rem); }
+  .item .buy{ flex:none; padding:10px 24px; font-size:12.5px; }
+  .item-blurb{
+    margin-top:7px; max-width:30rem; font-size:.88rem; line-height:1.65;
+    color:color-mix(in srgb,var(--text) 62%,transparent);
+  }
+
   /* ---------- folio footer ---------- */
   footer{ border-top:var(--rule) solid var(--hairline); }
   .folio-foot{
@@ -271,6 +302,8 @@
     .offer{ flex-direction:column; align-items:stretch; }
     .price{ justify-content:space-between; }
     .buy{ width:100%; }
+    .item-line{ flex-wrap:wrap; }
+    .item .buy{ margin-top:8px; }
     .folio .tagline{ letter-spacing:.14em; }
   }
 </style>
@@ -334,12 +367,34 @@
             <span class="cap-name">{{STORE_NAME}}</span>
           </div>
         </div>
-        <h2>{{PRODUCT_NAME}}</h2>
-        <p class="blurb">{{PRODUCT_BLURB}}</p>
+        {%- if PRODUCTS|length == 1 %}
+        {%- set p = PRODUCTS[0] %}
+        <h2>{{ p.name }}</h2>
+        <p class="blurb">{{ p.blurb }}</p>
         <div class="offer">
-          <div class="price mono"><span class="n">{{PRICE}}</span><span class="u">USDT</span></div>
-          <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}}</button>
+          <div class="price mono"><span class="n">{{ p.price }}</span><span class="u">USDT</span></div>
+          <button class="buy" id="buyBtn" onclick="startCheckout(0)">{{ p.cta }}</button>
         </div>
+        {%- else %}
+        <div class="catalog">
+          {%- for p in PRODUCTS %}
+          <article class="item">
+            <span class="item-num mono" aria-hidden="true">{{ '%02d'|format(p.index + 1) }}</span>
+            <div class="item-body">
+              <div class="item-line">
+                <h2 class="item-name">{{ p.name }}</h2>
+                <span class="leader" aria-hidden="true"></span>
+                <div class="price mono"><span class="n">{{ p.price }}</span><span class="u">USDT</span></div>
+                <button class="buy" {% if p.index == 0 %}id="buyBtn" {% endif %}onclick="startCheckout({{ p.index }})">{{ p.cta }}</button>
+              </div>
+              {%- if p.blurb %}
+              <p class="item-blurb">{{ p.blurb }}</p>
+              {%- endif %}
+            </div>
+          </article>
+          {%- endfor %}
+        </div>
+        {%- endif %}
         <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
         {% include "_checkout.html" %}
       </div>
