@@ -62,7 +62,15 @@ def _seed(
         return store.id
 
 
-def _order(store_id, status, expected_micro=9_500_100, channel="web", oid=None):
+def _order(
+    store_id,
+    status,
+    expected_micro=9_500_100,
+    channel="web",
+    oid=None,
+    from_addr=None,
+    paid_at=None,
+):
     import uuid
 
     with SessionLocal() as s:
@@ -75,6 +83,8 @@ def _order(store_id, status, expected_micro=9_500_100, channel="web", oid=None):
                 expected_micro=expected_micro,
                 status=status,
                 channel=channel,
+                from_addr=from_addr,
+                paid_at=paid_at,
             )
         )
         s.commit()
@@ -363,6 +373,60 @@ def test_discovery_sold_count_counts_only_delivered():
     r = client.get("/discovery/resources")
     row = next(x for x in r.json()["resources"] if x["slug"] == "soldshop")
     assert row["sold_count"] == 2
+
+
+def test_discovery_reputation_fields():
+    from datetime import datetime
+
+    sid = _seed(slug="repshop")
+    _order(sid, "delivered", from_addr="0x" + "1" * 40, paid_at=datetime(2026, 1, 1))
+    _order(sid, "delivered", from_addr="0x" + "2" * 40, paid_at=datetime(2026, 3, 1))
+    # repeat buyer 0x1 — must not double-count
+    _order(sid, "delivered", from_addr="0x" + "1" * 40, paid_at=datetime(2026, 2, 1))
+    _order(sid, "refunded", from_addr="0x" + "3" * 40)
+    _order(sid, "canceled", from_addr="0x" + "4" * 40)  # abandoned — excluded
+    _seed(slug="emptyshop")
+
+    rows = client.get("/discovery/resources").json()["resources"]
+    rep = next(x for x in rows if x["slug"] == "repshop")
+    assert rep["sold_count"] == 3
+    assert rep["unique_buyer_count"] == 2  # 0x1 counted once
+    # 3 delivered / (3 delivered + 1 refunded) = 0.75; canceled/pending excluded
+    assert rep["success_rate"] == 0.75
+    assert rep["last_sale_at"].startswith("2026-03-01")  # most recent delivery
+
+    none = next(x for x in rows if x["slug"] == "emptyshop")
+    assert none["sold_count"] == 0
+    assert none["success_rate"] is None
+    assert none["unique_buyer_count"] == 0
+    assert none["last_sale_at"] is None
+
+
+def test_discovery_sort_by_success_rate():
+    # A: perfect but low volume; B: high volume, lower clean-delivery rate.
+    a = _seed(slug="cleanshop")
+    _order(a, "delivered", from_addr="0x" + "1" * 40)
+    b = _seed(slug="busyshop")
+    for i in range(3):
+        _order(b, "delivered", from_addr="0x" + str(i) * 40)
+        _order(b, "refunded", from_addr="0x" + str(i) * 40)
+
+    default = [
+        x["slug"] for x in client.get("/discovery/resources").json()["resources"]
+    ]
+    assert default.index("busyshop") < default.index("cleanshop")  # sold desc: B first
+
+    body = client.get("/discovery/resources?sort=success").json()
+    assert body["sort"] == "success"
+    order = [x["slug"] for x in body["resources"]]
+    # rate desc: A (1.0) ahead of B (0.5), despite B's higher volume
+    assert order.index("cleanshop") < order.index("busyshop")
+
+
+def test_discovery_sort_unknown_falls_back_to_sold():
+    body = client.get("/discovery/resources?sort=bogus").json()
+    assert body["sort"] == "sold"
+    assert set(body["sorts"]) == {"sold", "success", "buyers", "recent", "new"}
 
 
 def test_discovery_search_escapes_like_and_bounds_query():

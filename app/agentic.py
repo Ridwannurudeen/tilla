@@ -32,7 +32,7 @@ from decimal import Decimal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -1286,7 +1286,15 @@ def agent_card(request: Request):
 # ============================================================================
 # Discovery: Tilla-wide index of live stores (no merchant wallets leaked)
 # ============================================================================
-def _discovery_row(store: Store, pmin, pmax, sold) -> dict:
+def _discovery_row(store: Store, pmin, pmax, sold, buyers, last_sale, refunded) -> dict:
+    # Reputation signals an agent buyer can rank on, computed from terminal orders:
+    # sold = delivered count; success_rate = delivered / (delivered + refunded), the
+    # clean-delivery rate (None until a sale completes); unique_buyer_count = distinct
+    # payer addresses; last_sale_at = most recent delivery. Abandoned/expired checkouts
+    # are the buyer's doing, not the store's, so they are excluded from the rate.
+    sold = sold or 0
+    refunded = refunded or 0
+    completed = sold + refunded
     return {
         "slug": store.slug,
         "name": _store_name(store),
@@ -1300,18 +1308,33 @@ def _discovery_row(store: Store, pmin, pmax, sold) -> dict:
         "price_max_micro": pmax,
         "currency": CURRENCY,
         "network": NETWORK,
-        "sold_count": sold or 0,
+        "sold_count": sold,
+        "success_rate": round(sold / completed, 4) if completed else None,
+        "unique_buyer_count": buyers or 0,
+        "last_sale_at": (last_sale.isoformat() + "Z") if last_sale else None,
         "created_at": store.created_at.isoformat() + "Z",
     }
 
 
-def _discovery_rows(session: Session, where_clauses, limit: int, offset: int):
-    sold_sq = (
+# Discovery sort keys an agent buyer can pass. 'sold' is the default and preserves
+# the prior order (most-sold first); an unknown value falls back to it.
+DISCOVERY_SORTS = ("sold", "success", "buyers", "recent", "new")
+
+
+def _discovery_rows(
+    session: Session, where_clauses, limit: int, offset: int, sort: str = "sold"
+):
+    delivered = Order.status.in_(checkout.TERMINAL_DELIVERED)
+    metrics_sq = (
         select(
             Order.store_id.label("sid"),
-            func.count(Order.id).label("sold"),
+            func.count(case((delivered, Order.id))).label("sold"),
+            func.count(func.distinct(case((delivered, Order.from_addr)))).label(
+                "buyers"
+            ),
+            func.max(case((delivered, Order.paid_at))).label("last_sale"),
+            func.count(case((Order.status == "refunded", Order.id))).label("refunded"),
         )
-        .where(Order.status.in_(checkout.TERMINAL_DELIVERED))
         .group_by(Order.store_id)
         .subquery()
     )
@@ -1325,22 +1348,44 @@ def _discovery_rows(session: Session, where_clauses, limit: int, offset: int):
         .group_by(Product.store_id)
         .subquery()
     )
-    stmt = (
-        select(Store, price_sq.c.pmin, price_sq.c.pmax, sold_sq.c.sold)
-        .outerjoin(price_sq, price_sq.c.sid == Store.id)
-        .outerjoin(sold_sq, sold_sq.c.sid == Store.id)
-        .where(Store.status == "live", *where_clauses)
-        .order_by(
-            func.coalesce(sold_sq.c.sold, 0).desc(),
-            Store.created_at.desc(),
+    sold_c = func.coalesce(metrics_sq.c.sold, 0)
+    completed_c = sold_c + func.coalesce(metrics_sq.c.refunded, 0)
+    # Untried stores (no completed sale) sort last on 'success' via a -1 sentinel.
+    success_c = case((completed_c > 0, sold_c * 1.0 / completed_c), else_=-1.0)
+    sorts = {
+        "sold": [sold_c.desc(), Store.created_at.desc(), Store.id.desc()],
+        "success": [success_c.desc(), sold_c.desc(), Store.id.desc()],
+        "buyers": [
+            func.coalesce(metrics_sq.c.buyers, 0).desc(),
+            sold_c.desc(),
             Store.id.desc(),
+        ],
+        "recent": [metrics_sq.c.last_sale.desc(), Store.id.desc()],
+        "new": [Store.created_at.desc(), Store.id.desc()],
+    }
+    order_by = sorts.get(sort) or sorts["sold"]
+    stmt = (
+        select(
+            Store,
+            price_sq.c.pmin,
+            price_sq.c.pmax,
+            metrics_sq.c.sold,
+            metrics_sq.c.buyers,
+            metrics_sq.c.last_sale,
+            metrics_sq.c.refunded,
         )
+        .outerjoin(price_sq, price_sq.c.sid == Store.id)
+        .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
+        .where(Store.status == "live", *where_clauses)
+        .order_by(*order_by)
         .limit(limit)
         .offset(offset)
     )
     return [
-        _discovery_row(s, pmin, pmax, sold)
-        for s, pmin, pmax, sold in session.execute(stmt).all()
+        _discovery_row(s, pmin, pmax, sold, buyers, last_sale, refunded)
+        for s, pmin, pmax, sold, buyers, last_sale, refunded in session.execute(
+            stmt
+        ).all()
     ]
 
 
@@ -1350,14 +1395,16 @@ def discovery_resources(
     request: Request,
     limit: int = 20,
     offset: int = 0,
+    sort: str = "sold",
     session: Session = Depends(get_session),
 ):
     limit = max(1, min(limit, 50))
     offset = max(0, min(offset, 100_000))
+    sort = sort if sort in DISCOVERY_SORTS else "sold"
     total = session.scalar(
         select(func.count()).select_from(Store).where(Store.status == "live")
     )
-    resources = _discovery_rows(session, [], limit, offset)
+    resources = _discovery_rows(session, [], limit, offset, sort)
     return JSONResponse(
         {
             "service": SERVICE,
@@ -1365,6 +1412,8 @@ def discovery_resources(
             "total": total,
             "limit": limit,
             "offset": offset,
+            "sort": sort,
+            "sorts": list(DISCOVERY_SORTS),
             "resources": resources,
         },
         headers=_AGENT_HEADERS,
