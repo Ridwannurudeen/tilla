@@ -278,7 +278,11 @@ def test_write_store_pages_writes_svg_and_index_without_rsvg(tmp_path, monkeypat
     d = tmp_path / "aperture"
     d.mkdir()
     engine._write_store_pages(
-        d, {"store_name": "A", "price_usdt": 9, "emoji": "x"}, "0xabc", "aperture", "original.html"
+        d,
+        {"store_name": "A", "price_usdt": 9, "emoji": "x"},
+        "0xabc",
+        "aperture",
+        "original.html",
     )
     assert (d / "index.html").exists()
     assert (d / "og.svg").exists()
@@ -292,7 +296,12 @@ def test_generated_content_multiproduct_mirrors_primary():
         {
             "store_name": "Cafe",
             "products": [
-                {"name": "Guji", "blurb": "floral", "price_usdt": 18, "cta_text": "Buy"},
+                {
+                    "name": "Guji",
+                    "blurb": "floral",
+                    "price_usdt": 18,
+                    "cta_text": "Buy",
+                },
                 {"name": "Yirg", "blurb": "citrus", "price_usdt": 16},
             ],
         }
@@ -332,8 +341,18 @@ def test_create_store_creates_a_product_row_per_catalog_item(tmp_path, monkeypat
         {
             "store_name": "Cafe",
             "products": [
-                {"name": "Guji", "blurb": "floral", "price_usdt": 18, "cta_text": "Buy"},
-                {"name": "Yirg", "blurb": "citrus", "price_usdt": 16, "cta_text": "Buy"},
+                {
+                    "name": "Guji",
+                    "blurb": "floral",
+                    "price_usdt": 18,
+                    "cta_text": "Buy",
+                },
+                {
+                    "name": "Yirg",
+                    "blurb": "citrus",
+                    "price_usdt": 16,
+                    "cta_text": "Buy",
+                },
             ],
         },
     )

@@ -785,7 +785,9 @@ def _add_product(store_id, name, price_micro):
     from app.models import Product
 
     with SessionLocal() as s:
-        s.add(Product(store_id=store_id, name=name, price_micro=price_micro, active=True))
+        s.add(
+            Product(store_id=store_id, name=name, price_micro=price_micro, active=True)
+        )
         s.commit()
 
 
@@ -807,7 +809,9 @@ def test_checkout_product_index_selects_that_product(make_store):
 
 def test_checkout_product_index_out_of_range_fails_closed(make_store):
     make_store(slug="oor", price_micro=9_000_000)
-    assert client.post("/api/checkout/oor", json={"product_index": 5}).status_code == 400
+    assert (
+        client.post("/api/checkout/oor", json={"product_index": 5}).status_code == 400
+    )
 
 
 def test_checkout_no_body_defaults_to_primary(make_store):
@@ -843,9 +847,14 @@ def test_checkout_foreign_or_unknown_product_id_fails_closed(make_store):
     with SessionLocal() as s:
         b_pid = s.scalar(select(Product.id).where(Product.store_id == b))
     # store sa checkout with store sb's product id -> 404 (no IDOR, no wrong charge)
-    assert client.post("/api/checkout/sa", json={"product_id": b_pid}).status_code == 404
+    assert (
+        client.post("/api/checkout/sa", json={"product_id": b_pid}).status_code == 404
+    )
     # a product id that doesn't exist -> 404
-    assert client.post("/api/checkout/sa", json={"product_id": 10_000_000}).status_code == 404
+    assert (
+        client.post("/api/checkout/sa", json={"product_id": 10_000_000}).status_code
+        == 404
+    )
 
 
 # ------------------------------------------------ per-product deliverables (C)
@@ -862,11 +871,16 @@ def test_active_deliverable_prefers_product_then_store_default(make_store):
             select(Product.id).where(Product.store_id == sid).order_by(Product.id)
         ).all()
         primary_id, deluxe_id = ids[0], ids[1]
-        s.add(Deliverable(store_id=sid, kind="text", payload="STORE DEFAULT", active=True))
+        s.add(
+            Deliverable(store_id=sid, kind="text", payload="STORE DEFAULT", active=True)
+        )
         s.add(
             Deliverable(
-                store_id=sid, product_id=deluxe_id, kind="text",
-                payload="DELUXE ONLY", active=True,
+                store_id=sid,
+                product_id=deluxe_id,
+                kind="text",
+                payload="DELUXE ONLY",
+                active=True,
             )
         )
         s.commit()
@@ -874,7 +888,9 @@ def test_active_deliverable_prefers_product_then_store_default(make_store):
         # a deluxe order gets the deluxe-specific deliverable
         assert checkout._active_deliverable(s, sid, deluxe_id).payload == "DELUXE ONLY"
         # the primary order (no primary-specific deliverable) falls back to the default
-        assert checkout._active_deliverable(s, sid, primary_id).payload == "STORE DEFAULT"
+        assert (
+            checkout._active_deliverable(s, sid, primary_id).payload == "STORE DEFAULT"
+        )
         # no product context -> store default (legacy behaviour)
         assert checkout._active_deliverable(s, sid).payload == "STORE DEFAULT"
 
