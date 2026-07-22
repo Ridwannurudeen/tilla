@@ -350,3 +350,37 @@ def test_create_store_creates_a_product_row_per_catalog_item(tmp_path, monkeypat
         ("Guji", 18_000_000),
         ("Yirg", 16_000_000),
     ]
+
+
+@respx.mock
+def test_create_store_populates_content_product_ids(tmp_path, monkeypatch):
+    import app.engine as engine
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Cafe",
+            "products": [
+                {"name": "Guji", "price_usdt": 18, "cta_text": "Buy"},
+                {"name": "Yirg", "price_usdt": 16, "cta_text": "Buy"},
+            ],
+        },
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("coffee")
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == result["slug"]))
+        rows = s.scalars(
+            select(Product).where(Product.store_id == store.id).order_by(Product.id)
+        ).all()
+        # content carries the stable product ids -> id-based buy buttons
+        assert [it["id"] for it in store.content["products"]] == [r.id for r in rows]
+    html = (tmp_path / result["slug"] / "index.html").read_text(encoding="utf-8")
+    assert f'data-pid="{rows[0].id}"' in html and f'data-pid="{rows[1].id}"' in html

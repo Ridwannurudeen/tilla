@@ -357,7 +357,7 @@
           </div>
           <div>
             <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
-            <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} onclick="startCheckout({{ p.index }})">{{ p.cta }}</button>
+            <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
             <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
           </div>
         </div>
@@ -375,7 +375,7 @@
           <h3>{{ p.name }}</h3>
           <p class="item-blurb">{{ p.blurb }}</p>
           <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
-          <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} onclick="startCheckout({{ p.index }})">{{ p.cta }}</button>
+          <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
         </article>
         {% endfor %}
       </div>

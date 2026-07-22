@@ -385,7 +385,7 @@
                 <h2 class="item-name">{{ p.name }}</h2>
                 <span class="leader" aria-hidden="true"></span>
                 <div class="price mono"><span class="n">{{ p.price }}</span><span class="u">USDT</span></div>
-                <button class="buy" {% if p.index == 0 %}id="buyBtn" {% endif %}onclick="startCheckout({{ p.index }})">{{ p.cta }}</button>
+                <button class="buy" {% if p.index == 0 %}id="buyBtn" {% endif %}data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
               </div>
               {%- if p.blurb %}
               <p class="item-blurb">{{ p.blurb }}</p>

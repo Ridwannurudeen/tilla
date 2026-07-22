@@ -556,6 +556,12 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                             active=True,
                         )
                     )
+                # For a live store, re-derive the catalog from the just-inserted
+                # Product rows so content carries their stable ids and the storefront
+                # renders id-based buy buttons (re-renders index.html once more with
+                # ids). Pending stores get this when resume_pending flips them live.
+                if not pending:
+                    resync_catalog(session, store)
                 # Record the screening receipt in the SAME txn as the store row. A
                 # pending (screening-unavailable) create has no verdict, so no
                 # receipt — one is written when resume_pending flips it live.
@@ -681,7 +687,9 @@ def resume_pending():
                 continue
             d = STORES_DIR / store.slug
             d.mkdir(parents=True, exist_ok=True)
-            _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+            # Re-derive the catalog from the Product rows (populates ids -> id-based
+            # buy buttons) and render the static pages in one pass.
+            resync_catalog(session, store)
             _mark_store_json_live(d, store.slug)
             store.status = "live"
             _persist_receipt(session, store.id, outcome.receipt)

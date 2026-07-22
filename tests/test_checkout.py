@@ -814,3 +814,35 @@ def test_checkout_no_body_defaults_to_primary(make_store):
     make_store(slug="prim", price_micro=9_000_000)
     r = client.post("/api/checkout/prim")
     assert r.status_code == 200 and r.json()["product_name"] == "Thing"
+
+
+def test_checkout_by_product_id_charges_that_product(make_store):
+    from sqlalchemy import select
+
+    from app.models import Product
+
+    sid = make_store(slug="byid", price_micro=9_000_000)  # primary "Thing" @ 9
+    _add_product(sid, "Deluxe", 20_000_000)
+    with SessionLocal() as s:
+        deluxe_id = s.scalars(
+            select(Product.id).where(Product.store_id == sid).order_by(Product.id)
+        ).all()[1]
+    r = client.post("/api/checkout/byid", json={"product_id": deluxe_id})
+    assert r.status_code == 200 and r.json()["product_name"] == "Deluxe"
+    with SessionLocal() as s:
+        assert s.get(Order, r.json()["id"]).amount_micro == 20_000_000
+
+
+def test_checkout_foreign_or_unknown_product_id_fails_closed(make_store):
+    from sqlalchemy import select
+
+    from app.models import Product
+
+    make_store(slug="sa", price_micro=9_000_000)
+    b = make_store(slug="sb", price_micro=5_000_000)
+    with SessionLocal() as s:
+        b_pid = s.scalar(select(Product.id).where(Product.store_id == b))
+    # store sa checkout with store sb's product id -> 404 (no IDOR, no wrong charge)
+    assert client.post("/api/checkout/sa", json={"product_id": b_pid}).status_code == 404
+    # a product id that doesn't exist -> 404
+    assert client.post("/api/checkout/sa", json={"product_id": 10_000_000}).status_code == 404

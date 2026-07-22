@@ -170,6 +170,11 @@ def _products_ctx(content: Mapping) -> dict:
     products = [
         {
             "index": i,
+            # The stable DB product id (populated by create_store/resync); the buy
+            # button prefers it so a deactivate/reorder can't shift what's bought.
+            # Empty when content predates it (pre-backfill) — the button falls back
+            # to the index, which checkout still accepts.
+            "id": str(item["id"]) if isinstance(item.get("id"), int) else "",
             "name": str(item.get("name", "")),
             "blurb": str(item.get("blurb", "")),
             "price": str(item.get("price_usdt", 0)),
@@ -182,6 +187,7 @@ def _products_ctx(content: Mapping) -> dict:
         products = [
             {
                 "index": 0,
+                "id": "",
                 "name": str(content.get("product_name", "")),
                 "blurb": str(content.get("product_blurb", "")),
                 "price": str(content.get("price_usdt", 0)),

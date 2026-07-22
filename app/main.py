@@ -681,9 +681,11 @@ class CheckoutCreateBody(BaseModel):
     # wallet; themes forward `?ref=` here. Validated + lowercased, zero-address
     # rejected. Absent/empty -> no attribution, byte-identical to the pre-M13 flow.
     ref: str | None = None
-    # Multi-product: 0-based index of the catalog product the buyer chose (the Nth
-    # active product by id, matching the storefront's render order). Absent -> the
-    # primary product, byte-identical to the single-product flow.
+    # Multi-product: the buyer's chosen product. product_id is the stable DB id
+    # (preferred — a deactivate/reorder can't shift it); product_index is the
+    # legacy render-order fallback still sent by pages cached before the id switch.
+    # Both absent -> the primary product, byte-identical to the single-product flow.
+    product_id: int | None = None
     product_index: int | None = None
 
     @field_validator("ref")
@@ -718,16 +720,23 @@ def create_checkout(
     ).all()
     if not products:
         raise HTTPException(409, "store has no active product")
-    # Select the buyer's chosen product by its render-order index; absent -> the
-    # primary product. An out-of-range index fails closed (400) rather than
-    # silently charging the wrong product.
+    # Select the buyer's chosen product: prefer the stable product_id (validated to
+    # be an ACTIVE product of THIS store — a foreign or inactive id fails closed
+    # 404, never charges the wrong product / no IDOR), else the legacy render-order
+    # index, else the primary product.
+    pid = body.product_id if body is not None else None
     idx = body.product_index if body is not None else None
-    if idx is None:
-        product = products[0]
-    elif 0 <= idx < len(products):
-        product = products[idx]
+    if pid is not None:
+        product = next((p for p in products if p.id == pid), None)
+        if product is None:
+            raise HTTPException(404, "product not found")
+    elif idx is not None:
+        if 0 <= idx < len(products):
+            product = products[idx]
+        else:
+            raise HTTPException(400, "product_index out of range")
     else:
-        raise HTTPException(400, "product_index out of range")
+        product = products[0]
     referrer_addr = body.ref if body is not None else None
     try:
         order = checkout.create_order(session, store, product, referrer_addr)
