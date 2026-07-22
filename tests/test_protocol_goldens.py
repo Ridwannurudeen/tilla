@@ -4,6 +4,7 @@ can never silently drift from the running code. Each surface in the protocol's
 registry table is exercised here against its pinned schema.
 """
 
+import inspect
 import pathlib
 
 import httpx
@@ -14,7 +15,7 @@ import yaml
 from sqlalchemy import select
 
 import app.main as main
-from app import b2b, config, delivery
+from app import agentic, b2b, config, delivery
 from app.db import SessionLocal
 from app.models import Store
 from fastapi.testclient import TestClient
@@ -93,6 +94,16 @@ def test_agent_card_validates_against_pinned_schema():
     assert any(r["standard"] == "ERC-8004" for r in body["registrations"])
 
 
+def _buy_query_fields() -> set[str]:
+    """The x402 buy endpoint's REAL accepted request-shaping fields: the buy route's
+    optional query params (slug/product_id are path-fixed, payment rides the x402
+    header). Read from the live signature so the feed input_schema can't drift from
+    what the endpoint actually accepts."""
+    sig = inspect.signature(agentic.agent_buy_product)
+    skip = {"request", "session", "slug", "product_id"}
+    return {n for n, p in sig.parameters.items() if n not in skip and p.default is None}
+
+
 def test_feed_validates_against_pinned_schema(make_store):
     make_store(slug="pg-feed", price_micro=9_000_000)
     _set_tiers("pg-feed", [TIER])
@@ -101,6 +112,11 @@ def test_feed_validates_against_pinned_schema(make_store):
     prod = body["products"][0]
     assert prod["pricing"]["wholesale"] is True
     assert "tiers" not in prod["pricing"]["params"]  # INV-B: no tier table leaked
+    # Phase 1.2: every product carries a typed buy input_schema whose fields are
+    # exactly the buy endpoint's real accepted request fields — no more, no less.
+    isch = prod["input_schema"]
+    assert isch["type"] == "object"
+    assert set(isch["properties"]) == _buy_query_fields() == {"ref", "agent_id"}
 
 
 def test_quote_base_only_validates(make_store):

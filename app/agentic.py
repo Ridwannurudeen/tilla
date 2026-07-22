@@ -1669,6 +1669,28 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
             "asset": ASSET,
             "schemes": enabled_schemes(product),
         },
+        # Phase 1.2: the typed contract an agent supplies to the x402 buy endpoint.
+        # The product is fixed by the x402 endpoint path and payment rides the x402
+        # header, so the only request-shaping inputs are the buy route's two optional
+        # query params (ref/agent_id) — mirrors the agent-card 'buy' input_schema.
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": (
+                        "optional 0x affiliate wallet to attribute the sale to"
+                    ),
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": (
+                        "optional ERC-8004 agent id to price a wholesale tier; "
+                        "granted at settle only if the payer wallet is its owner"
+                    ),
+                },
+            },
+        },
     }
 
 
