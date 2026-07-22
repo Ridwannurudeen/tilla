@@ -146,12 +146,13 @@
     word-break:normal; }
 
   /* ---------- forms ---------- */
-  input, select{ font:inherit; font-size:13px; background:var(--bg); color:var(--text);
+  input, select, textarea{ font:inherit; font-size:13px; background:var(--bg); color:var(--text);
     border:1px solid var(--hairline); border-radius:4px; padding:9px 11px; }
-  input{ width:100%;
+  input, textarea{ width:100%;
     font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
     font-size:12.5px; }
-  input::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
+  textarea{ min-height:110px; resize:vertical; }
+  input::placeholder, textarea::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
   label{ display:block; font-size:10.5px; font-weight:600; text-transform:uppercase;
     letter-spacing:.12em; color:var(--muted); margin:12px 0 6px; }
 
@@ -325,6 +326,43 @@
       <div class="row" style="margin-top:12px">
         <button id="pAdd" class="primary">Add product</button>
       </div>
+    </div>
+
+    <h3>Deliverables</h3>
+    <div id="delivMsg" class="small hide"></div>
+    <div id="deliverables"></div>
+    <div class="card">
+      <div class="row head">
+        <strong>Set / replace deliverable</strong>
+        <span class="muted mono">one scope at a time</span>
+      </div>
+      <label for="dScope">Scope</label>
+      <select id="dScope"></select>
+      <label for="dKind">Kind</label>
+      <select id="dKind">
+        <option value="file">File — buyer downloads it</option>
+        <option value="text">Text — secret shown to the buyer</option>
+        <option value="license">License — key with an activation cap</option>
+      </select>
+      <div id="dFileFields">
+        <label for="dFile">File (up to 25 MB)</label>
+        <input id="dFile" type="file" />
+        <label for="dMaxDl">Max downloads (optional)</label>
+        <input id="dMaxDl" type="number" min="1" step="1" placeholder="default 5" />
+      </div>
+      <div id="dTextFields" class="hide">
+        <label for="dPayload">Secret text the buyer receives</label>
+        <textarea id="dPayload" placeholder="An invite link, a coupon code, setup instructions…"></textarea>
+      </div>
+      <div id="dLicenseFields" class="hide">
+        <label for="dMaxAct">Max activations (optional)</label>
+        <input id="dMaxAct" type="number" min="1" step="1" placeholder="default 3" />
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button id="dSet" class="primary">Set deliverable</button>
+      </div>
+      <p class="muted small">Replacing a deliverable only changes the chosen scope for new orders —
+         buyers who already paid keep the version they bought.</p>
     </div>
 
     <h3>Orders</h3>
@@ -578,8 +616,10 @@
     });
     t.appendChild(tb); box.appendChild(t);
     pmsg("");
+    dmsg("");
     show("viewStore");
     await loadProducts(slug);
+    await loadDeliverables(slug);
   }
 
   // ---- products (catalog CRUD; every API string rendered via textContent only) ----
@@ -645,6 +685,7 @@
       try {
         await api(productPath(slug, p.id), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
         await loadProducts(slug);
+        await loadDeliverables(slug);
         pmsg("Saved — " + nm + " updated.");
       } catch (e) { save.disabled = false; pmsg(productErr(e, "edit"), true); }
     };
@@ -661,6 +702,7 @@
       try {
         await api(productPath(slug, p.id), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: !p.active }) });
         await loadProducts(slug);
+        await loadDeliverables(slug);
         pmsg(p.active ? "Product deactivated." : "Product activated.");
       } catch (e) { tog.disabled = false; pmsg(productErr(e, "toggle"), true); }
     };
@@ -685,8 +727,142 @@
       await api("/api/merchant/stores/" + encodeURIComponent(LAST_STORE) + "/products", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       byId("pName").value = ""; byId("pPrice").value = ""; byId("pBlurb").value = ""; byId("pCta").value = "";
       await loadProducts(LAST_STORE);
+      await loadDeliverables(LAST_STORE);
       pmsg("Added " + nm + " to the catalog.");
     } catch (e) { pmsg(productErr(e, "add"), true); }
+    btn.disabled = false;
+  }
+
+  // ---- deliverables (what a buyer receives; the API returns METADATA only —
+  //      the secret payload and file bytes never reach this page; every string
+  //      rendered via textContent only) ----
+  function dmsg(text, isErr) {
+    var m = byId("delivMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+  function delivErr(e) {
+    if (e.status === 413) return "That file is too big — the upload cap is 25 MB.";
+    if (e.status === 503) return "Gated delivery isn't configured on this server yet.";
+    if (e.status === 422) return "Not accepted — " + e.message;
+    return e.message;
+  }
+
+  async function loadDeliverables(slug) {
+    var box = byId("deliverables");
+    var dd, pd;
+    try {
+      var res = await Promise.all([
+        api("/api/merchant/stores/" + encodeURIComponent(slug) + "/deliverables"),
+        api("/api/merchant/stores/" + encodeURIComponent(slug) + "/products")
+      ]);
+      dd = res[0]; pd = res[1];
+    } catch (e) {
+      clear(box);
+      box.appendChild(el("div", "card muted", "Could not load deliverables."));
+      return;
+    }
+    var products = pd.products || [];
+    var actives = products.filter(function (p) { return p.active; });
+    var names = {};
+    products.forEach(function (p) { names[p.id] = p.name; });
+
+    // scope dropdown: store default + one option per active product
+    var sel = byId("dScope");
+    var prev = sel.value;
+    clear(sel);
+    var od = el("option"); od.value = ""; od.textContent = "Store default (products without their own)"; sel.appendChild(od);
+    actives.forEach(function (p) {
+      var o = el("option"); o.value = String(p.id); o.textContent = p.name; sel.appendChild(o);
+    });
+    if (prev && actives.some(function (p) { return String(p.id) === prev; })) sel.value = prev;
+
+    var items = dd.deliverables || [];
+    clear(box);
+    if (!items.length) {
+      box.appendChild(el("div", "card muted", "No deliverables yet — buyers get the plain delivery message. Set one below."));
+    } else {
+      var card = el("div", "card");
+      items.forEach(function (d) {
+        var item = el("div", "pitem");
+        var row = el("div", "prow");
+        var scope = d.product_id == null ? "Store default" : (names[d.product_id] || ("product #" + d.product_id));
+        row.appendChild(el("strong", null, scope));
+        row.appendChild(el("span", "pill", d.kind));
+        if (d.kind === "file") {
+          row.appendChild(el("span", "mono", d.file_name || ""));
+          if (d.max_downloads != null) row.appendChild(el("span", "muted mono", d.max_downloads + " downloads max"));
+        }
+        if (d.kind === "license" && d.max_activations != null) {
+          row.appendChild(el("span", "muted mono", d.max_activations + " activations max"));
+        }
+        item.appendChild(row);
+        card.appendChild(item);
+      });
+      box.appendChild(card);
+    }
+
+    // coverage: active products with no specific deliverable fall back to the default
+    var covered = {};
+    items.forEach(function (d) { if (d.product_id != null) covered[d.product_id] = true; });
+    var fallback = actives.filter(function (p) { return !covered[p.id]; });
+    var hasDefault = items.some(function (d) { return d.product_id == null; });
+    if (fallback.length) {
+      var line = el("div", "muted small");
+      line.textContent = (hasDefault
+        ? "Covered by the store default: "
+        : "No store default — these products fall back to the plain delivery message: ")
+        + fallback.map(function (p) { return p.name; }).join(", ");
+      box.appendChild(line);
+    }
+  }
+
+  function syncDeliverableKind() {
+    var k = byId("dKind").value;
+    byId("dFileFields").classList.toggle("hide", k !== "file");
+    byId("dTextFields").classList.toggle("hide", k !== "text");
+    byId("dLicenseFields").classList.toggle("hide", k !== "license");
+  }
+
+  async function setDeliverable() {
+    if (!LAST_STORE) return;
+    var kind = byId("dKind").value;
+    var sel = byId("dScope");
+    var pid = sel.value; // "" = store default
+    var scopeName = pid ? sel.options[sel.selectedIndex].textContent : "the store default";
+    var opts;
+    if (kind === "file") {
+      var f = byId("dFile").files[0];
+      if (!f) { dmsg("Choose a file first.", true); return; }
+      var mdl = byId("dMaxDl").value.trim();
+      if (mdl && !/^[1-9]\d*$/.test(mdl)) { dmsg("Max downloads must be a positive whole number.", true); return; }
+      var fd = new FormData();
+      fd.append("file", f);
+      if (pid) fd.append("product_id", pid);
+      if (mdl) fd.append("max_downloads", mdl);
+      opts = { method: "POST", body: fd };
+    } else if (kind === "text") {
+      var payload = byId("dPayload").value;
+      if (!payload.trim()) { dmsg("Enter the secret text buyers should receive.", true); return; }
+      var body = { kind: "text", payload: payload };
+      if (pid) body.product_id = parseInt(pid, 10);
+      opts = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+    } else {
+      var mact = byId("dMaxAct").value.trim();
+      if (mact && !/^[1-9]\d*$/.test(mact)) { dmsg("Max activations must be a positive whole number.", true); return; }
+      var lic = { kind: "license" };
+      if (mact) lic.max_activations = parseInt(mact, 10);
+      if (pid) lic.product_id = parseInt(pid, 10);
+      opts = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(lic) };
+    }
+    var btn = byId("dSet"); btn.disabled = true;
+    try {
+      await api("/api/stores/" + encodeURIComponent(LAST_STORE) + "/deliverable", opts);
+      byId("dFile").value = ""; byId("dPayload").value = "";
+      byId("dMaxDl").value = ""; byId("dMaxAct").value = "";
+      await loadDeliverables(LAST_STORE);
+      dmsg("Set the " + kind + " deliverable for " + scopeName + " — buyers who already paid keep the previous version.");
+    } catch (e) { dmsg(delivErr(e), true); }
     btn.disabled = false;
   }
 
@@ -820,6 +996,8 @@
   byId("backToMain").onclick = function () { show("viewMain"); };
   byId("backFromOrder").onclick = function () { if (LAST_STORE) openStore(LAST_STORE); else show("viewMain"); };
   byId("pAdd").onclick = addProduct;
+  byId("dKind").onchange = syncDeliverableKind;
+  byId("dSet").onclick = setDeliverable;
   byId("whSave").onclick = saveWebhook;
   byId("whDelete").onclick = deleteWebhook;
   byId("csvOrders").onclick = function () { downloadCsv("/api/merchant/export/orders.csv", "orders.csv"); };
