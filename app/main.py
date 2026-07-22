@@ -434,6 +434,64 @@ def merchant_profile(
     return HTMLResponse(render.render_profile(addr, items))
 
 
+# ---------- Phase 4 custom domains: host-based store resolution ----------
+def _request_host(request: Request) -> str:
+    """The lowercased Host header without any port. Empty when absent."""
+    host = request.headers.get("host", "")
+    return host.split(":", 1)[0].strip().lower()
+
+
+def _store_for_host(request: Request, session: Session) -> Store | None:
+    """The live store whose VERIFIED custom domain equals this request's Host, or None.
+    Fail-closed: an unverified/unclaimed domain, a non-live store, or a non-matching host
+    all yield None (the caller 404s), so an unverified domain can never serve a store."""
+    host = _request_host(request)
+    if not host:
+        return None
+    return session.scalar(
+        select(Store).where(
+            Store.custom_domain == host,
+            Store.custom_domain_verified_at.isnot(None),
+            Store.status == "live",
+        )
+    )
+
+
+@app.get("/")
+@limiter.limit("120/minute")
+def custom_domain_root(request: Request, session: Session = Depends(get_session)):
+    """Serve a store on its VERIFIED custom domain. This route is only reached via the
+    operator's custom-domain vhost (the platform host serves its landing page from nginx
+    statics); a request whose Host is not a verified custom domain is a fail-closed 404.
+    The store is rendered through the same autoescaped env as its static page, with
+    canonical/OG pointing at the custom domain root."""
+    store = _store_for_host(request, session)
+    if store is None or not isinstance(store.content, dict):
+        raise HTTPException(404, "not found")
+    base_url = f"https://{store.custom_domain}"
+    html = render.render(
+        store.content, store.pay_to, store.slug, store.theme, base_url=base_url
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/og.png")
+@app.get("/og.svg")
+def custom_domain_og(request: Request, session: Session = Depends(get_session)):
+    """Serve the store's Open Graph card on its verified custom domain, so the OG image
+    URL (``https://<domain>/og.png``) referenced by the custom-domain page resolves. The
+    asset is the store's own pre-rendered static card; a non-matching Host is a 404."""
+    store = _store_for_host(request, session)
+    if store is None:
+        raise HTTPException(404, "not found")
+    name = "og.png" if request.url.path.endswith(".png") else "og.svg"
+    asset = config.STORES_DIR / store.slug / name
+    if not asset.is_file():
+        raise HTTPException(404, "not found")
+    media = "image/png" if name == "og.png" else "image/svg+xml"
+    return FileResponse(asset, media_type=media)
+
+
 # ---------- ASP endpoint: create a store (x402-paid) ----------
 class CreateStoreBody(BaseModel):
     description: str = Field(min_length=1, max_length=config.MAX_DESCRIPTION_LEN)
