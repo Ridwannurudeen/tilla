@@ -356,6 +356,38 @@ class Entitlement(Base):
     )
 
 
+class Review(Base):
+    """Phase 3 verified-buyer review — un-fakeable by construction. A row can only be
+    written by the wallet that COMPLETED the purchase: the route requires an
+    authenticated buyer session whose address equals ``order.from_addr`` on a
+    TERMINAL_DELIVERED order. UNIQUE(order_id) caps it at one review per completed
+    order (a duplicate 409s, the Entitlement precedent), and ``body`` is Warden-
+    screened BEFORE insert so no unscreened text is ever stored or surfaced. Pure
+    reputation — no code turns a row here into a fund movement. ``rating`` is bounded
+    1..5 by a CHECK; ``product_id`` snapshots the ordered product (nullable, matching
+    Order.product_id)."""
+
+    __tablename__ = "reviews"
+    __table_args__ = (
+        UniqueConstraint("order_id", name="uq_reviews_order_id"),
+        CheckConstraint("rating >= 1 AND rating <= 5", name="ck_reviews_rating"),
+        Index("ix_reviews_store_id", "store_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id"), nullable=True
+    )
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), nullable=False)
+    from_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
 class AuthNonce(Base):
     """Single-use buyer sign-in nonce. Consumed by a conditional UPDATE
     (used_at IS NULL), so a captured signature is worthless after first use.
