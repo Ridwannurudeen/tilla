@@ -114,6 +114,11 @@ class Product(Base):
         String(12), nullable=False, default="one_time", server_default="one_time"
     )
     pricing_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Phase 1.3 SLA: the merchant's delivery-time promise in minutes, surfaced to
+    # buyer agents as an ETA (feed.json / MCP). NULL = no per-product override, so
+    # the agent surfaces fall back to the platform default DELIVERY_SLA_MINUTES;
+    # every pre-1.3 product is NULL, an unchanged instant-delivery promise.
+    sla_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )

@@ -460,6 +460,61 @@ def test_migration_0009_additive_and_index_survives(tmp_path):
     con.close()
 
 
+def test_migration_0011_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m14.db"
+    r = _alembic(db, "upgrade", "0010_self_serve_create_store")
+    assert r.returncode == 0, r.stderr
+
+    # seed a product against the 0010 schema (no sla_minutes yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.execute(
+        "INSERT INTO products (id, store_id, name, price_micro, active, pricing_model,"
+        " created_at) VALUES (1,1,'Thing',9000000,1,'one_time','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    pcols = {c[1] for c in con.execute("PRAGMA table_info(products)")}
+    assert "sla_minutes" in pcols
+    # additive column backfills to NULL for the existing product (no per-product SLA)
+    assert (
+        con.execute("SELECT sla_minutes FROM products WHERE id=1").fetchone()[0] is None
+    )
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    # products add_column never touches orders — the M3 partial unique index is safe
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    # up-down-up: the column drops and re-adds, the partial index is untouched
+    r = _alembic(db, "downgrade", "0010_self_serve_create_store")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    pcols = {c[1] for c in con.execute("PRAGMA table_info(products)")}
+    assert "sla_minutes" not in pcols
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+
+
 def test_fresh_schema_has_marketplace_and_receipts():
     # Fresh create_all (conftest) must match the migrated schema: the new column +
     # table exist on the in-process engine used by the app/tests.

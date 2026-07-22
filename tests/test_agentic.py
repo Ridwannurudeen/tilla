@@ -129,8 +129,44 @@ def test_feed_validates_against_pinned_schema():
     assert body["store"]["slug"] == "feedshop"
     p = body["products"][0]
     assert p["price"] == {"amount": "9.5", "currency": "USDT"}
+    assert p["sla_minutes"] == 10  # platform default when no per-product override
     assert p["x402"]["endpoint"] == f"/s/feedshop/buy/{p['id']}"
     assert p["x402"]["asset"] == config.USDT0
+
+
+def _set_product_sla(slug, minutes):
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        product = s.scalar(select(Product).where(Product.store_id == store.id))
+        product.sla_minutes = minutes
+        s.commit()
+
+
+def test_sla_default_and_per_product_override():
+    _seed(slug="slashop", price_micro=2_000_000)
+    # default: every purchasable surface carries the platform ETA
+    feed = client.get("/s/slashop/feed.json").json()["products"][0]
+    assert feed["sla_minutes"] == 10
+    gp = _mcp(
+        "slashop",
+        "tools/call",
+        {"name": "list_products"},
+    ).json()["result"]["structuredContent"]["products"][0]
+    assert gp["sla_minutes"] == 10
+    cc = client.post("/api/checkout/slashop").json()
+    assert cc["sla_minutes"] == 10
+
+    # per-product override wins everywhere
+    _set_product_sla("slashop", 30)
+    assert client.get("/s/slashop/feed.json").json()["products"][0]["sla_minutes"] == 30
+    pid = gp["id"]
+    detail = _mcp(
+        "slashop",
+        "tools/call",
+        {"name": "get_product", "arguments": {"product_id": pid}},
+    ).json()["result"]["structuredContent"]
+    assert detail["sla_minutes"] == 30
+    assert client.post("/api/checkout/slashop").json()["sla_minutes"] == 30
 
 
 def test_feed_404_for_non_live():

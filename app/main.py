@@ -752,6 +752,9 @@ def create_checkout(
         "id": order.id,
         "pay_to": store.pay_to,
         "product_name": product.name,
+        # Phase 1.3 SLA: the delivery-time promise (minutes) shown to the buyer as
+        # an ETA, and consumed by embed/custom checkout frontends.
+        "sla_minutes": agentic._effective_sla(product),
         "amount": order.expected_micro / 1e6,
         # Exact base-unit amount so the browser builds ERC-20 calldata with BigInt
         # only (amount*1e6 in JS can be off by one micro, which the exact-match

@@ -30,7 +30,7 @@ properties:
     items:
       type: object
       additionalProperties: false
-      required: [id, title, description, link, price, availability, x402]
+      required: [id, title, description, link, price, availability, sla_minutes, x402]
       properties:
         id:
           type: string
@@ -41,6 +41,11 @@ properties:
         link:
           type: string
           format: uri
+        # Phase 1.3 SLA: the delivery-time promise (minutes) the buyer agent should
+        # expect — a per-product ETA it can rank providers on.
+        sla_minutes:
+          type: integer
+          minimum: 1
         price:
           type: object
           additionalProperties: false

@@ -954,6 +954,7 @@ def _tool_list_products(session: Session, store: Store) -> dict:
                 "price_micro": p.price_micro,
                 "currency": CURRENCY,
                 "network": NETWORK,
+                "sla_minutes": _effective_sla(p),
             }
             for p in products
         ]
@@ -986,6 +987,7 @@ def _tool_get_product(
         "price_micro": product.price_micro,
         "currency": CURRENCY,
         "network": NETWORK,
+        "sla_minutes": _effective_sla(product),
         "deliverable_kind": deliverable.kind if deliverable else "text",
         "pricing": _pricing_block(product),
         "x402": {
@@ -1339,6 +1341,15 @@ async def root_mcp_get(request: Request):
 # ============================================================================
 # Feeds: feed.json (ACP product-feed shape) + llms.txt
 # ============================================================================
+def _effective_sla(product: Product) -> int:
+    """The delivery-time promise (minutes) a buyer agent should expect: the
+    merchant's per-product override, else the platform default. Always an int, so
+    every purchasable action carries an ETA an agent can rank on."""
+    return (
+        product.sla_minutes if product.sla_minutes is not None else DELIVERY_SLA_MINUTES
+    )
+
+
 def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> dict:
     return {
         "id": str(product.id),
@@ -1347,6 +1358,7 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
         "link": store_url,
         "price": {"amount": _usdt_str(product.price_micro), "currency": CURRENCY},
         "availability": "in_stock",
+        "sla_minutes": _effective_sla(product),
         "pricing": _pricing_block(product),
         "x402": {
             "endpoint": f"/s/{slug}/buy/{product.id}",

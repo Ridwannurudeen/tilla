@@ -5,6 +5,7 @@
 <div class="checkout" id="co">
   <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
   <div class="row"><span>Network</span><b>X Layer (OKX)</b></div>
+  <div class="row" id="coEtaRow" style="display:none"><span>Delivery</span><b id="coEta">…</b></div>
   <div class="co-count" id="coCountdown"></div>
 
   <button class="co-btn" id="payWalletBtn" style="display:none" onclick="payWithWallet()">Pay with wallet</button>
@@ -301,6 +302,10 @@
     CO.expiresAt = Date.parse(d.expires_at);
     byId("coAmount").textContent = CO.amountStr + " USDT0";
     byId("coAddr").textContent = CO.payTo;
+    if (d.sla_minutes) {
+      byId("coEta").textContent = "within " + d.sla_minutes + " min of payment";
+      byId("coEtaRow").style.display = "";
+    }
     renderQR();
     updatePayButton();
     startCountdown();
