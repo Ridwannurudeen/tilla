@@ -1,9 +1,10 @@
 # Pinned JSON Schema (Draft 2020-12) for the MCP tools/list result
 # (POST /s/{slug}/mcp, method tools/list). Frozen by tilla-protocol-v1 — this is
-# the tool CATALOG another implementer conforms to: the four tools
-# (list_products, get_product, create_checkout, pay) each with a name,
-# description, and JSON-Schema inputSchema. Validated live by
-# tests/test_protocol_goldens.py.
+# the tool CATALOG another implementer conforms to: the five tools
+# (list_products, get_product, preview_order, create_checkout, pay) each with a
+# name, description, and JSON-Schema inputSchema. preview_order is the read-only
+# confirm-before-pay summary; create_checkout/pay stay the two explicit settlement
+# steps. Validated live by tests/test_protocol_goldens.py.
 $schema: "https://json-schema.org/draft/2020-12/schema"
 $id: "https://tilla.gudman.xyz/schemas/mcp-tools-list.json"
 title: "Tilla MCP tools/list result"
@@ -21,7 +22,7 @@ properties:
       properties:
         name:
           type: string
-          enum: [list_products, get_product, create_checkout, pay]
+          enum: [list_products, get_product, preview_order, create_checkout, pay]
         description:
           type: string
         inputSchema:

@@ -1001,6 +1001,12 @@ class _GetProductArgs(BaseModel):
     agent_id: str | None = None
 
 
+class _PreviewOrderArgs(BaseModel):
+    # Optional: which active product to preview. Omitted -> the store's primary
+    # product. Read-only, so no `ref` attribution (nothing is reserved to attribute).
+    product_id: int | None = None
+
+
 class _CreateCheckoutArgs(BaseModel):
     # Optional: which active product to check out. Omitted -> the store's primary
     # product (lowest Product.id), byte-identical to the pre-M10 single-product
@@ -1058,6 +1064,81 @@ def _rpc_tool_error(req_id, message: str) -> dict:
     )
 
 
+# Phase 4 butler flow: the two-step "summarize -> then pay" contract, stated in-band
+# so a concierge agent can show a human what will happen before any settlement. The
+# summary is read-only; funds move ONLY on the explicit pay step (or the x402 buy
+# POST), and always settle to the merchant's payTo (non-custodial).
+_PREVIEW_NEXT_STEP = (
+    "Preview only — nothing is reserved and nothing is charged. To buy, call "
+    "create_checkout to lock an exact amount, then pay with the on-chain tx hash "
+    "(x402 agents can POST the store's buy endpoint instead). Funds move only on "
+    "that explicit pay step and settle to the merchant's payTo (non-custodial)."
+)
+_CHECKOUT_NEXT_STEP = (
+    "Checkout reserved but UNPAID — nothing has been charged yet. Send exactly "
+    "amount_micro of USDT to pay_to on X Layer, then call pay with the tx hash "
+    "(x402 agents can POST the store's buy endpoint instead). Funds move only on "
+    "that explicit pay step and settle to the merchant (non-custodial)."
+)
+
+
+def _order_summary(store: Store, product: Product) -> dict:
+    """The confirm-before-pay summary a concierge agent shows a human before any
+    settlement: what is bought, the unit price + quantity + total (USDT), the
+    delivery ETA (sla_minutes), the store, the payment rail, and a one-line human
+    string. Side-effect-free — the price of the goods, not a payment instruction; the
+    exact on-chain amount (with its unique matching offset) is create_checkout's
+    amount_micro. Quantity is 1 (one checkout buys one unit)."""
+    unit_micro = product.price_micro
+    quantity = 1
+    total_micro = unit_micro * quantity
+    sla = _effective_sla(product)
+    store_name = _store_name(store)
+    return {
+        "store": {"name": store_name, "slug": store.slug},
+        "product": {"id": product.id, "name": product.name},
+        "quantity": quantity,
+        "unit_price": _usdt_str(unit_micro),
+        "unit_price_micro": unit_micro,
+        "total": _usdt_str(total_micro),
+        "total_micro": total_micro,
+        "currency": CURRENCY,
+        "network": NETWORK,
+        "asset": ASSET,
+        "pay_to": store.pay_to,
+        "sla_minutes": sla,
+        "settlement": "non_custodial",
+        "line": (
+            f"{quantity} x {product.name} from {store_name} for "
+            f"{_usdt_str(total_micro)} {CURRENCY}, delivered within ~{sla} min "
+            f"(paid direct to the merchant on X Layer)."
+        ),
+    }
+
+
+def _resolve_active_product(
+    session: Session, store: Store, product_id: int | None
+) -> Product:
+    """The active product a buy targets: the given ``product_id`` (validated to be an
+    active product of THIS store) or the store's primary product. Raises _ToolError
+    exactly like the callers did inline, so tool behaviour is unchanged."""
+    if product_id is not None:
+        product = session.scalar(
+            select(Product).where(
+                Product.id == product_id,
+                Product.store_id == store.id,
+                Product.active.is_(True),
+            )
+        )
+        if product is None:
+            raise _ToolError("product not found")
+        return product
+    product = _active_product(session, store.id)
+    if product is None:
+        raise _ToolError("store has no active product")
+    return product
+
+
 def _mcp_tools() -> list[dict]:
     return [
         {
@@ -1088,13 +1169,32 @@ def _mcp_tools() -> list[dict]:
             },
         },
         {
+            "name": "preview_order",
+            "description": (
+                "Read-only confirmation summary for a would-be buy — product, unit "
+                "price + quantity + total (USDT), delivery ETA (sla_minutes), store, "
+                "payment rail, and a one-line human string — WITHOUT reserving or "
+                "charging anything. Use it to show a human what will happen before "
+                "paying: nothing settles until create_checkout + pay (or the x402 buy "
+                "POST). Pass an optional product_id; omit for the store's primary "
+                "product."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"product_id": {"type": "integer"}},
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "create_checkout",
             "description": (
-                "Create a unique-amount on-chain checkout (for agents that pay the "
-                "merchant themselves and submit the tx hash via `pay`). Pass an "
-                "optional product_id to check out a specific product; omit it for "
-                "the store's primary product. Pass an optional `ref` (a 0x EVM "
-                "address) to attribute the sale to a referring agent's payout wallet."
+                "Reserve a unique-amount on-chain checkout (for agents that pay the "
+                "merchant themselves and submit the tx hash via `pay`). Returns a "
+                "confirmation `summary` plus the exact amount to send — but charges "
+                "nothing: money moves only on the explicit `pay` step. Pass an "
+                "optional product_id to check out a specific product; omit it for the "
+                "store's primary product. Pass an optional `ref` (a 0x EVM address) to "
+                "attribute the sale to a referring agent's payout wallet."
             ),
             "inputSchema": {
                 "type": "object",
@@ -1197,26 +1297,23 @@ def _tool_get_product(
     return result
 
 
+def _tool_preview_order(
+    session: Session, store: Store, product_id: int | None = None
+) -> dict:
+    """Read-only confirm-before-pay preview: the order summary and the next step, with
+    NO order created and NO charge. The whole point of the two-step butler flow —
+    show the human first, settle only on the explicit pay."""
+    product = _resolve_active_product(session, store, product_id)
+    return {"summary": _order_summary(store, product), "next_step": _PREVIEW_NEXT_STEP}
+
+
 def _tool_create_checkout(
     session: Session,
     store: Store,
     product_id: int | None = None,
     referrer_addr: str | None = None,
 ) -> dict:
-    if product_id is not None:
-        product = session.scalar(
-            select(Product).where(
-                Product.id == product_id,
-                Product.store_id == store.id,
-                Product.active.is_(True),
-            )
-        )
-        if product is None:
-            raise _ToolError("product not found")
-    else:
-        product = _active_product(session, store.id)
-        if product is None:
-            raise _ToolError("store has no active product")
+    product = _resolve_active_product(session, store, product_id)
     try:
         order = checkout.create_order(session, store, product, referrer_addr)
     except checkout.AmountUnavailable as exc:
@@ -1231,6 +1328,8 @@ def _tool_create_checkout(
         "expires_at": order.expires_at.isoformat() + "Z",
         "network": "X Layer (chainId 196)",
         "token": "USDT",
+        "summary": _order_summary(store, product),
+        "next_step": _CHECKOUT_NEXT_STEP,
     }
 
 
@@ -1274,6 +1373,9 @@ def _mcp_tools_call(session: Session, store: Store, slug: str, req_id, params) -
             result = _tool_get_product(
                 session, store, slug, args.product_id, args.agent_id
             )
+        elif name == "preview_order":
+            pargs = _PreviewOrderArgs.model_validate(raw_args)
+            result = _tool_preview_order(session, store, pargs.product_id)
         elif name == "create_checkout":
             args = _CreateCheckoutArgs.model_validate(raw_args)
             result = _tool_create_checkout(session, store, args.product_id, args.ref)
@@ -1704,7 +1806,12 @@ def agent_card(request: Request):
             {
                 "id": "buy",
                 "name": "Buy from a store",
-                "description": "Purchase a store's product; payTo is the merchant.",
+                "description": (
+                    "Purchase a store's product; payTo is the merchant. Confirm "
+                    "before pay: the store's MCP preview_order returns a read-only "
+                    "summary, create_checkout reserves an exact amount, and money "
+                    "moves only on the explicit pay step."
+                ),
                 "x402": {"endpoint": "/s/{slug}/buy"},
                 "input_schema": {
                     "type": "object",
