@@ -33,6 +33,11 @@
   button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible{
     outline:2px solid var(--text); outline-offset:2px; }
 
+  .skip{ position:fixed; left:16px; top:-60px; z-index:100; padding:10px 16px;
+    background:var(--text); color:var(--bg); font-weight:700; font-size:14px;
+    border-radius:3px; text-decoration:none; transition:top .15s ease; }
+  .skip:focus{ top:12px; }
+
   /* ---------- header rail ---------- */
   header{
     position:sticky; top:0; z-index:5;
@@ -41,7 +46,7 @@
     background:color-mix(in srgb,var(--bg) 88%,transparent);
     backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
   }
-  .brand{ display:flex; align-items:center; gap:11px; min-width:0; }
+  .brand{ display:flex; align-items:center; gap:11px; min-width:0; text-decoration:none; }
   header h1{ font-size:15px; font-weight:700; margin:0; letter-spacing:-.01em; white-space:nowrap; }
   .mark{ flex:none; display:grid; grid-template-columns:1fr 1fr; gap:2px; width:22px; height:22px; }
   .mark i{ background:color-mix(in srgb,var(--text) 88%,transparent); border-radius:1px; }
@@ -49,6 +54,11 @@
   .mark i:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
   .mark i:nth-child(4){ background:color-mix(in srgb,var(--text) 64%,transparent); }
   .head-right{ flex:none; }
+  .navlink{ padding:14px 4px; text-decoration:none;
+    font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 70%,transparent); white-space:nowrap;
+    transition:color .15s ease; }
+  .navlink:hover{ color:var(--text); }
   #whoami{ max-width:15ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11.5px; }
 
   /* ---------- chips: lime = on-chain only (dot or bg-chip + black text) ---------- */
@@ -75,10 +85,14 @@
   .cols{ display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:start; }
   .cols .card{ margin-bottom:0; }
 
-  h3{ display:flex; align-items:center; gap:8px; margin:28px 0 10px;
+  .sec-h{ display:flex; align-items:center; gap:8px; margin:28px 0 10px;
     font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.16em;
     color:color-mix(in srgb,var(--text) 66%,transparent); }
-  h3::after{ content:""; flex:1; height:1px; background:var(--hairline); }
+  .sec-h::after{ content:""; flex:1; height:1px; background:var(--hairline); }
+  .sec-link{ font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:none;
+    color:color-mix(in srgb,var(--text) 60%,transparent);
+    text-decoration-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  .sec-link:hover{ color:var(--text); }
   #storeTitle{ display:block; margin:16px 0 12px; font-size:16px; font-weight:600;
     text-transform:none; letter-spacing:0; color:var(--text);
     font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
@@ -103,6 +117,14 @@
   button.ghost:hover{ background:var(--surface);
     border-color:color-mix(in srgb,var(--text) 30%,transparent); }
   button:disabled{ opacity:.5; cursor:default; transform:none; }
+  .ghost-btn{ display:inline-block; padding:8px 14px; border:1px solid var(--hairline);
+    border-radius:4px; color:var(--text); text-decoration:none;
+    font-size:13px; font-weight:600; vertical-align:middle; }
+  .ghost-btn:hover{ background:var(--surface);
+    border-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  .ghost-link{ font-size:13px; color:var(--muted);
+    text-decoration-color:color-mix(in srgb,var(--muted) 50%,transparent); }
+  .ghost-link:hover{ color:var(--text); }
   td button{ padding:5px 10px; font-size:12px; }
   #csvOrders, #csvCustomers{
     font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace; font-weight:500; }
@@ -196,6 +218,8 @@
   #underpaid > .muted{ margin:10px 0; padding:22px 12px;
     border:1px dashed var(--hairline); border-radius:4px; }
   .card.muted{ padding:26px 16px; border-style:dashed; background:transparent; }
+  .card.muted.sentence{ font-family:inherit; font-size:13px; letter-spacing:0;
+    text-transform:none; }
 
   /* ---------- signed-out console ---------- */
   #viewLogin{ padding:clamp(22px,4.5vw,40px); }
@@ -224,17 +248,21 @@
   }
   @media (max-width:640px){
     .chip.chain{ display:none; }
+    .navlink{ display:none; }
     #whoami{ max-width:9ch; }
   }
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <header>
-  <div class="brand">
+  <a class="brand" href="/">
     <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     <h1>Tilla · Merchant</h1>
-  </div>
+  </a>
   <div class="row head-right">
+    <a class="navlink mono" href="/">Home</a>
+    <a class="navlink mono" href="/marketplace.html">Marketplace</a>
     <span class="chip chain mono"><span class="dot dot-chain" aria-hidden="true"></span>X Layer · chainId 196</span>
     <span id="whoami" class="muted mono"></span>
     <button id="signBtn" class="primary">Connect wallet</button>
@@ -242,17 +270,22 @@
   </div>
 </header>
 
-<div class="wrap">
-  <div id="msg" class="card hide"></div>
+<main class="wrap" id="main">
+  <div id="msg" class="card hide" aria-live="polite"></div>
 
   <!-- signed-out -->
   <div id="viewLogin" class="card">
     <p class="eyebrow mono">Merchant console</p>
-    <p class="lead">Sign in with your store's receive wallet to see every store you own, its
-       orders and revenue, issue non-custodial refunds, export CSV, and configure
-       a webhook. Nothing is stored — you re-sign on refresh.</p>
-    <p class="note muted">This dashboard never holds funds. A refund is a transfer you
-       send from your own wallet; paste the tx hash and Tilla verifies it on X Layer.</p>
+    <p class="lead">This is where sellers run their stores. Sign in with the crypto wallet
+       that receives your store's payments — signing is free, moves no money, and just
+       proves the wallet is yours. No password, no account to create.</p>
+    <p class="note muted">Tilla never holds funds. Refunds are transfers you send from
+       your own wallet; paste the transaction ID and Tilla verifies it on X Layer.</p>
+    <div class="row" style="margin:4px 0 16px">
+      <button id="signBtn2" class="primary">Connect wallet</button>
+      <a class="ghost-link" href="/marketplace.html">Just browsing? See the marketplace →</a>
+    </div>
+    <p class="note muted">New to wallets? <a href="https://www.okx.com/web3" rel="noopener">Install OKX Wallet</a> first.</p>
     <div class="login-rail">
       <span class="settle-chip mono">Settles on X Layer</span>
       <span class="chip mono">Non-custodial</span>
@@ -264,21 +297,21 @@
   <div id="viewMain" class="hide">
     <div id="summary" class="grid"></div>
 
-    <h3><span class="dot dot-warn" aria-hidden="true"></span>Underpaid orders needing refund</h3>
-    <div id="underpaid" class="card scroll"></div>
+    <h2 class="sec-h"><span class="dot dot-warn" aria-hidden="true"></span>Underpaid orders needing refund</h2>
+    <div id="underpaid" class="card scroll" tabindex="0" aria-label="Underpaid orders"></div>
 
-    <h3>Your stores</h3>
+    <h2 class="sec-h">Your stores</h2>
     <div id="stores"></div>
 
-    <h3>Marketplace</h3>
+    <h2 class="sec-h">Marketplace <a class="sec-link mono" href="/marketplace.html">View public marketplace →</a></h2>
     <div id="marketplace"></div>
 
-    <h3>Configuration</h3>
+    <h2 class="sec-h">Configuration</h2>
     <div class="cols">
       <div class="card">
         <div class="row head">
           <strong>Webhook</strong>
-          <span id="whStatus" class="muted mono"></span>
+          <span id="whStatus" class="muted mono" aria-live="polite"></span>
         </div>
         <label for="whUrl">Endpoint URL (https only)</label>
         <input id="whUrl" placeholder="https://example.com/tilla/webhook" />
@@ -286,7 +319,7 @@
           <button id="whSave">Save / rotate</button>
           <button id="whDelete" class="ghost">Remove</button>
         </div>
-        <div id="whSecret" class="hide"></div>
+        <div id="whSecret" class="hide" aria-live="polite"></div>
       </div>
       <div class="card">
         <div class="row head">
@@ -305,15 +338,15 @@
   <!-- one store's orders -->
   <div id="viewStore" class="hide">
     <button id="backToMain" class="ghost">&larr; Back</button>
-    <h3 id="storeTitle"></h3>
+    <h2 id="storeTitle" class="sec-h" tabindex="-1"></h2>
 
-    <h3>Products</h3>
-    <div id="productMsg" class="small hide"></div>
+    <h3 class="sec-h">Products</h3>
+    <div id="productMsg" class="small hide" aria-live="polite"></div>
     <div id="products"></div>
     <div class="card">
       <div class="row head">
         <strong>Add product</strong>
-        <span class="muted mono">name screened before listing</span>
+        <span class="muted mono">names are checked for prohibited content before going live</span>
       </div>
       <label for="pName">Name</label>
       <input id="pName" maxlength="120" placeholder="e.g. Founder tee" />
@@ -328,8 +361,8 @@
       </div>
     </div>
 
-    <h3>Deliverables</h3>
-    <div id="delivMsg" class="small hide"></div>
+    <h3 class="sec-h">Deliverables</h3>
+    <div id="delivMsg" class="small hide" aria-live="polite"></div>
     <div id="deliverables"></div>
     <div class="card">
       <div class="row head">
@@ -365,8 +398,8 @@
          buyers who already paid keep the version they bought.</p>
     </div>
 
-    <h3>Orders</h3>
-    <div id="storeOrders" class="card scroll"></div>
+    <h3 class="sec-h">Orders</h3>
+    <div id="storeOrders" class="card scroll" tabindex="0" aria-label="Orders"></div>
   </div>
 
   <!-- one order -->
@@ -374,7 +407,7 @@
     <button id="backFromOrder" class="ghost">&larr; Back</button>
     <div id="orderDetail"></div>
   </div>
-</div>
+</main>
 
 <script>
 (function () {
@@ -401,9 +434,34 @@
   function byId(id) { return document.getElementById(id); }
   function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
-  function show(id) { ["viewLogin","viewMain","viewStore","viewOrder"].forEach(function (v) { byId(v).classList.toggle("hide", v !== id); }); }
-  function flash(text, isErr) { var m = byId("msg"); m.textContent = text || ""; m.className = "card" + (text ? "" : " hide") + (isErr ? " err" : ""); }
+  function show(id) {
+    ["viewLogin","viewMain","viewStore","viewOrder"].forEach(function (v) { byId(v).classList.toggle("hide", v !== id); });
+    if (id === "viewMain") setHash("#stores");
+    var focusId = id === "viewStore" ? "storeTitle" : (id === "viewOrder" ? "backFromOrder" : null);
+    if (focusId) byId(focusId).focus();
+  }
+  function flash(text, isErr) { var m = byId("msg"); m.textContent = text || ""; m.className = "card" + (text ? "" : " hide") + (isErr ? " err" : ""); m.setAttribute("role", isErr ? "alert" : "status"); }
   function auth() { return { "Authorization": "Bearer " + TOKEN }; }
+
+  // ---- hash routing (slugs/ids are server-validated; parse defensively anyway) ----
+  var ROUTING = false;
+  function setHash(h) {
+    if (location.hash === h) return;
+    ROUTING = true;
+    location.hash = h;
+  }
+  function routeHash() {
+    if (!TOKEN) return; // signed-out ignores hashes
+    var m = /^#store\/([a-z0-9][a-z0-9-]{0,63})$/.exec(location.hash);
+    if (m) { openStore(m[1]); return; }
+    m = /^#order\/([A-Za-z0-9_-]{1,80})$/.exec(location.hash);
+    if (m) { openOrder(m[1]); return; }
+    show("viewMain"); // fall back to #stores
+  }
+  window.addEventListener("hashchange", function () {
+    if (ROUTING) { ROUTING = false; return; }
+    routeHash();
+  });
 
   async function api(path, opts) {
     opts = opts || {};
@@ -424,7 +482,7 @@
   async function signIn() {
     flash("");
     var provider = pickProvider();
-    if (!provider) { flash("No wallet detected — open this page in your wallet's browser.", true); return; }
+    if (!provider) { flash("No wallet detected. Install the OKX Wallet extension (okx.com/web3) or open this page inside the OKX app's browser, then try again.", true); return; }
     var btn = byId("signBtn"); btn.disabled = true;
     var account;
     try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
@@ -462,7 +520,7 @@
     byId("whoami").textContent = ADDR;
     byId("signBtn").classList.add("hide");
     byId("signOut").classList.remove("hide");
-    show("viewMain");
+    routeHash(); // restore the hash's view instead of always viewMain
     await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace()]);
   }
 
@@ -495,15 +553,15 @@
         c.appendChild(el("div", "muted", "No screening events yet."));
       } else {
         var t = el("table"), thead = el("thead"), tr = el("tr");
-        ["Mode", "Verdict", "Risk", "Amount", "Receipt", "When"].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+        ["Mode", "Verdict", "Risk", "Amount", "Receipt", "When"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
         thead.appendChild(tr); t.appendChild(thead);
         var tb = el("tbody");
         scr.forEach(function (r) {
           var row = el("tr");
           if (r.mode === "paid") {
-            var mtd = el("td"); mtd.appendChild(el("span", "pill", "Warden #3808 — paid scan")); row.appendChild(mtd);
+            var mtd = el("td"); mtd.appendChild(el("span", "pill", "Content screening — paid scan (Warden #3808)")); row.appendChild(mtd);
           } else {
-            row.appendChild(el("td", "muted", "demo"));
+            row.appendChild(el("td", "muted", "demo scan"));
           }
           row.appendChild(el("td", null, r.verdict || ""));
           row.appendChild(el("td", null, r.risk_level || "—"));
@@ -516,7 +574,9 @@
           tb.appendChild(row);
         });
         t.appendChild(tb);
-        var wrap = el("div", "scroll"); wrap.style.marginTop = "8px"; wrap.appendChild(t);
+        var wrap = el("div", "scroll"); wrap.style.marginTop = "8px";
+        wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Screening events");
+        wrap.appendChild(t);
         c.appendChild(wrap);
       }
       box.appendChild(c);
@@ -532,13 +592,13 @@
     stat("Stores", String(s.store_count));
     stat("Revenue (USDT0)", s.revenue_usdt);
     stat("Delivered", String((s.counts && (s.counts.delivered || 0)) + (s.counts && (s.counts.paid || 0) || 0)));
-    stat("Outstanding overpay", s.outstanding_overpaid_usdt);
+    stat("Overpaid — owed back", s.outstanding_overpaid_usdt);
 
     var u = byId("underpaid"); clear(u);
     if (!s.underpaid || !s.underpaid.length) { u.appendChild(el("div", "muted", "None.")); }
     else {
       var t = el("table"), thead = el("thead"), tr = el("tr");
-      ["Order","Store","Expected","Paid","Buyer","",].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+      ["Order","Store","Expected","Paid","Buyer","Actions"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
       thead.appendChild(tr); t.appendChild(thead);
       var tb = el("tbody");
       s.underpaid.forEach(function (o) {
@@ -560,7 +620,7 @@
     var data;
     try { data = await api("/api/merchant/stores"); } catch (e) { flash(e.message, true); return; }
     var box = byId("stores"); clear(box);
-    if (!data.stores.length) { box.appendChild(el("div", "card muted", "No stores yet. Create one via the paid create-store service using this wallet as the receive address.")); return; }
+    if (!data.stores.length) { box.appendChild(el("div", "card muted sentence", "No stores for this wallet yet. Stores are created by AI agents through Tilla's paid store-builder (1 USDT) — when an agent creates one with this wallet as where payments land, it appears here automatically.")); return; }
     data.stores.forEach(function (st) {
       var c = el("div", "card");
       var head = el("div", "row"); head.style.justifyContent = "space-between";
@@ -578,14 +638,23 @@
       c.appendChild(line);
       var b = el("button", "ghost", "View orders"); b.style.marginTop = "10px"; b.onclick = function () { openStore(st.slug); };
       c.appendChild(b);
+      // st.slug is server-validated to the slug pattern — safe in a path segment
+      var vs = el("a", "ghost-btn", "View store"); vs.href = "/s/" + st.slug + "/";
+      vs.style.marginTop = "10px"; vs.style.marginLeft = "8px";
+      c.appendChild(vs);
       // M13 embed snippet: a copy-paste buy-button tag. Built via textContent only
       // (the '<script>' below is inert text in a <pre>, never parsed as markup), and
       // st.slug is server-validated to the slug pattern — no XSS surface.
       var eb = el("button", "ghost", "Embed button"); eb.style.marginTop = "10px"; eb.style.marginLeft = "8px";
+      eb.setAttribute("aria-expanded", "false");
       var snippet = '<script src="https://tilla.gudman.xyz/embed.js" data-tilla-store="' + st.slug + '" async><\/script>';
       var pre = el("pre", "muted"); pre.textContent = snippet; pre.style.display = "none";
       pre.style.marginTop = "8px"; pre.style.whiteSpace = "pre-wrap"; pre.style.wordBreak = "break-all";
-      eb.onclick = function () { pre.style.display = pre.style.display === "none" ? "" : "none"; };
+      eb.onclick = function () {
+        var open = pre.style.display === "none";
+        pre.style.display = open ? "" : "none";
+        eb.setAttribute("aria-expanded", open ? "true" : "false");
+      };
       c.appendChild(eb);
       c.appendChild(pre);
       box.appendChild(c);
@@ -597,10 +666,11 @@
     LAST_STORE = slug;
     var data;
     try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/orders?limit=100"); } catch (e) { flash(e.message, true); return; }
+    setHash("#store/" + slug);
     byId("storeTitle").textContent = slug + " — " + data.total + " orders";
     var box = byId("storeOrders"); clear(box);
     var t = el("table"), thead = el("thead"), tr = el("tr");
-    ["Order","Status","Channel","Expected","Paid","Refunded","When"].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+    ["Order","Status","Channel","Expected","Paid","Refunded","When","Actions"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
     thead.appendChild(tr); t.appendChild(thead);
     var tb = el("tbody");
     data.orders.forEach(function (o) {
@@ -612,6 +682,9 @@
       row.appendChild(el("td", null, o.paid_usdt));
       row.appendChild(el("td", null, o.refunded_usdt));
       row.appendChild(el("td", "muted", (o.created_at || "").slice(0, 19).replace("T", " ")));
+      var td = el("td"); var ob = el("button", "ghost", "Open");
+      ob.onclick = function (ev) { ev.stopPropagation(); openOrder(o.order_id); };
+      td.appendChild(ob); row.appendChild(td);
       tb.appendChild(row);
     });
     t.appendChild(tb); box.appendChild(t);
@@ -665,10 +738,10 @@
     row.appendChild(el("span", p.active ? "pill on" : "pill off", p.active ? "Active" : "Inactive"));
 
     var ed = el("div", "pedit hide");
-    ed.appendChild(el("label", null, "Name"));
-    var ni = el("input"); ni.maxLength = 120; ni.value = p.name; ed.appendChild(ni);
-    ed.appendChild(el("label", null, "Price (USDT0)"));
-    var pi = el("input"); pi.type = "number"; pi.min = "0.01"; pi.max = "10000"; pi.step = "0.01";
+    var nLbl = el("label", null, "Name"); nLbl.htmlFor = "pe-name-" + p.id; ed.appendChild(nLbl);
+    var ni = el("input"); ni.id = "pe-name-" + p.id; ni.maxLength = 120; ni.value = p.name; ed.appendChild(ni);
+    var prLbl = el("label", null, "Price (USDT0)"); prLbl.htmlFor = "pe-price-" + p.id; ed.appendChild(prLbl);
+    var pi = el("input"); pi.id = "pe-price-" + p.id; pi.type = "number"; pi.min = "0.01"; pi.max = "10000"; pi.step = "0.01";
     pi.value = String(p.price_usdt); ed.appendChild(pi);
     var edRow = el("div", "row"); edRow.style.marginTop = "12px";
     var save = el("button", "primary", "Save");
@@ -871,6 +944,7 @@
     LAST_ORDER = orderId;
     var o;
     try { o = await api("/api/merchant/orders/" + encodeURIComponent(orderId)); } catch (e) { flash(e.message, true); return; }
+    setHash("#order/" + orderId);
     var box = byId("orderDetail"); clear(box);
 
     var head = el("div", "card");
@@ -917,13 +991,13 @@
     var rf = el("div", "card");
     rf.appendChild(el("strong", null, "Issue a refund"));
     rf.appendChild(el("div", "muted", "Send USDT0 back to the buyer from your own wallet on X Layer, then paste the transaction hash. Tilla verifies it on-chain."));
-    var kindLbl = el("label", null, "Kind"); rf.appendChild(kindLbl);
-    var sel = el("select");
+    var kindLbl = el("label", null, "Kind"); kindLbl.htmlFor = "rfKind"; rf.appendChild(kindLbl);
+    var sel = el("select"); sel.id = "rfKind";
     var of = el("option"); of.value = "full"; of.textContent = "Full (refunds paid amount, revokes delivery)"; sel.appendChild(of);
     var oo = el("option"); oo.value = "overage"; oo.textContent = "Overage only (returns surplus, keeps delivery)"; sel.appendChild(oo);
     rf.appendChild(sel);
-    rf.appendChild(el("label", null, "Refund tx hash"));
-    var txin = el("input"); txin.placeholder = "0x…"; rf.appendChild(txin);
+    var txLbl = el("label", null, "Refund tx hash"); txLbl.htmlFor = "rfTx"; rf.appendChild(txLbl);
+    var txin = el("input"); txin.id = "rfTx"; txin.placeholder = "0x…"; rf.appendChild(txin);
     var submit = el("button", "primary", "Verify & record refund"); submit.style.marginTop = "12px";
     var out = el("div"); out.style.marginTop = "10px";
     submit.onclick = async function () {
@@ -992,6 +1066,7 @@
 
   // ---- wiring ----
   byId("signBtn").onclick = signIn;
+  byId("signBtn2").onclick = signIn;
   byId("signOut").onclick = signOut;
   byId("backToMain").onclick = function () { show("viewMain"); };
   byId("backFromOrder").onclick = function () { if (LAST_STORE) openStore(LAST_STORE); else show("viewMain"); };

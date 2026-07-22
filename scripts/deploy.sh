@@ -69,6 +69,9 @@ FILES=(
   www/index.html
   www/marketplace.html
   www/receipt-demo.html
+  www/library.html
+  www/404.html
+  www/robots.txt
 )
 
 # Subscription sidecar (Node). node_modules is server-owned (installed via

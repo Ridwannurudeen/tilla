@@ -293,7 +293,11 @@ def sitemap(request: Request, session: Session = Depends(get_session)):
     slugs = session.scalars(
         select(Store.slug).where(Store.status == "live").order_by(Store.slug)
     ).all()
-    urls = "".join(
+    # Hub pages first (nginx-served statics the crawler can't discover from the
+    # store URLs alone), then every live store.
+    hub = ("/", "/marketplace.html", "/receipt-demo.html", "/library.html")
+    urls = "".join(f"<url><loc>{escape(base)}{path}</loc></url>" for path in hub)
+    urls += "".join(
         f"<url><loc>{escape(base)}/s/{escape(slug)}/</loc></url>" for slug in slugs
     )
     xml = (

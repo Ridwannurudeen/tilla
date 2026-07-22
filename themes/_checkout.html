@@ -5,26 +5,35 @@
 <div class="checkout" id="co">
   <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
   <div class="row"><span>Network</span><b>X Layer (OKX)</b></div>
-  <div class="row"><span>Pay to</span></div>
-  <div class="addr" id="coAddr">{{ ADDR }}</div>
   <div class="co-count" id="coCountdown"></div>
 
   <button class="co-btn" id="payWalletBtn" style="display:none" onclick="payWithWallet()">Pay with wallet</button>
 
   <div class="co-manual" id="coManual">
     <div class="co-qrwrap"><canvas id="coQR" class="co-qr"></canvas></div>
+    <div class="co-paylabel">Paying by hand? Send to this address:</div>
+    <div class="addr" id="coAddr">{{ ADDR }}</div>
     <div class="co-copyrow">
       <button class="co-copy" id="copyAmountBtn" onclick="copyAmount()">Copy amount</button>
       <button class="co-copy" id="copyAddrBtn" onclick="copyAddr()">Copy address</button>
     </div>
-    <div class="co-warn">Send EXACTLY this amount of USDT0 on X Layer — a different amount will not match your order.</div>
+    <div class="co-warn">Send exactly this amount of USDT0 (USDT issued on X Layer, ≈$1) — a different amount or a different network will not match your order.</div>
+    <details class="co-hint co-help">
+      <summary>First time paying with crypto?</summary>
+      <ol>
+        <li>Install a wallet — <a href="https://www.okx.com/web3" rel="noopener">OKX Wallet</a> works well.</li>
+        <li>Get USDT0 on the X Layer network, plus a small amount of OKB for the network fee.</li>
+        <li>Tap Pay with wallet or scan the QR — the wallet fills the amount and address for you.</li>
+      </ol>
+    </details>
   </div>
 
-  <div class="status" id="coStatus">⏳ Waiting for payment… (auto-verified on-chain)</div>
+  <div class="status" id="coStatus">Waiting for payment — verified automatically on-chain…</div>
   <div class="co-receipt" id="coReceipt" style="display:none"></div>
+  <button class="co-ghost" id="coPrintBtn" style="display:none" onclick="window.print()">Print receipt</button>
 
-  <button class="co-btn" id="claimBtn" style="display:none" onclick="claimPurchase()">Claim your purchase — sign with the wallet you paid from</button>
-  <div class="co-hint" id="coClaimHint" style="display:none">Paid from an exchange and can't sign? Keep your order id and tx hash — the merchant can redeliver.</div>
+  <button class="co-btn" id="claimBtn" style="display:none" onclick="claimPurchase()">Unlock your purchase — confirm with the wallet you paid from (free, no second charge)</button>
+  <div class="co-hint" id="coClaimHint" style="display:none">Paid from an exchange and can't sign? Keep your order id and tx hash — the merchant can redeliver from their dashboard.</div>
   <div class="co-claim" id="coClaim" style="display:none"></div>
   <div class="status" id="coDelivery" style="display:none"></div>
 </div>
@@ -107,10 +116,10 @@
   #co .co-hint{ margin-top:12px; font-size:12px; line-height:1.5;
     color:color-mix(in srgb,var(--text) 58%,transparent); }
   #co .co-claim{ margin-top:14px; }
-  #co .co-claim .co-clabel{ font-size:11px; font-weight:600; letter-spacing:.12em;
+  #co .co-claim .co-clabel, #co .co-hintrow .co-clabel{ font-size:11px; font-weight:600; letter-spacing:.12em;
     text-transform:uppercase; margin-bottom:6px;
     color:color-mix(in srgb,var(--text) 60%,transparent); }
-  #co .co-claim .co-mono{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
+  #co .co-claim .co-mono, #co .co-hintrow .co-mono{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
     font-size:13.5px; font-weight:600; word-break:break-all; color:var(--text);
     padding:10px 12px; border-radius:3px;
     background:color-mix(in srgb,var(--text) 6%,transparent);
@@ -124,10 +133,51 @@
   #co .co-claim .co-deliver, #co #coDelivery{ padding:12px 14px; border-radius:3px;
     background:var(--xlayer,#BCFF2F); color:var(--on-xlayer,#000);
     font-size:13.5px; font-weight:700; word-break:break-word; }
+  #co .co-paylabel{ margin-top:16px; font-size:11px; font-weight:600; letter-spacing:.1em;
+    text-transform:uppercase; color:color-mix(in srgb,var(--text) 58%,transparent); }
+  #co .co-help summary{ cursor:pointer; font-weight:600;
+    color:color-mix(in srgb,var(--text) 70%,transparent); }
+  #co .co-help[open] summary{ color:var(--text); }
+  #co .co-help ol{ margin:8px 0 0; padding-left:18px; display:grid; gap:6px; }
+  #co .co-help a{ color:var(--text); font-weight:600; text-decoration:underline;
+    text-underline-offset:3px;
+    text-decoration-color:color-mix(in srgb,var(--text) 40%,transparent); }
+  #co .co-help a:hover{ text-decoration-color:var(--text); }
+  #co .co-hintrows{ margin-top:10px; display:grid; gap:10px; }
+  #co .co-hintrow .co-line{ display:flex; gap:8px; align-items:stretch; margin-top:2px; }
+  #co .co-hintrow .co-mono{ flex:1; }
+  #co .co-hintrow .co-copy{ flex:0 0 auto; }
+  #co .co-ghost{ display:block; width:100%; margin-top:12px; cursor:pointer; padding:10px 12px;
+    border-radius:3px; font:inherit; font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:12px; font-weight:600; color:var(--text); background:transparent;
+    border:1px solid color-mix(in srgb,var(--text) 30%,transparent);
+    transition:background .12s ease, border-color .12s ease; }
+  #co .co-ghost:hover{ background:color-mix(in srgb,var(--text) 8%,transparent); }
+  #co .co-ghost:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  #co .co-receipt .co-more{ display:block; margin-top:12px;
+    font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:12px; font-weight:600; }
   @media (prefers-reduced-motion: reduce){
     #co .co-receipt{ animation:none; }
-    #co .co-btn, #co .co-copy, #co .co-claim .co-dl{ transition:none; }
+    #co .co-btn, #co .co-copy, #co .co-ghost, #co .co-claim .co-dl{ transition:none; }
     #co .co-btn:hover, #co .co-claim .co-dl:hover{ transform:none; }
+  }
+  @media print{
+    body *{ visibility:hidden; }
+    #co .co-receipt, #co .co-receipt *{ visibility:visible; }
+    #co .co-receipt{ position:absolute; left:0; top:0; width:100%; margin:0;
+      background:#fff !important; color:#000 !important;
+      border:1px solid #000; border-radius:0; animation:none; }
+    #co .co-receipt *{ color:#000 !important; }
+    #co .co-receipt .row{ border-bottom-color:rgba(0,0,0,.35); }
+    #co .co-receipt::before{ display:none; }
+    #co .co-receipt::after{ background:#fff !important; color:#000 !important;
+      border:1px solid #000; }
+    #co .co-receipt a{ color:#000 !important; text-decoration-color:#000; }
+    #co .co-receipt a[href]:after{ content:" (" attr(href) ")"; font-weight:400; }
+    #co .co-receipt .co-more{ display:none; }
+    #co .co-btn, #co .co-copy, #co .co-ghost, #co .co-manual, #co .co-count,
+    #co .status, #co .co-hint, #co .co-claim, nav, header, footer{ display:none !important; }
   }
 </style>
 
@@ -205,6 +255,7 @@
     byId("claimBtn").style.display = "none";
     byId("coClaimHint").style.display = "none";
     byId("coDelivery").style.display = "none";
+    byId("coPrintBtn").style.display = "none";
     byId("coManual").style.display = "";
     var d;
     try {
@@ -286,7 +337,7 @@
       var data = buildTransferData(CO.payTo, CO.micro);
       txHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: account, to: USDT0, value: "0x0", data: data }] });
     } catch (e) {
-      setStatus(isReject(e) ? "Transaction canceled — retry or pay manually below." : "Wallet error — you can pay manually below.");
+      setStatus(isReject(e) ? "Transaction canceled — retry or pay manually below." : "Wallet error — check you hold USDT0 on X Layer, or pay manually below.");
       btn.disabled = false; return;
     }
     onTxSent(txHash);
@@ -372,9 +423,9 @@
     var s = d.status;
     if (s === "paid") { onPaid(d); return; }
     if (s === "expired") { onExpired(); return; }
-    if (s === "detected") setStatus("Payment detected — waiting for confirmations (3 blocks)…");
+    if (s === "detected") setStatus("Payment detected — final network confirmation, usually under a minute…");
     else if (s === "underpaid") setStatus("Amount received is less than the exact total — send the remainder to the same address.");
-    else setStatus("⏳ Waiting for payment… (auto-verified on-chain)");
+    else setStatus("Waiting for payment — verified automatically on-chain…");
     CO.pollTimer = setTimeout(poll, 4000);
   }
 
@@ -385,11 +436,13 @@
     byId("coCountdown").textContent = "";
     byId("payWalletBtn").style.display = "none";
     byId("coManual").style.display = "none";
-    setStatus("✅ Payment received & verified on X Layer");
+    setStatus("Payment received — verified on X Layer");
     renderReceipt(d);
+    byId("coPrintBtn").style.display = "";
     if (d.claim) {
       CO.kind = d.kind;
       byId("claimBtn").style.display = "";
+      renderClaimHintRows(d);
       byId("coClaimHint").style.display = "block";
     } else {
       var del = byId("coDelivery");
@@ -430,7 +483,34 @@
       if (aurl && aurl.indexOf(OKLINK_TX) === 0) el.appendChild(receiptRow("On-chain receipt", shortUid, aurl));
       else el.appendChild(receiptRow("On-chain receipt", shortUid));
     }
+    var more = document.createElement("a");
+    more.className = "co-more"; more.href = "/marketplace.html";
+    more.textContent = "More stores on Tilla →";
+    el.appendChild(more);
     el.style.display = "block";
+  }
+
+  // ---- exchange-payer fallback: copyable order id + tx hash under the claim hint ----
+  function hintCopyRow(label, value) {
+    var row = document.createElement("div"); row.className = "co-hintrow";
+    var lbl = document.createElement("div"); lbl.className = "co-clabel"; lbl.textContent = label; row.appendChild(lbl);
+    var line = document.createElement("div"); line.className = "co-line";
+    var mono = document.createElement("div"); mono.className = "co-mono"; mono.textContent = value; line.appendChild(mono);
+    var cb = document.createElement("button"); cb.className = "co-copy"; cb.textContent = "Copy";
+    cb.onclick = function () { copyText(value, cb); };
+    line.appendChild(cb);
+    row.appendChild(line);
+    return row;
+  }
+  function renderClaimHintRows(d) {
+    var hint = byId("coClaimHint");
+    var old = hint.querySelector(".co-hintrows");
+    if (old) hint.removeChild(old);
+    var wrap = document.createElement("div"); wrap.className = "co-hintrows";
+    wrap.appendChild(hintCopyRow("Order id", CO.cid));
+    var tx = CO.txHash || d.tx_hash;
+    if (tx && TX_RE.test(tx)) wrap.appendChild(hintCopyRow("Tx hash", tx));
+    hint.appendChild(wrap);
   }
 
   // ---- sign-to-claim (reuses M4 auth endpoints) ----

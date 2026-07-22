@@ -56,6 +56,11 @@
   .wrap{ position:relative; z-index:1; max-width:1140px; margin:0 auto;
     padding-left:clamp(18px,4vw,40px); padding-right:clamp(18px,4vw,40px); }
 
+  .skip{ position:fixed; left:16px; top:-60px; z-index:100; padding:10px 16px;
+    background:var(--text); color:var(--bg); font-weight:700; font-size:14px;
+    border-radius:3px; text-decoration:none; transition:top .15s ease; }
+  .skip:focus{ top:12px; }
+
   /* ---------- fixed top rail (structure: monochrome ink) ---------- */
   .rail{
     position:fixed; top:0; left:0; right:0; z-index:50;
@@ -266,6 +271,9 @@
     letter-spacing:.14em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 52%,transparent); }
   footer b{ font-weight:700; color:color-mix(in srgb,var(--text) 80%,transparent); }
+  footer nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
+  footer nav a{ padding:8px 0; text-decoration:none; }
+  footer nav a:hover{ color:var(--text); }
 
   /* ---------- scroll reveal (progressive enhancement, motion-gated) ---------- */
   .motion .reveal{ opacity:0; transform:translateY(18px);
@@ -302,11 +310,12 @@
 </style>
 </head>
 <body data-hero="{{DNA_HERO}}" data-texture="{{DNA_TEXTURE}}">
+<a class="skip" href="#buy">Skip to products</a>
 <header class="rail">
   <div class="brand"><span class="mark" aria-hidden="true">{{EMOJI}}</span> <span class="brand-name">{{STORE_NAME}}</span></div>
   <div class="rail-right">
     <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · chainId 196</span>
-    <span class="chip agent mono">Agent-buyable</span>
+    <span class="chip agent mono">Humans &amp; AI welcome</span>
   </div>
 </header>
 
@@ -317,7 +326,7 @@
       {% if TAGLINE %}<p class="eyebrow mono">{{TAGLINE}}</p>{% endif %}
       <h1 id="heroHeadline">{{HERO_HEADLINE}}</h1>
       <div class="hero-price">
-        <span class="n mono">{{PRICE}}</span><span class="u mono">USDT</span>
+        <span class="n mono">{{PRICE}}</span><span class="u mono">USDT0</span>
         <span class="settles mono">Settles on X Layer</span>
       </div>
       <p class="hero-sub">{{HERO_SUBCOPY}}</p>
@@ -334,7 +343,7 @@
       </div>
       <dl class="facts mono">
         <div class="fact"><dt>Settlement</dt><i class="lead" aria-hidden="true"></i><dd>USDT0 · X Layer · chainId 196</dd></div>
-        <div class="fact"><dt>Agent checkout</dt><i class="lead" aria-hidden="true"></i><dd>x402 · HTTP 402</dd></div>
+        <div class="fact"><dt>Agent checkout</dt><i class="lead" aria-hidden="true"></i><dd>Automated (x402)</dd></div>
         <div class="fact"><dt>Status</dt><i class="lead" aria-hidden="true"></i><dd><span class="vchip">✓ verified on-chain</span></dd></div>
       </dl>
     </div>
@@ -356,9 +365,9 @@
             <p class="blurb">{{ p.blurb }}</p>
           </div>
           <div>
-            <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
+            <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
             <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
-            <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
+            <p class="buy-note mono">Paid straight to the seller — Tilla never holds your money</p>
           </div>
         </div>
       </div>
@@ -374,12 +383,12 @@
         <article class="item">
           <h3>{{ p.name }}</h3>
           <p class="item-blurb">{{ p.blurb }}</p>
-          <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
+          <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
           <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
         </article>
         {% endfor %}
       </div>
-      <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
+      <p class="buy-note mono">Paid straight to the seller — Tilla never holds your money</p>
       {% endif %}
       <div class="co-dock">
       {% include "_checkout.html" %}
@@ -390,7 +399,10 @@
 
 <footer>
   <div class="wrap mono">
-    <span>Powered by <b>Tilla</b></span>
+    <nav aria-label="Tilla">
+      <a href="/">Powered by <b>Tilla</b></a>
+      <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
+    </nav>
     <span>Settled on X Layer · chainId 196</span>
   </div>
 </footer>

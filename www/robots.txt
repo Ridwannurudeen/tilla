@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Sitemap: https://tilla.gudman.xyz/sitemap.xml

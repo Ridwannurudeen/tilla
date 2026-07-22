@@ -4,11 +4,13 @@
 <meta charset="utf-8">
 <link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tilla — storefronts for the agent economy</title>
-<meta name="description" content="Tilla turns a one-line description into a live storefront with non-custodial USDT0 checkout on OKX X Layer — buyable by humans and AI agents.">
+<title>Tilla — one line becomes a live store, buyable by humans and AI agents</title>
+<meta name="description" content="Tilla turns one line about what you sell into a real online store. Customers pay in USDT0 — a digital dollar — straight to your own wallet; Tilla never holds the money. AI agents can shop your store too.">
+<link rel="canonical" href="https://tilla.gudman.xyz/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Tilla — storefronts for the agent economy">
-<meta property="og:description" content="One line about what you sell becomes a live storefront with crypto checkout on OKX X Layer — buyable by humans and AI agents.">
+<meta property="og:url" content="https://tilla.gudman.xyz/">
+<meta property="og:title" content="Tilla — one line becomes a live store, buyable by humans and AI agents">
+<meta property="og:description" content="One line about what you sell becomes a real online store. Customers pay in USDT0 straight to your own wallet — and AI agents can shop it too.">
 <meta name="theme-color" content="#0B0B12">
 <!-- Fonts: Space Grotesk ("TillaGrotesk") + Geist Mono ("TillaMono"), both SIL OFL-1.1,
      subsetted and inlined as data URIs. Full provenance, source, and license verdicts are
@@ -90,12 +92,16 @@
   .motion .chip .dot{ animation:live 2.4s ease-in-out infinite; }
   @keyframes live{ 50%{ opacity:.45; } }
   .rail-link{ display:inline-flex; align-items:center; gap:6px; text-decoration:none;
+    padding:14px 4px;
     font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 70%,transparent); white-space:nowrap;
     transition:color .15s ease; }
   .rail-link:hover{ color:var(--text); }
   .rail-link .arr{ display:inline-block; transition:transform .15s ease; }
   .rail-link:hover .arr{ transform:translateX(3px); }
+  .rail-nav{ display:flex; align-items:center; gap:clamp(10px,2vw,22px); }
+  [aria-current="page"]{ color:var(--text);
+    border-bottom:1px solid color-mix(in srgb,var(--text) 40%,transparent); }
 
   /* ---------- maximal hero ---------- */
   .hero{ position:relative; overflow:hidden; border-bottom:1px solid var(--hairline);
@@ -129,6 +135,7 @@
     box-shadow:0 14px 36px color-mix(in srgb,var(--primary) 40%,transparent); }
   .cta:active{ transform:translateY(0) scale(.99); }
   .cta-ghost{ display:inline-flex; align-items:center; gap:7px; text-decoration:none;
+    padding:14px 4px;
     font-size:12px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 70%,transparent); transition:color .15s ease; }
   .cta-ghost:hover{ color:var(--text); }
@@ -162,16 +169,22 @@
   .fact{ display:flex; align-items:baseline; gap:14px; padding:15px 0;
     border-bottom:1px solid var(--hairline); }
   .fact:first-child{ border-top:1px solid var(--hairline); }
-  .fact dt{ flex:none; font-size:11px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
+  .fact dt{ flex:1; display:flex; align-items:baseline; gap:14px;
+    font-size:11px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 58%,transparent); }
-  .fact .lead{ flex:1; min-width:24px;
+  .fact dt::after{ content:""; flex:1; min-width:24px;
     border-bottom:1px dotted color-mix(in srgb,var(--text) 34%,transparent);
     transform:translateY(-4px); }
   .fact dd{ font-weight:600; text-align:right; letter-spacing:.01em; }
   .vchip{ display:inline-block; padding:4px 9px; border-radius:3px;
     background:var(--xlayer); color:var(--on-xlayer); font-weight:700; letter-spacing:.06em; }
+  a.vchip{ text-decoration:none; }
+  a.vchip:hover{ background:color-mix(in srgb,var(--xlayer) 88%,#fff); }
 
-  /* ---------- live stores: signed pages in one ledger ---------- */
+  /* ---------- live stores ledger ---------- */
+  .stores-stats{ margin-top:12px; font-size:12px; font-weight:600; letter-spacing:.06em;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .stores-stats:empty{ display:none; }
   .ledger{ list-style:none; margin-top:clamp(30px,5vh,52px); }
   .row a{
     display:grid; grid-template-columns:3.2em minmax(0,1.05fr) minmax(0,1.55fr) auto;
@@ -228,6 +241,39 @@
   .step h3{ margin-top:12px; font-size:1.25rem; font-weight:700; letter-spacing:-.01em; }
   .step p{ margin-top:10px; font-size:.95rem;
     color:color-mix(in srgb,var(--text) 66%,transparent); }
+  .lane{ margin-top:clamp(30px,5vh,52px); font-size:11px; font-weight:700; letter-spacing:.18em;
+    text-transform:uppercase; color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .lane + .steps{ margin-top:18px; }
+
+  /* ---------- router cards: where do you want to go ---------- */
+  .routers{ margin-top:clamp(30px,5vh,52px);
+    display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:clamp(14px,2.5vw,24px); }
+  .router{ display:block; padding:18px 16px; border:1px solid var(--hairline); border-radius:4px;
+    text-decoration:none; transition:background-color .15s ease; }
+  .router:hover{ background-color:var(--surface); }
+  .router:active{ background-color:var(--pressed); }
+  .router .r-q{ display:block; font-size:11px; font-weight:600; letter-spacing:.14em;
+    text-transform:uppercase; color:color-mix(in srgb,var(--text) 58%,transparent); }
+  .router .r-a{ display:flex; align-items:center; justify-content:space-between; gap:8px;
+    margin-top:8px; font-weight:700; font-size:15px; }
+  .router .arrow{ font-size:18px; color:color-mix(in srgb,var(--text) 62%,transparent);
+    display:inline-block; transition:transform .15s ease, color .15s ease; }
+  .router:hover .arrow{ transform:translateX(4px); color:var(--text); }
+  .router .r-note{ display:block; margin-top:8px; font-size:11.5px;
+    color:color-mix(in srgb,var(--text) 56%,transparent); }
+
+  /* ---------- FAQ: plain answers ---------- */
+  .faq-list{ margin-top:clamp(26px,4vh,44px); max-width:44rem; }
+  .faq{ border-bottom:1px solid var(--hairline); }
+  .faq:first-of-type{ border-top:1px solid var(--hairline); }
+  .faq summary{ cursor:pointer; padding:16px 4px; font-weight:600; font-size:1rem;
+    list-style:none; display:flex; align-items:baseline; justify-content:space-between; gap:14px; }
+  .faq summary::-webkit-details-marker{ display:none; }
+  .faq summary::after{ content:"+"; flex:none; font-weight:700;
+    color:color-mix(in srgb,var(--text) 55%,transparent); }
+  .faq[open] summary::after{ content:"–"; }
+  .faq p{ padding:0 4px 18px; max-width:38rem; font-size:.95rem;
+    color:color-mix(in srgb,var(--text) 70%,transparent); }
 
   /* ---------- quiet mono footer ---------- */
   footer .wrap{ display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
@@ -235,6 +281,9 @@
     letter-spacing:.14em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 52%,transparent); }
   footer b{ font-weight:700; color:color-mix(in srgb,var(--text) 80%,transparent); }
+  .foot-nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
+  .foot-nav a{ padding:8px 0; text-decoration:none; color:inherit; transition:color .15s ease; }
+  .foot-nav a:hover{ color:var(--text); }
 
   /* ---------- scroll reveal (progressive enhancement, motion-gated) ---------- */
   .motion .reveal{ opacity:0; transform:translateY(18px);
@@ -245,15 +294,36 @@
     .proof .wrap{ grid-template-columns:minmax(0,1fr); }
     .facts{ align-self:start; }
     .steps{ grid-template-columns:minmax(0,1fr); }
-    #mosaic{ width:100%; opacity:.3; }
+    .routers{ grid-template-columns:minmax(0,1fr); }
+    #mosaic{ width:100%; opacity:.3;
+      mask-image:linear-gradient(to bottom,transparent 8%,#000 70%);
+      -webkit-mask-image:linear-gradient(to bottom,transparent 8%,#000 70%); }
   }
   @media (max-width:720px){
     .row a{ grid-template-columns:3.2em minmax(0,1fr) auto;
       grid-template-areas:"idx slug arrow" "idx meta arrow"; row-gap:4px; }
+    .term-row{ white-space:normal; flex-wrap:wrap; }
+    .term-row .lead{ display:none; }
+    .term-row .note{ flex-basis:100%; }
   }
   @media (max-width:640px){
     .chip{ display:none; }
-    .brand{ font-size:15px; }
+    .rail-link.aux{ display:none; }
+    .rail{ gap:6px; padding:0 8px; }
+    .rail-nav{ gap:6px; }
+    .rail-right{ gap:6px; }
+    .brand{ font-size:13px; gap:6px; }
+    .rail-link{ font-size:10px; letter-spacing:.03em; padding:14px 2px; }
+    .rail-link .arr{ display:none; }
+    .hero{ padding:calc(64px + 36px) 0 44px; }
+    .hero h1{ font-size:clamp(2.1rem,9vw,2.5rem); }
+    .hero-sub{ margin-top:16px; }
+    .cta-row{ margin-top:22px; }
+  }
+  @media (max-width:480px){
+    .fact{ flex-wrap:wrap; }
+    .fact dt::after{ display:none; }
+    .fact dd{ flex-basis:100%; text-align:left; }
   }
   @media (prefers-reduced-motion: reduce){
     html{ scroll-behavior:auto; }
@@ -266,6 +336,12 @@
 
 <header class="rail">
   <a class="brand" href="/"><span class="mark" aria-hidden="true"><span></span><span></span><span></span></span>TILLA</a>
+  <nav class="rail-nav" aria-label="Site">
+    <a class="rail-link mono" href="/marketplace.html">Marketplace</a>
+    <a class="rail-link mono aux" href="/#how">How it works</a>
+    <a class="rail-link mono" href="/library.html">Your purchases</a>
+    <a class="rail-link mono aux" href="/#agents">For agents</a>
+  </nav>
   <div class="rail-right">
     <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · chainId 196</span>
     <a class="rail-link mono" href="/dashboard">Open dashboard <span class="arr" aria-hidden="true">→</span></a>
@@ -276,17 +352,114 @@
   <section class="hero" aria-labelledby="heroHeadline">
     <canvas id="mosaic" aria-hidden="true"></canvas>
     <div class="wrap">
-      <p class="eyebrow mono">Storefronts for the agent economy</p>
+      <p class="eyebrow mono">Online stores for humans and AI agents</p>
       <h1 id="heroHeadline">Describe it once. Sell it to anyone — human or machine.</h1>
-      <p class="hero-sub">Tilla turns one line about what you sell into a live storefront with
-        non-custodial USDT0 checkout on OKX X Layer. Humans buy on the page. AI agents buy
-        over x402. Same ledger, same proof.</p>
+      <p class="hero-sub">Tilla turns one line about what you sell into a real online store.
+        Customers pay in USDT0 — a digital dollar — straight to your own wallet; Tilla never
+        holds the money. AI agents can shop your store too, automatically.</p>
       <div class="cta-row">
-        <a class="cta" href="/dashboard">Open the dashboard</a>
-        <a class="cta-ghost mono" href="/marketplace.html">Browse the marketplace <span class="arr" aria-hidden="true">→</span></a>
+        <a class="cta" href="/marketplace.html">Browse the marketplace</a>
+        <a class="cta-ghost mono" href="#how">See how it works <span class="arr" aria-hidden="true">→</span></a>
       </div>
       <p class="hero-chain"><span class="settles mono">Settles on X Layer</span>
-        <span class="chain-meta mono">USDT0 · chainId 196</span></p>
+        <span class="chain-meta mono">USDT0</span></p>
+    </div>
+  </section>
+
+  <section class="sec reveal" id="how" aria-labelledby="howTitle">
+    <div class="wrap">
+      <p class="sec-eyebrow mono">How it works</p>
+      <h2 id="howTitle">One line in. A live store out.</h2>
+      <p class="lane mono">Selling</p>
+      <ol class="steps">
+        <li class="step">
+          <span class="num mono" aria-hidden="true">01</span>
+          <h3>Describe</h3>
+          <p>One line about what you sell. Today AI agents call Tilla’s paid store-builder
+            (1 USDT) — self-serve creation is coming.</p>
+        </li>
+        <li class="step">
+          <span class="num mono" aria-hidden="true">02</span>
+          <h3>Screened &amp; built</h3>
+          <p>The listing is checked, styled, and becomes a live page at
+            <span class="mono">/s/your-store/</span>.</p>
+        </li>
+        <li class="step">
+          <span class="num mono" aria-hidden="true">03</span>
+          <h3>Paid directly</h3>
+          <p>Every sale lands in your own wallet as USDT0. Tilla takes no cut.</p>
+        </li>
+      </ol>
+      <p class="lane mono">Buying</p>
+      <ol class="steps">
+        <li class="step">
+          <span class="num mono" aria-hidden="true">01</span>
+          <h3>Pick a store</h3>
+          <p>Browse the marketplace and open any store page.</p>
+        </li>
+        <li class="step">
+          <span class="num mono" aria-hidden="true">02</span>
+          <h3>Pay from your crypto wallet</h3>
+          <p>One tap with OKX Wallet, or scan the QR from any wallet.</p>
+        </li>
+        <li class="step">
+          <span class="num mono" aria-hidden="true">03</span>
+          <h3>Get your receipt</h3>
+          <p>Your receipt is recorded on-chain and delivery unlocks instantly.</p>
+        </li>
+      </ol>
+      <div class="routers">
+        <a class="router" href="/marketplace.html">
+          <span class="r-q mono">I want to buy</span>
+          <span class="r-a">Browse the marketplace <span class="arrow" aria-hidden="true">→</span></span>
+        </a>
+        <a class="router" href="/dashboard">
+          <span class="r-q mono">I want to sell</span>
+          <span class="r-a">Open the dashboard <span class="arrow" aria-hidden="true">→</span></span>
+          <span class="r-note">wallet sign-in — stores are agent-created today</span>
+        </a>
+        <a class="router" href="#agents">
+          <span class="r-q mono">I’m an agent</span>
+          <span class="r-a">The machine surface <span class="arrow" aria-hidden="true">→</span></span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec reveal" id="stores" aria-labelledby="storesTitle">
+    <div class="wrap">
+      <p class="sec-eyebrow mono">Live now</p>
+      <h2 id="storesTitle">Live stores, selling right now.</h2>
+      <p class="stores-stats mono" id="storesStats"></p>
+      <p class="sec-note">Real stores running on Tilla — live checkout, no mockups.
+        Humans buy on the page; AI agents can buy the same products automatically.</p>
+      <ol class="ledger">
+        <li class="row"><a href="/marketplace.html">
+          <span class="idx mono" aria-hidden="true">01</span>
+          <span class="slug">Invoice Flow</span>
+          <span class="meta"><b class="mono">/s/invoice-flow/</b> — quiet magazine page, hairline rules, money set small</span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a></li>
+        <li class="row"><a href="/marketplace.html">
+          <span class="idx mono" aria-hidden="true">02</span>
+          <span class="slug">Billable</span>
+          <span class="meta"><b class="mono">/s/billable/</b> — asymmetric columns, oversized index numerals</span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a></li>
+        <li class="row"><a href="/marketplace.html">
+          <span class="idx mono" aria-hidden="true">03</span>
+          <span class="slug">Sync</span>
+          <span class="meta"><b class="mono">/s/sync/</b> — brutalist blocks, hard offset shadows, loud stamp</span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a></li>
+        <li class="row"><a href="/marketplace.html">
+          <span class="idx mono" aria-hidden="true">04</span>
+          <span class="slug">Highland Roast</span>
+          <span class="meta"><b class="mono">/s/highland-roast/</b> — the flagship: generative block-print mosaic</span>
+          <span class="arrow" aria-hidden="true">→</span>
+        </a></li>
+      </ol>
+      <p class="stores-all"><a class="cta-ghost mono" id="storesAll" href="/marketplace.html">Browse the full marketplace <span class="arr" aria-hidden="true">→</span></a></p>
     </div>
   </section>
 
@@ -295,56 +468,20 @@
       <div>
         <p class="sec-eyebrow mono">Proof of purchase</p>
         <h2 id="proofTitle">Proof, not promises.</h2>
-        <p class="sec-note">Every row here is a property of the protocol — not a metric,
-          not a testimonial. Settlement is a transaction on X Layer that anyone can
-          inspect: customer, auditor, or agent.</p>
+        <p class="sec-note">When someone buys, the payment is recorded on X Layer — a public
+          blockchain. Anyone can look up the receipt: buyer, seller, or auditor. No one,
+          including Tilla, can fake it or hold the money.</p>
       </div>
       <dl class="facts mono">
-        <div class="fact"><dt>Settlement</dt><i class="lead" aria-hidden="true"></i><dd>USDT0 · X Layer · chainId 196</dd></div>
-        <div class="fact"><dt>Agent-buyable</dt><i class="lead" aria-hidden="true"></i><dd>x402 · MCP · machine feeds</dd></div>
-        <div class="fact"><dt>Checkout</dt><i class="lead" aria-hidden="true"></i><dd>non-custodial · pay-exact verification</dd></div>
-        <div class="fact"><dt>Receipts</dt><i class="lead" aria-hidden="true"></i><dd><span class="vchip">✓ verifiable on-chain</span></dd></div>
+        <div class="fact"><dt>Paid in</dt><dd>USDT0 — a digital dollar</dd></div>
+        <div class="fact"><dt>Money goes</dt><dd>straight to the seller’s wallet</dd></div>
+        <div class="fact"><dt>Creating a store</dt><dd>1 USDT · no fee on sales</dd></div>
+        <div class="fact"><dt>Receipts</dt><dd>verifiable on-chain · <a class="vchip" href="/receipt-demo.html">watch a receipt print →</a></dd></div>
       </dl>
     </div>
   </section>
 
-  <section class="sec reveal" id="stores" aria-labelledby="storesTitle">
-    <div class="wrap">
-      <p class="sec-eyebrow mono">Live now</p>
-      <h2 id="storesTitle">Signed pages in one ledger.</h2>
-      <p class="sec-note">Real stores rendered by Tilla — live checkout included, no mockups.
-        Every one settles in the same ledger, bought by humans on the page and by agents over x402.</p>
-      <ol class="ledger">
-        <li class="row"><a href="/s/invoice-flow/">
-          <span class="idx mono" aria-hidden="true">01</span>
-          <span class="slug mono">/s/invoice-flow/</span>
-          <span class="meta"><b>Editorial</b> — quiet magazine page, hairline rules, money set small</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-        <li class="row"><a href="/s/billable/">
-          <span class="idx mono" aria-hidden="true">02</span>
-          <span class="slug mono">/s/billable/</span>
-          <span class="meta"><b>Editorial</b> — asymmetric columns, oversized index numerals</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-        <li class="row"><a href="/s/sync/">
-          <span class="idx mono" aria-hidden="true">03</span>
-          <span class="slug mono">/s/sync/</span>
-          <span class="meta"><b>Bold</b> — brutalist blocks, hard offset shadows, loud stamp</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-        <li class="row"><a href="/s/highland-roast/">
-          <span class="idx mono" aria-hidden="true">04</span>
-          <span class="slug mono">/s/highland-roast/</span>
-          <span class="meta"><b>Original</b> — the flagship: generative block-print mosaic</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-      </ol>
-      <p class="stores-all"><a class="cta-ghost mono" id="storesAll" href="/marketplace.html">Browse the full marketplace <span class="arr" aria-hidden="true">→</span></a></p>
-    </div>
-  </section>
-
-  <section class="sec reveal" aria-labelledby="agentsTitle">
+  <section class="sec reveal" id="agents" aria-labelledby="agentsTitle">
     <div class="wrap">
       <p class="sec-eyebrow mono">For agents</p>
       <h2 id="agentsTitle">The machine surface.</h2>
@@ -354,44 +491,52 @@
         <div class="term-head">tilla · machine surface</div>
         <div class="term-row"><span class="verb">GET</span><span class="path">/s/&lt;slug&gt;/feed.json</span><i class="lead" aria-hidden="true"></i><span class="note">machine-readable product feed</span></div>
         <div class="term-row"><span class="verb">POST</span><span class="path">/s/&lt;slug&gt;/buy</span><i class="lead" aria-hidden="true"></i><span class="note"><span class="vchip">x402 · HTTP 402</span></span></div>
-        <div class="term-row"><span class="verb">GET</span><span class="path">/llms.txt</span><i class="lead" aria-hidden="true"></i><span class="note">index for language models</span></div>
+        <div class="term-row"><span class="verb">GET</span><a class="path" href="/llms.txt">/llms.txt</a><i class="lead" aria-hidden="true"></i><span class="note">index for language models</span></div>
         <div class="term-row"><span class="verb">MCP</span><span class="path">server</span><i class="lead" aria-hidden="true"></i><span class="note">storefront tools for agent runtimes</span></div>
         <div class="term-foot">If you are an agent reading this: every store above is live and purchasable, right now.</div>
       </div>
     </div>
   </section>
 
-  <section class="sec reveal" aria-labelledby="howTitle">
+  <section class="sec reveal" id="faq" aria-labelledby="faqTitle">
     <div class="wrap">
-      <p class="sec-eyebrow mono">How it works</p>
-      <h2 id="howTitle">From one line to live.</h2>
-      <ol class="steps">
-        <li class="step">
-          <span class="num mono">01</span>
-          <h3>Describe</h3>
-          <p>Type one line about what you sell. That is the entire input.</p>
-        </li>
-        <li class="step">
-          <span class="num mono">02</span>
-          <h3>Screened &amp; rendered</h3>
-          <p>The line is screened, given a palette and a theme, and rendered into a
-            signed storefront page.</p>
-        </li>
-        <li class="step">
-          <span class="num mono">03</span>
-          <h3>Selling — to both</h3>
-          <p>Live at <span class="mono">/s/your-store/</span> for humans, over x402 and MCP
-            for agents. Settlement lands in USDT0 on X Layer.</p>
-        </li>
-      </ol>
+      <p class="sec-eyebrow mono">FAQ</p>
+      <h2 id="faqTitle">Plain answers.</h2>
+      <div class="faq-list">
+        <details class="faq">
+          <summary>Do I need crypto to browse?</summary>
+          <p>No — browsing is free. Buying needs a crypto wallet holding USDT0 on
+            X Layer — OKX Wallet works well.</p>
+        </details>
+        <details class="faq">
+          <summary>What is USDT0?</summary>
+          <p>USDT — the dollar-pegged token — issued on X Layer. 1 USDT0 ≈ $1.</p>
+        </details>
+        <details class="faq">
+          <summary>Where does the money go?</summary>
+          <p>Straight from the buyer’s wallet to the seller’s wallet. Tilla never
+            holds funds.</p>
+        </details>
+        <details class="faq">
+          <summary>What does selling cost?</summary>
+          <p>1 USDT to create a store. No fee on sales.</p>
+        </details>
+        <details class="faq">
+          <summary>How are stores created?</summary>
+          <p>Today, by AI agents through Tilla’s paid API. A human self-serve builder
+            is on the roadmap.</p>
+        </details>
+      </div>
     </div>
   </section>
 </main>
 
 <footer>
   <div class="wrap mono">
-    <span>Built for the <b>OKX X Layer</b> agent economy · settled in USDT0</span>
-    <span>Tilla · chainId 196</span>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="/marketplace.html">Marketplace</a><a href="/library.html">Your purchases</a><a href="/receipt-demo.html">Receipt preview</a><a href="/dashboard">Dashboard</a><a href="/llms.txt">For agents</a>
+    </nav>
+    <span>Tilla · Built on OKX X Layer · USDT0 · chainId 196</span>
   </div>
 </footer>
 
@@ -536,15 +681,20 @@
     idx.textContent = (i < 9 ? "0" : "") + (i + 1);
     a.appendChild(idx);
 
-    var slug = document.createElement("span");
-    slug.className = "slug mono";
-    slug.textContent = String(s.url || "");
-    a.appendChild(slug);
+    var name = document.createElement("span");
+    name.className = "slug";
+    name.textContent = String(s.name || s.slug || "");
+    a.appendChild(name);
+
+    var path;
+    try { path = new URL(s.url, location.origin).pathname; }
+    catch (e) { path = String(s.url || ""); }
 
     var meta = document.createElement("span");
     meta.className = "meta";
     var b = document.createElement("b");
-    b.textContent = String(s.name || s.slug || "");
+    b.className = "mono";
+    b.textContent = path;
     meta.appendChild(b);
     meta.appendChild(document.createTextNode(" — " + String(s.description || "")));
     a.appendChild(meta);
@@ -572,17 +722,29 @@
       }
       if (typeof data.total === "number" && data.total > 0) {
         title.textContent = data.total === 1
-          ? "1 signed page in one ledger."
-          : data.total + " signed pages in one ledger.";
+          ? "1 store live, selling right now."
+          : data.total + " stores live, selling right now.";
         var all = document.getElementById("storesAll");
         if (all && data.total > 1) {
-          all.textContent = "Browse all " + data.total + " storefronts ";
+          all.textContent = "Browse all " + data.total + " stores ";
           var arr = document.createElement("span");
           arr.className = "arr";
           arr.setAttribute("aria-hidden", "true");
           arr.textContent = "→";
           all.appendChild(arr);
         }
+      }
+      var sold = 0;
+      for (var j = 0; j < data.resources.length; j++) {
+        var c = data.resources[j] && data.resources[j].sold_count;
+        if (typeof c === "number" && c > 0) sold += c;
+      }
+      var stats = document.getElementById("storesStats");
+      if (stats && sold > 0) {
+        var live = (typeof data.total === "number" && data.total > 0)
+          ? data.total : data.resources.length;
+        stats.textContent = live + (live === 1 ? " store live · " : " stores live · ")
+          + sold + (sold === 1 ? " order settled on X Layer" : " orders settled on X Layer");
       }
     })
     .catch(function () {

@@ -51,6 +51,11 @@
   .wrap{ position:relative; z-index:1; max-width:1040px; margin:0 auto;
     padding-left:clamp(18px,4vw,40px); padding-right:clamp(18px,4vw,40px); }
 
+  .skip{ position:fixed; left:16px; top:-60px; z-index:100; padding:10px 16px;
+    background:var(--text); color:var(--bg); font-weight:700; font-size:14px;
+    border-radius:3px; text-decoration:none; transition:top .15s ease; }
+  .skip:focus{ top:12px; }
+
   /* ---------- top bar: thick rule, block mark, chain chip ---------- */
   .topbar{
     display:flex; align-items:center; justify-content:space-between; gap:16px;
@@ -213,6 +218,9 @@
     font-size:10.5px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 52%,transparent); }
   footer b{ font-weight:700; color:color-mix(in srgb,var(--text) 80%,transparent); }
+  footer nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
+  footer nav a{ padding:8px 0; text-decoration:none; }
+  footer nav a:hover{ color:var(--text); }
 
   /* ---------- Design DNA: hero variants (same elements, rearranged) ---------- */
   /* stacked = the base layout above, untouched (the no-DNA default). */
@@ -270,6 +278,7 @@
 </style>
 </head>
 <body data-hero="{{DNA_HERO}}" data-texture="{{DNA_TEXTURE}}">
+<a class="skip" href="#buy">Skip to products</a>
 <header class="topbar">
   <div class="brand"><span class="mark" aria-hidden="true">{{EMOJI}}</span> <span class="brand-name">{{STORE_NAME}}</span></div>
   <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · 196</span>
@@ -281,9 +290,9 @@
     <div class="wrap">
       {% if TAGLINE %}<p class="kicker mono">{{TAGLINE}}</p>{% endif %}
       <h1>{{HERO_HEADLINE}}</h1>
-      <div class="stamp mono">Agent-buyable</div>
+      <div class="stamp mono">Humans &amp; AI welcome</div>
       <div class="mast-price">
-        <span class="n mono">{{PRICE}}</span><span class="u mono">USDT</span>
+        <span class="n mono">{{PRICE}}</span><span class="u mono">USDT0</span>
       </div>
       <p class="mast-sub">{{HERO_SUBCOPY}}</p>
     </div>
@@ -295,7 +304,7 @@
       <h2>Every sale settles on-chain. Nothing here can be faked.</h2>
       <dl class="facts mono">
         <div class="fact"><dt>Settlement</dt><i class="lead" aria-hidden="true"></i><dd>USDT0 · X Layer · chainId 196</dd></div>
-        <div class="fact"><dt>Agent checkout</dt><i class="lead" aria-hidden="true"></i><dd>x402 · HTTP 402</dd></div>
+        <div class="fact"><dt>Agent checkout</dt><i class="lead" aria-hidden="true"></i><dd>Automated (x402)</dd></div>
         <div class="fact"><dt>Status</dt><i class="lead" aria-hidden="true"></i><dd><span class="vchip">✓ Verified on-chain</span></dd></div>
       </dl>
     </div>
@@ -312,12 +321,12 @@
             <span class="item-no mono" aria-hidden="true">{{ "%02d"|format(loop.index) }}</span>
             <h2>{{ p.name }}</h2>
             <p class="blurb">{{ p.blurb }}</p>
-            <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT</span></div>
+            <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
             <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
           </article>
         {% endfor %}
         </div>
-        <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
+        <p class="buy-note mono">Paid straight to the seller — Tilla never holds your money</p>
         {% include "_checkout.html" %}
       </div>
     </div>
@@ -326,7 +335,10 @@
 
 <footer>
   <div class="wrap mono">
-    <span>Powered by <b>Tilla</b></span>
+    <nav aria-label="Tilla">
+      <a href="/">Powered by <b>Tilla</b></a>
+      <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
+    </nav>
     <span>Settled on X Layer · chainId 196</span>
   </div>
 </footer>

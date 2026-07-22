@@ -330,6 +330,11 @@ def test_sitemap_lists_live_stores_excludes_pending_and_blocked(make_store):
     assert "https://tilla.gudman.xyz/s/live-b/" in body
     assert "pending-x" not in body
     assert "blocked-y" not in body
+    # Hub pages precede the store URLs.
+    assert "<loc>https://tilla.gudman.xyz/</loc>" in body
+    assert "https://tilla.gudman.xyz/marketplace.html" in body
+    assert "https://tilla.gudman.xyz/receipt-demo.html" in body
+    assert "https://tilla.gudman.xyz/library.html" in body
 
 
 def test_checkout_409_on_pending_screening_store(make_store):

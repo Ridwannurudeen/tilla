@@ -4,11 +4,13 @@
 <meta charset="utf-8">
 <link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tilla · Marketplace — every storefront, one ledger</title>
-<meta name="description" content="Browse every live Tilla storefront in one place — searchable, most-sold first, buyable by humans on the page and AI agents over x402, settled in USDT0 on OKX X Layer.">
+<title>Tilla Marketplace — every live store</title>
+<meta name="description" content="Browse every live store on Tilla — searchable, best sellers first. Buy on the page, or point an AI agent at the same directory.">
+<link rel="canonical" href="https://tilla.gudman.xyz/marketplace.html">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Tilla · Marketplace — every storefront, one ledger">
-<meta property="og:description" content="Every live Tilla storefront, one ledger — buyable by humans and AI agents, settled in USDT0 on OKX X Layer.">
+<meta property="og:url" content="https://tilla.gudman.xyz/marketplace.html">
+<meta property="og:title" content="Tilla Marketplace — every live store">
+<meta property="og:description" content="Browse every live store on Tilla — searchable, best sellers first. Buy on the page, or point an AI agent at the same directory.">
 <meta name="theme-color" content="#0B0B12">
 <!-- Fonts: Space Grotesk ("TillaGrotesk") + Geist Mono ("TillaMono"), both SIL OFL-1.1,
      subsetted and inlined as data URIs. Full provenance, source, and license verdicts are
@@ -89,17 +91,21 @@
     box-shadow:0 0 0 1px rgba(0,0,0,.28), 0 0 8px color-mix(in srgb,var(--xlayer) 55%,transparent); }
   .motion .chip .dot{ animation:live 2.4s ease-in-out infinite; }
   @keyframes live{ 50%{ opacity:.45; } }
-  .rail-link{ display:inline-flex; align-items:center; gap:6px; text-decoration:none;
+  .rail-link{ display:inline-flex; align-items:center; gap:6px; padding:14px 4px;
+    text-decoration:none;
     font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 70%,transparent); white-space:nowrap;
     transition:color .15s ease; }
   .rail-link:hover{ color:var(--text); }
   .rail-link .arr{ display:inline-block; transition:transform .15s ease; }
   .rail-link:hover .arr{ transform:translateX(3px); }
+  .rail-nav{ display:flex; align-items:center; gap:clamp(10px,2vw,22px); min-width:0; }
+  [aria-current="page"]{ color:var(--text);
+    border-bottom:1px solid color-mix(in srgb,var(--text) 40%,transparent); }
 
-  /* ---------- maximal hero ---------- */
+  /* ---------- compact directory header ---------- */
   .hero{ position:relative; overflow:hidden; border-bottom:1px solid var(--hairline);
-    padding:calc(64px + clamp(56px,10vh,120px)) 0 clamp(60px,10vh,110px); }
+    padding:calc(64px + clamp(24px,4vh,40px)) 0 clamp(26px,4vh,40px); }
   #mosaic{ position:absolute; top:0; right:0; width:56%; height:100%; z-index:0;
     pointer-events:none; }
   .eyebrow{ display:inline-flex; align-items:center; gap:10px;
@@ -107,34 +113,13 @@
     color:color-mix(in srgb,var(--text) 66%,transparent); }
   .eyebrow::before{ content:""; flex:none; width:8px; height:8px; background:var(--primary); }
   .hero h1{
-    margin-top:18px; max-width:980px; text-wrap:balance;
-    font-size:clamp(2.5rem,7vw,6rem); font-weight:700;
-    line-height:1.02; letter-spacing:-.035em;
+    margin-top:14px; max-width:980px; text-wrap:balance;
+    font-size:clamp(2rem,4.5vw,3.2rem); font-weight:700;
+    line-height:1.06; letter-spacing:-.03em;
   }
-  .hh-w{ display:inline-block; white-space:nowrap; }
-  .hh-c{ display:inline-block; }
-  .motion .hh-c{ opacity:0; animation:hh-rise .6s cubic-bezier(.2,.65,.25,1) both; }
-  @keyframes hh-rise{ from{ opacity:0; transform:translateY(.32em); } to{ opacity:1; transform:none; } }
-  .hero-sub{ margin-top:24px; max-width:36rem; font-size:1.125rem;
+  .hero-sub{ margin-top:16px; max-width:44rem; font-size:1.05rem;
     color:color-mix(in srgb,var(--text) 74%,transparent); }
-  .cta-row{ display:flex; align-items:center; flex-wrap:wrap; gap:22px;
-    margin-top:clamp(28px,4vh,44px); }
-  .cta{
-    display:inline-block; padding:16px 30px; border-radius:999px; text-decoration:none;
-    font-size:16px; font-weight:700; color:var(--on-primary); background:var(--primary);
-    box-shadow:0 10px 30px color-mix(in srgb,var(--primary) 32%,transparent);
-    transition:transform .15s ease, box-shadow .15s ease;
-  }
-  .cta:hover{ transform:translateY(-2px);
-    box-shadow:0 14px 36px color-mix(in srgb,var(--primary) 40%,transparent); }
-  .cta:active{ transform:translateY(0) scale(.99); }
-  .cta-ghost{ display:inline-flex; align-items:center; gap:7px; text-decoration:none;
-    font-size:12px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
-    color:color-mix(in srgb,var(--text) 70%,transparent); transition:color .15s ease; }
-  .cta-ghost:hover{ color:var(--text); }
-  .cta-ghost .arr{ display:inline-block; transition:transform .15s ease; }
-  .cta-ghost:hover .arr{ transform:translateX(3px); }
-  .hero-chain{ display:flex; align-items:center; flex-wrap:wrap; gap:14px; margin-top:26px; }
+  .hero-chain{ display:flex; align-items:center; flex-wrap:wrap; gap:14px; margin-top:20px; }
   .settles{ display:inline-flex; align-items:center; gap:8px; padding:7px 11px; border-radius:3px;
     background:var(--xlayer); color:var(--on-xlayer);
     font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; }
@@ -143,97 +128,16 @@
     color:color-mix(in srgb,var(--text) 62%,transparent); }
 
   /* ---------- shared section chrome ---------- */
-  .sec{ padding:clamp(64px,10vh,120px) 0; border-bottom:1px solid var(--hairline); }
-  .sec-eyebrow{ display:inline-flex; align-items:center; gap:10px;
-    font-size:11px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
-    color:color-mix(in srgb,var(--text) 62%,transparent); }
-  .sec-eyebrow::before{ content:""; flex:none; width:8px; height:8px; background:var(--primary); }
-  .sec h2{ margin-top:16px; font-size:clamp(1.7rem,3.4vw,2.6rem); font-weight:700;
-    letter-spacing:-.02em; line-height:1.12; max-width:22ch; text-wrap:balance; }
-  .sec-note{ margin-top:14px; max-width:34rem; font-size:.98rem;
-    color:color-mix(in srgb,var(--text) 66%,transparent); }
-
-  /* ---------- the proof strip (monochrome ledger band, lime = chain) ---------- */
-  .proof{ background:var(--surface); }
-  .proof .sec-eyebrow::before{ background:var(--xlayer); }
-  .proof .wrap{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);
-    gap:clamp(32px,5vw,72px); }
-  .facts{ align-self:center; font-size:13px; }
-  .fact{ display:flex; align-items:baseline; gap:14px; padding:15px 0;
-    border-bottom:1px solid var(--hairline); }
-  .fact:first-child{ border-top:1px solid var(--hairline); }
-  .fact dt{ flex:none; font-size:11px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
-    color:color-mix(in srgb,var(--text) 58%,transparent); }
-  .fact .lead{ flex:1; min-width:24px;
-    border-bottom:1px dotted color-mix(in srgb,var(--text) 34%,transparent);
-    transform:translateY(-4px); }
-  .fact dd{ font-weight:600; text-align:right; letter-spacing:.01em; }
-  .vchip{ display:inline-block; padding:4px 9px; border-radius:3px;
-    background:var(--xlayer); color:var(--on-xlayer); font-weight:700; letter-spacing:.06em; }
-
-  /* ---------- live stores: signed pages in one ledger ---------- */
-  .ledger{ list-style:none; margin-top:clamp(30px,5vh,52px); }
-  .row a{
-    display:grid; grid-template-columns:3.2em minmax(0,1.05fr) minmax(0,1.55fr) auto;
-    grid-template-areas:"idx slug meta arrow";
-    align-items:baseline; column-gap:clamp(12px,2.5vw,28px);
-    padding:19px 14px; margin:0 -14px; text-decoration:none; border-radius:4px;
-    border-bottom:1px solid var(--hairline);
-    transition:background-color .15s ease;
-  }
-  .row:first-child a{ border-top:1px solid var(--hairline); }
-  .row a:hover{ background-color:var(--surface); }
-  .row a:active{ background-color:var(--pressed); }
-  .row .idx{ grid-area:idx; font-size:12px; font-weight:600;
-    color:color-mix(in srgb,var(--text) 46%,transparent); }
-  .row .slug{ grid-area:slug; font-size:15px; font-weight:600; letter-spacing:.01em;
-    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-    transition:color .15s ease; }
-  .row a:hover .slug{ color:var(--accent); }
-  .row .meta{ grid-area:meta; font-size:13px;
-    color:color-mix(in srgb,var(--text) 62%,transparent); }
-  .row .meta b{ font-weight:700; color:color-mix(in srgb,var(--text) 84%,transparent); }
-  .row .arrow{ grid-area:arrow; align-self:center; font-size:18px;
-    color:color-mix(in srgb,var(--text) 62%,transparent);
-    display:inline-block; transition:transform .15s ease, color .15s ease; }
-  .row a:hover .arrow{ transform:translateX(6px); color:var(--text); }
-
-  /* ---------- the machine surface (terminal / ledger) ---------- */
-  .term{ margin-top:clamp(30px,5vh,52px); border:1px solid var(--hairline); border-radius:4px;
-    background:var(--surface); font-size:13px; overflow-x:auto; }
-  .term-head{ display:flex; align-items:center; gap:9px; padding:11px 18px;
-    border-bottom:1px solid var(--hairline);
-    font-size:10.5px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
-    color:color-mix(in srgb,var(--text) 56%,transparent); white-space:nowrap; }
-  .term-head::before{ content:""; flex:none; width:7px; height:7px;
-    background:color-mix(in srgb,var(--text) 38%,transparent); }
-  .term-row{ display:flex; align-items:baseline; gap:14px; padding:14px 18px;
-    border-bottom:1px solid var(--hairline); white-space:nowrap; }
-  .term-row .verb{ flex:none; min-width:3.4em; font-weight:700; color:var(--accent); }
-  .term-row .path{ font-weight:600; }
-  .term-row .lead{ flex:1; min-width:24px;
-    border-bottom:1px dotted color-mix(in srgb,var(--text) 34%,transparent);
-    transform:translateY(-4px); }
-  .term-row .note{ color:color-mix(in srgb,var(--text) 64%,transparent); }
-  .term-foot{ padding:14px 18px; font-size:11.5px;
-    color:color-mix(in srgb,var(--text) 56%,transparent); }
-
-  /* ---------- how it works (a true sequence) ---------- */
-  .steps{ list-style:none; margin-top:clamp(30px,5vh,52px);
-    display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:clamp(22px,3.5vw,44px); }
-  .step{ border-top:1px solid var(--hairline); padding-top:20px; }
-  .step .num{ font-size:13px; font-weight:700; letter-spacing:.1em;
-    color:color-mix(in srgb,var(--text) 46%,transparent); }
-  .step h3{ margin-top:12px; font-size:1.25rem; font-weight:700; letter-spacing:-.01em; }
-  .step p{ margin-top:10px; font-size:.95rem;
-    color:color-mix(in srgb,var(--text) 66%,transparent); }
+  .sec{ padding:clamp(26px,4vh,40px) 0 clamp(64px,10vh,110px); border-bottom:1px solid var(--hairline); }
 
   /* ---------- quiet mono footer ---------- */
   footer .wrap{ display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
     padding-top:34px; padding-bottom:42px; font-size:10.5px; font-weight:600;
     letter-spacing:.14em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 52%,transparent); }
-  footer b{ font-weight:700; color:color-mix(in srgb,var(--text) 80%,transparent); }
+  .foot-nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
+  .foot-nav a{ padding:8px 0; text-decoration:none; color:inherit; transition:color .15s ease; }
+  .foot-nav a:hover{ color:var(--text); }
 
   /* ---------- scroll reveal (progressive enhancement, motion-gated) ---------- */
   .motion .reveal{ opacity:0; transform:translateY(18px);
@@ -242,15 +146,16 @@
 
   /* ---------- marketplace directory (live, searchable) ---------- */
   .market-bar{ display:flex; align-items:center; justify-content:space-between; gap:16px 22px;
-    flex-wrap:wrap; margin-top:clamp(30px,5vh,52px); padding:16px 0;
+    flex-wrap:wrap; padding:16px 0;
     border-top:1px solid var(--hairline); border-bottom:1px solid var(--hairline); }
   .market-field{ display:flex; align-items:center; gap:12px; flex:1 1 280px; max-width:34rem; }
   .market-label{ flex:none; font-size:11px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 58%,transparent); }
   .market-input{ flex:1; min-width:0; padding:10px 13px; border:1px solid var(--hairline);
     border-radius:3px; background:transparent; color:var(--text);
-    font-family:inherit; font-size:14px; font-weight:600; letter-spacing:.01em;
+    font-family:inherit; font-size:16px; font-weight:600; letter-spacing:.01em;
     transition:border-color .15s ease; }
+  @media (min-width:641px){ .market-input{ font-size:14px; } }
   .market-input::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
   .market-input:hover{ border-color:color-mix(in srgb,var(--text) 30%,transparent); }
   .market-input:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
@@ -261,14 +166,14 @@
   .market-status[hidden]{ display:none; }
   .market-status::before{ content:""; flex:none; width:8px; height:8px;
     background:color-mix(in srgb,var(--text) 38%,transparent); }
-  .market-retry{ padding:8px 14px; border:1px solid var(--hairline); border-radius:3px;
+  .market-retry{ padding:14px 18px; border:1px solid var(--hairline); border-radius:3px;
     background:transparent; color:var(--text); cursor:pointer;
     font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
     transition:background-color .15s ease; }
   .market-retry:hover{ background-color:var(--surface); }
   .market-retry:active{ background-color:var(--pressed); }
   .market-grid{ list-style:none; margin-top:clamp(26px,4vh,44px);
-    display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(min(280px,100%),1fr)); gap:14px; }
   .market-grid > li{ display:flex; }
   .store-card{ flex:1 1 auto; display:flex; flex-direction:column; gap:12px; min-width:0;
     padding:20px 18px; border:1px solid var(--hairline); border-radius:4px; text-decoration:none;
@@ -284,32 +189,38 @@
   .store-card:hover .store-arrow{ transform:translateX(5px); color:var(--text); }
   .store-desc{ font-size:.92rem; color:color-mix(in srgb,var(--text) 66%,transparent);
     display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
-  .store-foot{ display:flex; align-items:center; gap:10px; margin-top:auto;
-    padding-top:12px; border-top:1px solid var(--hairline); }
+  .store-foot{ display:flex; align-items:center; flex-wrap:wrap; gap:10px; row-gap:6px;
+    margin-top:auto; padding-top:12px; border-top:1px solid var(--hairline); }
   .store-price{ font-size:13.5px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
   .store-sold{ flex:none; padding:3px 8px; border:1px solid var(--hairline); border-radius:3px;
     font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 72%,transparent); white-space:nowrap; }
-  .store-chain{ display:inline-flex; align-items:center; gap:7px; margin-left:auto;
-    font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
-    color:color-mix(in srgb,var(--text) 56%,transparent); white-space:nowrap; }
-  .store-chain::before{ content:""; flex:none; width:6px; height:6px; background:var(--xlayer); }
+  .market-more{ display:block; margin:26px auto 0; padding:14px 26px;
+    border:1px solid var(--hairline); border-radius:3px;
+    background:transparent; color:var(--text); cursor:pointer;
+    font-size:12px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    transition:background-color .15s ease; }
+  .market-more:hover{ background-color:var(--surface); }
+  .market-more:active{ background-color:var(--pressed); }
+  .market-more[hidden]{ display:none; }
+  .market-ns{ display:flex; align-items:center; flex-wrap:wrap; gap:0 14px; margin-top:24px;
+    font-size:13px; color:color-mix(in srgb,var(--text) 66%,transparent); }
+  .market-ns a{ padding:8px 0; color:inherit; transition:color .15s ease; }
+  .market-ns a:hover{ color:var(--text); }
   .motion .card-in{ animation:card-rise .45s cubic-bezier(.2,.65,.25,1) both; }
   @keyframes card-rise{ from{ opacity:0; transform:translateY(14px); } }
 
   @media (max-width:860px){
-    .proof .wrap{ grid-template-columns:minmax(0,1fr); }
-    .facts{ align-self:start; }
-    .steps{ grid-template-columns:minmax(0,1fr); }
     #mosaic{ width:100%; opacity:.3; }
-  }
-  @media (max-width:720px){
-    .row a{ grid-template-columns:3.2em minmax(0,1fr) auto;
-      grid-template-areas:"idx slug arrow" "idx meta arrow"; row-gap:4px; }
   }
   @media (max-width:640px){
     .chip{ display:none; }
-    .brand{ font-size:15px; }
+    .rail-link.aux{ display:none; }
+    .rail{ gap:8px; padding:0 10px; }
+    .rail-nav{ gap:6px; }
+    .rail-link{ padding:14px 2px; gap:4px; font-size:10px; letter-spacing:0; }
+    .rail-link .arr{ display:none; }
+    .brand{ font-size:14px; gap:8px; }
   }
   @media (prefers-reduced-motion: reduce){
     html{ scroll-behavior:auto; }
@@ -322,6 +233,12 @@
 
 <header class="rail">
   <a class="brand" href="/"><span class="mark" aria-hidden="true"><span></span><span></span><span></span></span>TILLA</a>
+  <nav class="rail-nav" aria-label="Site">
+    <a class="rail-link mono" href="/marketplace.html" aria-current="page">Marketplace</a>
+    <a class="rail-link mono aux" href="/#how">How it works</a>
+    <a class="rail-link mono" href="/library.html">Your purchases</a>
+    <a class="rail-link mono aux" href="/#agents">For agents</a>
+  </nav>
   <div class="rail-right">
     <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · chainId 196</span>
     <a class="rail-link mono" href="/dashboard">Open dashboard <span class="arr" aria-hidden="true">→</span></a>
@@ -333,26 +250,16 @@
     <canvas id="mosaic" aria-hidden="true"></canvas>
     <div class="wrap">
       <p class="eyebrow mono">The Tilla marketplace</p>
-      <h1 id="heroHeadline">Every storefront. One ledger.</h1>
-      <p class="hero-sub">Every live store on Tilla, gathered on one page — the same directory
-        the agents read, most-sold first. Humans buy on the page. AI agents buy over x402.
-        Either way, settlement lands in USDT0 on OKX X Layer.</p>
-      <div class="cta-row">
-        <a class="cta" href="/dashboard">Open the dashboard</a>
-        <a class="cta-ghost mono" href="/">Back to home <span class="arr" aria-hidden="true">→</span></a>
-      </div>
+      <h1 id="heroHeadline">Every live store, one page.</h1>
+      <p class="hero-sub">Browse everything selling on Tilla right now, best sellers first.
+        Open any card to buy — AI agents shop this same directory automatically.</p>
       <p class="hero-chain"><span class="settles mono">Settles on X Layer</span>
         <span class="chain-meta mono">USDT0 · chainId 196</span></p>
     </div>
   </section>
 
-  <section class="sec reveal" id="market" aria-labelledby="marketTitle">
+  <section class="sec reveal" id="market" aria-label="Store directory">
     <div class="wrap">
-      <p class="sec-eyebrow mono">Live now</p>
-      <h2 id="marketTitle">Browse the live storefronts.</h2>
-      <p class="sec-note">Everything below is fetched from the same discovery feed the agents
-        read — most-sold first, no mockups. Open any card to buy on the page; point an agent
-        at the same slug to buy over x402.</p>
       <div class="market-bar">
         <div class="market-field">
           <label class="market-label mono" for="marketSearch">Filter</label>
@@ -366,14 +273,26 @@
         <button class="market-retry mono" type="button" id="marketRetry" hidden>Retry</button>
       </div>
       <ul class="market-grid" id="marketGrid"></ul>
+      <button class="market-more mono" type="button" id="marketMore" hidden>Load more</button>
+      <noscript>
+        <p class="market-ns mono">The live directory needs JavaScript. Meanwhile:
+          <a href="/">Home</a>
+          <a href="/s/invoice-flow/">invoice-flow</a>
+          <a href="/s/billable/">billable</a>
+          <a href="/s/sync/">sync</a>
+          <a href="/s/highland-roast/">highland-roast</a>
+        </p>
+      </noscript>
     </div>
   </section>
 </main>
 
 <footer>
   <div class="wrap mono">
-    <span>Every storefront above settles on <b>OKX X Layer</b> · USDT0</span>
-    <span>Tilla · Marketplace · chainId 196</span>
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="/marketplace.html">Marketplace</a><a href="/library.html">Your purchases</a><a href="/receipt-demo.html">Receipt preview</a><a href="/dashboard">Dashboard</a><a href="/llms.txt">For agents</a>
+    </nav>
+    <span>Tilla · Built on OKX X Layer · USDT0 · chainId 196</span>
   </div>
 </footer>
 
@@ -448,38 +367,6 @@
   if (reduce) return;
   document.documentElement.classList.add("motion");
 
-  /* ---- per-letter hero reveal (textContent split at runtime) ---- */
-  var hh = document.getElementById("heroHeadline");
-  if (hh) {
-    var text = hh.textContent.trim();
-    if (text) {
-      var chars = Array.from ? Array.from(text) : text.split("");
-      hh.setAttribute("aria-label", text);
-      hh.textContent = "";
-      var word = null, n = 0;
-      for (var i = 0; i < chars.length; i++) {
-        var ch = chars[i];
-        if (ch === " " || ch === "\n" || ch === "\t") {
-          word = null;
-          hh.appendChild(document.createTextNode(" "));
-          continue;
-        }
-        if (!word) {
-          word = document.createElement("span");
-          word.className = "hh-w";
-          word.setAttribute("aria-hidden", "true");
-          hh.appendChild(word);
-        }
-        var s = document.createElement("span");
-        s.className = "hh-c";
-        s.textContent = ch;
-        s.style.animationDelay = (n * 28) + "ms";
-        word.appendChild(s);
-        n++;
-      }
-    }
-  }
-
   /* ---- scroll reveal ---- */
   var els = document.querySelectorAll(".reveal");
   if ("IntersectionObserver" in window) {
@@ -506,10 +393,16 @@
   var statusEl = document.getElementById("marketStatus");
   var statusText = document.getElementById("marketStatusText");
   var retryBtn = document.getElementById("marketRetry");
-  if (!grid || !searchEl || !countEl || !statusEl || !statusText || !retryBtn) return;
+  var moreBtn = document.getElementById("marketMore");
+  if (!grid || !searchEl || !countEl || !statusEl || !statusText || !retryBtn || !moreBtn) return;
 
   var stores = [];
+  var total = 0;
   var loaded = false;
+  var loadingMore = false;
+
+  var initialQ = new URLSearchParams(location.search).get("q");
+  if (initialQ) searchEl.value = initialQ;
 
   function money(micro) {
     return (micro / 1000000).toFixed(2);
@@ -523,6 +416,7 @@
   }
 
   function card(s, delay) {
+    if (typeof s.url !== "string") return null;
     var li = document.createElement("li");
     var a = document.createElement("a");
     a.className = "store-card";
@@ -530,7 +424,7 @@
       a.className += " card-in";
       a.style.animationDelay = (delay * 45) + "ms";
     }
-    if (typeof s.url === "string") a.href = s.url;
+    a.href = s.url;
 
     var top = document.createElement("span");
     top.className = "store-top";
@@ -562,10 +456,6 @@
       sold.textContent = s.sold_count + " sold";
       foot.appendChild(sold);
     }
-    var chain = document.createElement("span");
-    chain.className = "store-chain mono";
-    chain.textContent = "settles X Layer";
-    foot.appendChild(chain);
     a.appendChild(foot);
 
     li.appendChild(a);
@@ -586,13 +476,22 @@
     }) : stores;
 
     grid.textContent = "";
+    var shown = 0;
     for (var i = 0; i < list.length; i++) {
-      grid.appendChild(card(list[i], stagger ? Math.min(i, 12) : -1));
+      var el = card(list[i], stagger ? Math.min(shown, 12) : -1);
+      if (el) { grid.appendChild(el); shown++; }
     }
 
-    var total = stores.length;
     countEl.textContent = q ? list.length + " of " + total
       : total + (total === 1 ? " store" : " stores");
+
+    var remaining = total - stores.length;
+    if (loaded && remaining > 0) {
+      moreBtn.textContent = "Load more (" + remaining + " remaining)";
+      moreBtn.hidden = false;
+    } else {
+      moreBtn.hidden = true;
+    }
 
     if (!total) showStatus("No live storefronts yet.", false);
     else if (!list.length) showStatus("No storefronts match.", false);
@@ -602,6 +501,7 @@
   function load() {
     showStatus("Loading storefronts…", false);
     countEl.textContent = "";
+    moreBtn.hidden = true;
     fetch("/discovery/resources?limit=50")
       .then(function (res) {
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -609,18 +509,47 @@
       })
       .then(function (data) {
         stores = (data && Array.isArray(data.resources)) ? data.resources : [];
+        total = (data && typeof data.total === "number") ? data.total : stores.length;
         loaded = true;
         render(true);
       })
       .catch(function () {
-        showStatus("Couldn't load the marketplace —", true);
+        showStatus("Couldn't load the marketplace — use the Retry button to try again.", true);
+      });
+  }
+
+  function loadMore() {
+    if (loadingMore) return;
+    loadingMore = true;
+    moreBtn.disabled = true;
+    fetch("/discovery/resources?limit=50&offset=" + stores.length)
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var next = (data && Array.isArray(data.resources)) ? data.resources : [];
+        stores = stores.concat(next);
+        if (data && typeof data.total === "number") total = data.total;
+        if (!next.length) total = stores.length;
+        render(false);
+      })
+      .catch(function () {
+        showStatus("Couldn't load the marketplace — use the Retry button to try again.", true);
+      })
+      .then(function () {
+        loadingMore = false;
+        moreBtn.disabled = false;
       });
   }
 
   searchEl.addEventListener("input", function () {
+    var q = searchEl.value.trim();
+    history.replaceState(null, "", q ? "?q=" + encodeURIComponent(q) : location.pathname);
     if (loaded) render(false);
   });
   retryBtn.addEventListener("click", load);
+  moreBtn.addEventListener("click", loadMore);
   load();
 })();
 </script>

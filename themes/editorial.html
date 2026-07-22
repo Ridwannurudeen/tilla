@@ -65,6 +65,11 @@
   }
   .wrap{ max-width:1020px; margin:0 auto; padding:0 clamp(20px,5vw,56px); }
 
+  .skip{ position:fixed; left:16px; top:-60px; z-index:100; padding:10px 16px;
+    background:var(--text); color:var(--bg); font-weight:700; font-size:14px;
+    border-radius:3px; text-decoration:none; transition:top .15s ease; }
+  .skip:focus{ top:12px; }
+
   /* ---------- masthead: folio line + centered magazine nameplate ---------- */
   .masthead{ padding-top:clamp(26px,4vh,44px); }
   .folio{
@@ -274,6 +279,9 @@
     color:color-mix(in srgb,var(--text) 52%,transparent);
   }
   .folio-foot b{ font-weight:700; color:color-mix(in srgb,var(--text) 78%,transparent); }
+  .folio-foot nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
+  .folio-foot nav a{ padding:8px 0; text-decoration:none; }
+  .folio-foot nav a:hover{ color:var(--text); }
 
   /* ---------- motion: one quiet settle, micro-interactions only ---------- */
   @media (prefers-reduced-motion: no-preference){
@@ -309,6 +317,7 @@
 </style>
 </head>
 <body data-hero="{{DNA_HERO}}" data-texture="{{DNA_TEXTURE}}">
+<a class="skip" href="#buy">Skip to products</a>
 <div class="wrap">
   <header class="masthead">
     <div class="folio mono">
@@ -345,7 +354,7 @@
           purchasable by humans and AI agents alike. Nothing here can be faked.</p>
         <dl class="ledger">
           <div class="entry"><dt>Settlement</dt><dd class="mono">USDT0 · X Layer · chainId 196</dd></div>
-          <div class="entry"><dt>Agent checkout</dt><dd class="mono">x402 · HTTP 402</dd></div>
+          <div class="entry"><dt>Agent checkout</dt><dd class="mono">Automated (x402)</dd></div>
           <div class="entry"><dt>Status</dt><dd class="mono"><span class="vchip">✓ Verified on-chain</span></dd></div>
         </dl>
       </div>
@@ -372,7 +381,7 @@
         <h2>{{ p.name }}</h2>
         <p class="blurb">{{ p.blurb }}</p>
         <div class="offer">
-          <div class="price mono"><span class="n">{{ p.price }}</span><span class="u">USDT</span></div>
+          <div class="price mono"><span class="n">{{ p.price }}</span><span class="u">USDT0</span></div>
           <button class="buy" id="buyBtn" onclick="startCheckout(0)">{{ p.cta }}</button>
         </div>
         {%- else %}
@@ -384,7 +393,7 @@
               <div class="item-line">
                 <h2 class="item-name">{{ p.name }}</h2>
                 <span class="leader" aria-hidden="true"></span>
-                <div class="price mono"><span class="n">{{ p.price }}</span><span class="u">USDT</span></div>
+                <div class="price mono"><span class="n">{{ p.price }}</span><span class="u">USDT0</span></div>
                 <button class="buy" {% if p.index == 0 %}id="buyBtn" {% endif %}data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
               </div>
               {%- if p.blurb %}
@@ -395,7 +404,7 @@
           {%- endfor %}
         </div>
         {%- endif %}
-        <p class="buy-note mono">Instant settlement · non-custodial · X Layer</p>
+        <p class="buy-note mono">Paid straight to the seller — Tilla never holds your money</p>
         {% include "_checkout.html" %}
       </div>
     </section>
@@ -403,7 +412,10 @@
 
   <footer>
     <div class="folio-foot mono">
-      <span>Powered by <b>Tilla</b></span>
+      <nav aria-label="Tilla">
+        <a href="/">Powered by <b>Tilla</b></a>
+        <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
+      </nav>
       <span>Settled on X Layer · chainId 196</span>
     </div>
   </footer>

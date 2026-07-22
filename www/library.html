@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tilla — receipt preview (sample data)</title>
-<meta name="description" content="Watch a Tilla receipt print itself — sample data, no payment happens here.">
-<link rel="canonical" href="https://tilla.gudman.xyz/receipt-demo.html">
-<meta property="og:url" content="https://tilla.gudman.xyz/receipt-demo.html">
+<title>Tilla · Your purchases — your buyer library</title>
+<meta name="description" content="Sign in with the wallet you paid from — signing is free and moves no money — and every Tilla purchase made with that wallet appears with fresh download links.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Tilla · Your purchases — your buyer library">
+<meta property="og:description" content="Every purchase made with your wallet, with fresh download links, license keys, and text deliveries — settled in USDT0 on OKX X Layer.">
 <meta name="theme-color" content="#0B0B12">
 <!-- Fonts: Space Grotesk ("TillaGrotesk") + Geist Mono ("TillaMono"), both SIL OFL-1.1,
      subsetted and inlined as data URIs. Full provenance, source, and license verdicts are
@@ -29,17 +30,17 @@
 }
 </style>
 <style>
-  /* Tilla system, fixed dark theme (no Jinja on this page). Same tokens as www/index.html. */
   :root{ --primary:#6C5CE7; --accent:#00D1B2; --bg:#0B0B12; --text:#F5F5FA; }
   :root{
     --on-primary:#fff;
     --xlayer:#BCFF2F; --on-xlayer:#000;
     --surface:color-mix(in oklab,var(--bg) 92%,var(--text));
+    --pressed:color-mix(in oklab,var(--bg) 84%,var(--text));
     --hairline:color-mix(in srgb,var(--text) 16%,transparent);
-    --tint:color-mix(in srgb,var(--primary) 8%,var(--bg));
   }
 
   *{ box-sizing:border-box; margin:0; padding:0; }
+  html{ scroll-padding-top:80px; scroll-behavior:smooth; }
   body{
     font-family:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif;
     background:var(--bg); color:var(--text); line-height:1.55;
@@ -52,7 +53,7 @@
     font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
     font-variant-numeric:tabular-nums;
   }
-  .wrap{ max-width:660px; margin:0 auto;
+  .wrap{ position:relative; z-index:1; max-width:1140px; margin:0 auto;
     padding-left:clamp(18px,4vw,40px); padding-right:clamp(18px,4vw,40px); }
 
   .skip{ position:fixed; left:16px; top:-60px; z-index:100; padding:10px 16px;
@@ -60,7 +61,7 @@
     border-radius:3px; text-decoration:none; transition:top .15s ease; }
   .skip:focus{ top:12px; }
 
-  /* ---------- top rail (same chrome as the landing page) ---------- */
+  /* ---------- fixed top rail (structure: monochrome ink) ---------- */
   .rail{
     position:fixed; top:0; left:0; right:0; z-index:50;
     display:flex; align-items:center; justify-content:space-between; gap:16px;
@@ -75,6 +76,8 @@
   .brand .mark span:nth-child(1){ background:var(--primary); }
   .brand .mark span:nth-child(2){ background:var(--accent); }
   .brand .mark span:nth-child(3){ background:color-mix(in srgb,var(--text) 28%,transparent); }
+  .rail-nav{ display:flex; align-items:center; gap:clamp(10px,2vw,22px); min-width:0; }
+  .rail-right{ display:flex; align-items:center; gap:14px; flex:none; }
   .chip{
     display:inline-flex; align-items:center; gap:7px; padding:6px 10px;
     border:1px solid var(--hairline); border-radius:3px;
@@ -83,8 +86,8 @@
   }
   .chip .dot{ width:7px; height:7px; border-radius:50%; background:var(--xlayer);
     box-shadow:0 0 0 1px rgba(0,0,0,.28), 0 0 8px color-mix(in srgb,var(--xlayer) 55%,transparent); }
-  .rail-nav{ display:flex; gap:clamp(10px,2vw,22px); }
-  .rail-right{ display:flex; align-items:center; gap:14px; flex:none; }
+  .motion .chip .dot{ animation:live 2.4s ease-in-out infinite; }
+  @keyframes live{ 50%{ opacity:.45; } }
   .rail-link{ display:inline-flex; align-items:center; gap:6px; text-decoration:none;
     padding:14px 4px;
     font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
@@ -95,94 +98,119 @@
   .rail-link:hover .arr{ transform:translateX(3px); }
   [aria-current="page"]{ color:var(--text);
     border-bottom:1px solid color-mix(in srgb,var(--text) 40%,transparent); }
-  @media (max-width:640px){
-    .rail{ gap:6px; padding:0 10px; }
-    .chip{ display:none; }
-    .rail-link.aux{ display:none; }
-    .rail-link .arr{ display:none; }
-    .brand{ font-size:14px; gap:8px; }
-    .rail-nav{ gap:6px; }
-    .rail-right{ gap:6px; }
-    .rail-link{ font-size:10px; letter-spacing:0; padding:14px 2px; }
-  }
 
-  /* ---------- the stage ---------- */
-  main{ background:var(--tint); border-bottom:1px solid var(--hairline);
-    padding:calc(64px + clamp(48px,8vh,88px)) 0 clamp(56px,9vh,100px); }
-  .notice{ display:inline-flex; align-items:center; gap:9px; padding:7px 11px;
-    border:1px solid color-mix(in srgb,var(--accent) 55%,transparent); border-radius:3px;
-    font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
-    color:var(--accent); }
-  .notice::before{ content:""; flex:none; width:8px; height:8px; background:var(--accent); }
-  h1{ margin-top:18px; font-size:clamp(2rem,5.5vw,3.2rem); font-weight:700;
-    line-height:1.05; letter-spacing:-.03em; text-wrap:balance; }
-  .sub{ margin-top:14px; max-width:34rem; font-size:1.05rem;
-    color:color-mix(in srgb,var(--text) 74%,transparent); }
-  .sub b{ color:var(--text); }
-
-  /* ---------- checkout panel + receipt, ported from themes/_checkout.html ---------- */
-  .panel{ margin-top:clamp(28px,4vh,44px); padding:20px; text-align:left; font-size:14px;
-    border:1px solid var(--hairline);
-    border-radius:4px; background:var(--bg); }
-  .panel .row{ display:flex; justify-content:space-between; align-items:baseline; gap:12px;
-    margin:0; padding:9px 0; border-bottom:1px dotted color-mix(in srgb,var(--text) 26%,transparent); }
-  .panel .row span{ font-size:11px; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
-    color:color-mix(in srgb,var(--text) 58%,transparent); }
-  .panel .row b{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
-    font-weight:600; font-size:13px; font-variant-numeric:tabular-nums;
-    text-align:right; word-break:break-word; }
-  .panel .status{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
-    font-size:12.5px; font-weight:600; line-height:1.5;
-    color:color-mix(in srgb,var(--text) 76%,transparent); }
-  /* ---- the receipt: prints top-to-bottom when the JS flips it from
-     display:none to display:block (CSS animations restart on display change) ---- */
-  .panel .co-receipt{ position:relative; margin-top:18px; padding:16px 16px 22px;
-    background:color-mix(in srgb,var(--text) 5%,var(--bg));
-    border:1px solid color-mix(in srgb,var(--text) 22%,transparent); border-bottom:0;
-    border-radius:4px 4px 0 0;
-    animation:print-receipt 1.1s cubic-bezier(.22,.7,.3,1) both; }
-  .panel .co-receipt::before{ content:""; position:absolute; left:0; right:0; bottom:0; height:7px;
-    background-image:linear-gradient(-45deg,var(--bg) 5px,transparent 0),
-      linear-gradient(45deg,var(--bg) 5px,transparent 0);
-    background-size:14px 14px; background-repeat:repeat-x; background-position:left bottom; }
-  .panel .co-receipt::after{ content:"✓ Verified on-chain · X Layer"; display:inline-block;
-    margin-top:14px; font-family:'TillaMono',ui-monospace,Consolas,monospace;
-    font-size:10.5px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
-    padding:5px 9px; border-radius:3px;
-    background:var(--xlayer); color:var(--on-xlayer); }
-  .panel .co-receipt .co-rtitle{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
-    font-size:11px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
-    margin-bottom:4px; color:color-mix(in srgb,var(--text) 60%,transparent); }
-  @keyframes print-receipt{
-    from{ clip-path:inset(0 0 100% 0); opacity:.3; }
-    to{ clip-path:inset(0 0 0 0); opacity:1; }
-  }
-
-  /* ---------- replay control (pill, same recipe as .co-btn) ---------- */
-  .replay{ display:block; width:100%; margin-top:20px; border:0; cursor:pointer;
-    padding:14px 20px; border-radius:999px; font:inherit; font-size:14.5px; font-weight:700;
-    line-height:1.25; color:var(--on-primary); background:var(--primary);
-    transition:transform .15s ease, opacity .15s ease; }
-  .replay:hover{ transform:translateY(-1px); }
-  .replay:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
-
-  .caption{ margin-top:22px; font-size:.95rem; line-height:1.6;
+  /* ---------- compact band (hero-less) ---------- */
+  .band{ border-bottom:1px solid var(--hairline);
+    padding:calc(64px + clamp(44px,8vh,84px)) 0 clamp(36px,6vh,60px); }
+  .eyebrow{ display:inline-flex; align-items:center; gap:10px;
+    font-size:12px; font-weight:600; letter-spacing:.16em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 66%,transparent); }
-  .caption b{ color:color-mix(in srgb,var(--text) 88%,transparent); }
+  .eyebrow::before{ content:""; flex:none; width:8px; height:8px; background:var(--primary); }
+  .band h1{ margin-top:18px; max-width:24ch; text-wrap:balance;
+    font-size:clamp(2.2rem,5vw,3.6rem); font-weight:700;
+    line-height:1.05; letter-spacing:-.03em; }
+  .band-sub{ margin-top:16px; max-width:38rem; font-size:1.05rem;
+    color:color-mix(in srgb,var(--text) 74%,transparent); }
+  .cta-row{ display:flex; align-items:center; flex-wrap:wrap; gap:22px; margin-top:26px; }
+  .cta{
+    display:inline-block; padding:16px 30px; border:0; border-radius:999px; cursor:pointer;
+    text-decoration:none; font-family:inherit; line-height:inherit;
+    font-size:16px; font-weight:700; color:var(--on-primary); background:var(--primary);
+    box-shadow:0 10px 30px color-mix(in srgb,var(--primary) 32%,transparent);
+    transition:transform .15s ease, box-shadow .15s ease;
+  }
+  .cta:hover{ transform:translateY(-2px);
+    box-shadow:0 14px 36px color-mix(in srgb,var(--primary) 40%,transparent); }
+  .cta:active{ transform:translateY(0) scale(.99); }
+  .cta:disabled{ opacity:.5; cursor:default; transform:none; }
+  .auth-status{ margin-top:18px; min-height:1.3em; font-size:12.5px; font-weight:600;
+    line-height:1.5; color:color-mix(in srgb,var(--text) 72%,transparent); }
 
-  footer{ padding:26px 0; }
-  footer .wrap{ display:flex; justify-content:space-between; align-items:baseline;
-    flex-wrap:wrap; gap:10px 24px; font-size:12px;
-    color:color-mix(in srgb,var(--text) 56%,transparent); }
+  /* ---------- shared section chrome ---------- */
+  .sec{ padding:clamp(48px,8vh,88px) 0; border-bottom:1px solid var(--hairline); }
+  .sec-eyebrow{ display:inline-flex; align-items:center; gap:10px;
+    font-size:11px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .sec-eyebrow::before{ content:""; flex:none; width:8px; height:8px; background:var(--primary); }
+  .sec h2{ margin-top:16px; font-size:clamp(1.7rem,3.4vw,2.6rem); font-weight:700;
+    letter-spacing:-.02em; line-height:1.12; max-width:22ch; text-wrap:balance; }
+
+  /* ---------- the buyer library ---------- */
+  .lib-wallet{ margin-top:14px; font-size:12px; font-weight:600; word-break:break-all;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .lib-status{ display:flex; align-items:center; flex-wrap:wrap; gap:14px; margin-top:26px;
+    font-size:13px; color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .lib-status[hidden]{ display:none; }
+  .lib-status::before{ content:""; flex:none; width:8px; height:8px;
+    background:color-mix(in srgb,var(--text) 38%,transparent); }
+  .lib-retry{ padding:8px 14px; border:1px solid var(--hairline); border-radius:3px;
+    background:transparent; color:var(--text); cursor:pointer;
+    font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    transition:background-color .15s ease; }
+  .lib-retry:hover{ background-color:var(--surface); }
+  .lib-retry:active{ background-color:var(--pressed); }
+  .lib-browse{ display:inline-flex; align-items:center; gap:7px; text-decoration:none;
+    font-size:12px; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 70%,transparent); transition:color .15s ease; }
+  .lib-browse:hover{ color:var(--text); }
+  .lib-browse .arr{ display:inline-block; transition:transform .15s ease; }
+  .lib-browse:hover .arr{ transform:translateX(3px); }
+  .lib-browse[hidden]{ display:none; }
+
+  .p-list{ list-style:none; margin-top:clamp(22px,4vh,36px); }
+  .p-row{ border:1px solid var(--hairline); border-radius:4px; padding:18px 18px 20px; }
+  .p-row + .p-row{ margin-top:14px; }
+  .p-head{ display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .p-name{ font-size:16px; font-weight:700; letter-spacing:-.01em; overflow-wrap:anywhere; }
+  .p-kind{ flex:none; padding:3px 8px; border:1px solid var(--hairline); border-radius:3px;
+    font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 72%,transparent); }
+  .p-meta{ margin-top:8px; font-size:12px; font-weight:600; letter-spacing:.02em;
+    color:color-mix(in srgb,var(--text) 62%,transparent); overflow-wrap:anywhere; }
+  .p-act{ margin-top:14px; }
+  .p-dl{ display:inline-block; padding:12px 22px; border-radius:999px; text-decoration:none;
+    font-size:14px; font-weight:700; color:var(--on-primary); background:var(--primary);
+    transition:transform .15s ease; }
+  .p-dl:hover{ transform:translateY(-1px); }
+  .p-label{ margin-bottom:6px; font-size:11px; font-weight:600; letter-spacing:.12em;
+    text-transform:uppercase; color:color-mix(in srgb,var(--text) 60%,transparent); }
+  .p-secret{ font-size:13.5px; font-weight:600; word-break:break-all; white-space:pre-wrap;
+    color:var(--text); padding:10px 12px; border-radius:3px;
+    background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 20%,transparent); }
+  .p-copy{ margin-top:10px; cursor:pointer; padding:10px 14px; border-radius:3px;
+    font-size:12px; font-weight:600; color:var(--text); background:transparent;
+    border:1px solid color-mix(in srgb,var(--text) 30%,transparent);
+    transition:background-color .12s ease; }
+  .p-copy:hover{ background-color:color-mix(in srgb,var(--text) 8%,transparent); }
+  .p-note{ margin-top:10px; font-size:12px; line-height:1.5;
+    color:color-mix(in srgb,var(--text) 58%,transparent); }
+
+  /* ---------- quiet mono footer ---------- */
+  footer .wrap{ display:flex; align-items:center; justify-content:space-between; gap:14px;
+    flex-wrap:wrap; padding-top:34px; padding-bottom:42px; font-size:10.5px; font-weight:600;
+    letter-spacing:.14em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 52%,transparent); }
   .foot-nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
-  .foot-nav a{ text-decoration:none; padding:8px 0;
-    color:color-mix(in srgb,var(--text) 56%,transparent); transition:color .15s ease; }
+  .foot-nav a{ text-decoration:none; padding:8px 0; color:inherit; transition:color .15s ease; }
   .foot-nav a:hover{ color:var(--text); }
 
+  @media (max-width:640px){
+    .chip{ display:none; }
+    .rail-link.aux{ display:none; }
+    .brand{ font-size:15px; }
+  }
+  @media (max-width:480px){
+    .rail{ gap:5px; padding:0 8px; }
+    .rail-nav{ gap:5px; }
+    .rail-right{ gap:5px; }
+    .brand{ font-size:14px; gap:6px; }
+    .rail-link{ font-size:10px; letter-spacing:0; padding:14px 1px; }
+    .rail-link .arr{ display:none; }
+  }
   @media (prefers-reduced-motion: reduce){
-    .panel .co-receipt{ animation:none; }
-    *, *::before, *::after{ transition:none !important; }
-    .replay:hover{ transform:none; }
+    html{ scroll-behavior:auto; }
+    *, *::before, *::after{ transition:none !important; animation:none !important; }
   }
 </style>
 </head>
@@ -194,7 +222,7 @@
   <nav class="rail-nav" aria-label="Site">
     <a class="rail-link mono" href="/marketplace.html">Marketplace</a>
     <a class="rail-link mono aux" href="/#how">How it works</a>
-    <a class="rail-link mono" href="/library.html">Your purchases</a>
+    <a class="rail-link mono" href="/library.html" aria-current="page">Your purchases</a>
     <a class="rail-link mono aux" href="/#agents">For agents</a>
   </nav>
   <div class="rail-right">
@@ -204,34 +232,33 @@
 </header>
 
 <main id="main">
-  <div class="wrap">
-    <p class="notice mono">Preview — sample data · no payment</p>
-    <h1>Receipt preview</h1>
-    <p class="sub">Sample data — this replays the moment a real payment confirms on X&nbsp;Layer.
-      <b>No payment is made here and no funds move.</b> Nothing below is a genuine receipt.</p>
-
-    <section class="panel" aria-label="Sample checkout receipt (replay)">
-      <div class="status" id="demoStatus" aria-live="polite">Waiting for payment — verified automatically on-chain…</div>
-      <div class="co-receipt" id="demoReceipt" style="display:none">
-        <div class="co-rtitle">Purchase receipt — sample</div>
-        <div class="row"><span>Store</span><b>Aperture Coffee</b></div>
-        <div class="row"><span>Item</span><b>Ethiopia Guji — 250g</b></div>
-        <div class="row"><span>Order</span><b>demo-7b3f10a2</b></div>
-        <div class="row"><span>Paid</span><b>18.00 USDT0</b></div>
-        <div class="row"><span>Network</span><b>X Layer (chainId 196)</b></div>
-        <div class="row"><span>Sample tx</span><b>0xe3a7b1c5…6d3e5f</b></div>
-        <div class="row"><span>Delivery</span><b>Unlocked — claim with the paying wallet</b></div>
+  <section class="band" aria-labelledby="libHeadline">
+    <div class="wrap">
+      <p class="eyebrow mono">Buyer library</p>
+      <h1 id="libHeadline">Your purchases.</h1>
+      <p class="band-sub">Sign in with the wallet you paid from — signing is free and moves no
+        money. Every purchase made with that wallet appears here with fresh download links.</p>
+      <div class="cta-row">
+        <button class="cta" type="button" id="connectBtn">Connect wallet</button>
       </div>
-    </section>
+      <p class="auth-status mono" id="authStatus" aria-live="polite"></p>
+    </div>
+  </section>
 
-    <button class="replay" id="replayBtn" type="button">Replay the receipt</button>
-
-    <p class="caption">You're watching the settlement moment. In a live Tilla store this receipt
-      prints itself the instant the buyer's USDT0 transfer is <b>verified on X&nbsp;Layer</b> —
-      the chain, not a payment processor, is the source of truth, so no click and no webhook is
-      needed to fire it. This page replays that moment on demand with sample data; nothing was
-      purchased and no transaction exists.</p>
-  </div>
+  <section class="sec" id="librarySec" hidden aria-labelledby="libTitle">
+    <div class="wrap">
+      <p class="sec-eyebrow mono">Signed in</p>
+      <h2 id="libTitle">Purchases for this wallet.</h2>
+      <p class="lib-wallet mono" id="libWallet"></p>
+      <div class="lib-status mono" id="libStatus" aria-live="polite" hidden>
+        <span id="libStatusText"></span>
+        <button class="lib-retry mono" type="button" id="libRetry" hidden>Retry</button>
+        <a class="lib-browse mono" id="libBrowse" href="/marketplace.html" hidden>Browse the
+          marketplace <span class="arr" aria-hidden="true">→</span></a>
+      </div>
+      <ul class="p-list" id="libList"></ul>
+    </div>
+  </section>
 </main>
 
 <footer>
@@ -246,30 +273,245 @@
 <script>
 (function () {
   "use strict";
-  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  var receipt = document.getElementById("demoReceipt");
-  var status = document.getElementById("demoStatus");
-  var btn = document.getElementById("replayBtn");
-  var timer = null;
+  /* ---- Buyer library: the same wallet auth sequence as the checkout claim flow
+     (nonce -> personal_sign -> verify -> Bearer token), then /api/library. Every
+     merchant-controlled string (product, store slug, delivery payload, license
+     key) is inserted via createElement + textContent only, never as markup. ---- */
 
-  function settle() {
-    status.textContent = "Payment received — verified on X Layer · sample";
-    // Same trick the real checkout relies on: flipping display restarts the CSS
-    // print animation. Force a reflow between the two states so it always re-runs.
-    receipt.style.display = "none";
-    void receipt.offsetWidth;
-    receipt.style.display = "block";
+  /* ---- EIP-6963 provider discovery ---- */
+  var providers = [];
+  window.addEventListener("eip6963:announceProvider", function (e) { if (e.detail) providers.push(e.detail); });
+  try { window.dispatchEvent(new Event("eip6963:requestProvider")); } catch (e) {}
+
+  function pickProvider() {
+    for (var i = 0; i < providers.length; i++) {
+      var rdns = ((providers[i].info && providers[i].info.rdns) || "").toLowerCase();
+      if (rdns.indexOf("okex") !== -1 || rdns.indexOf("okx") !== -1) return providers[i].provider;
+    }
+    if (window.okxwallet) return window.okxwallet;
+    if (providers.length) return providers[0].provider;
+    if (window.ethereum) return window.ethereum;
+    return null;
   }
-  function play() {
-    if (timer) clearTimeout(timer);
-    receipt.style.display = "none";
-    status.textContent = "Waiting for payment — verified automatically on-chain…";
-    if (reduce) { settle(); return; } // reduced motion: receipt appears instantly
-    timer = setTimeout(settle, 600);
+  function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
+
+  var connectBtn = document.getElementById("connectBtn");
+  var authStatus = document.getElementById("authStatus");
+  var librarySec = document.getElementById("librarySec");
+  var libWallet = document.getElementById("libWallet");
+  var libStatus = document.getElementById("libStatus");
+  var libStatusText = document.getElementById("libStatusText");
+  var libRetry = document.getElementById("libRetry");
+  var libBrowse = document.getElementById("libBrowse");
+  var libList = document.getElementById("libList");
+  if (!connectBtn || !authStatus || !librarySec || !libWallet || !libStatus ||
+      !libStatusText || !libRetry || !libBrowse || !libList) return;
+
+  var sessionToken = null;
+
+  function setAuth(msg) { authStatus.textContent = msg; }
+  function showLibStatus(text, canRetry, canBrowse) {
+    libStatusText.textContent = text;
+    libRetry.hidden = !canRetry;
+    libBrowse.hidden = !canBrowse;
+    libStatus.hidden = false;
+  }
+  function shortAddr(a) {
+    a = String(a);
+    return a.length > 12 ? a.slice(0, 6) + "…" + a.slice(-4) : a;
+  }
+  function money(a) {
+    if (typeof a !== "number" || !isFinite(a)) return "0";
+    var s = a.toFixed(6);
+    while (s.charAt(s.length - 1) === "0" && s.charAt(s.length - 2) !== ".") s = s.slice(0, -1);
+    return s;
+  }
+  function fmtDate(iso) {
+    return (typeof iso === "string" && iso.length >= 10) ? iso.slice(0, 10) : "";
   }
 
-  btn.addEventListener("click", play);
-  play(); // auto-play once on load
+  /* ---- copy (clipboard API with execCommand fallback) ---- */
+  function execCopy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      var ok = document.execCommand("copy"); document.body.removeChild(ta); return ok;
+    } catch (e) { return false; }
+  }
+  async function copyText(text, btn) {
+    var ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) { ok = execCopy(text); }
+    if (ok && btn) {
+      var orig = btn.textContent;
+      btn.textContent = "Copied";
+      setTimeout(function () { btn.textContent = orig; }, 1500);
+    }
+  }
+
+  /* ---- sign-in: nonce -> personal_sign -> verify -> Bearer token ---- */
+  async function connectWallet() {
+    connectBtn.disabled = true;
+    var provider = pickProvider();
+    if (!provider) {
+      setAuth("No wallet detected — install OKX Wallet or open this page in your wallet's browser.");
+      connectBtn.disabled = false; return;
+    }
+    var account;
+    try {
+      var accts = await provider.request({ method: "eth_requestAccounts" });
+      account = accts && accts[0];
+    } catch (e) {
+      setAuth(isReject(e) ? "Connection declined — click connect to try again." : "Could not connect wallet — please retry.");
+      connectBtn.disabled = false; return;
+    }
+    if (!account) {
+      setAuth("The wallet returned no account — please retry.");
+      connectBtn.disabled = false; return;
+    }
+    var message;
+    try {
+      var nr = await fetch("/api/auth/nonce", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: account }) });
+      if (!nr.ok) throw new Error("nonce");
+      message = (await nr.json()).message;
+    } catch (e) {
+      setAuth("Could not start sign-in — please retry.");
+      connectBtn.disabled = false; return;
+    }
+    setAuth("Check your wallet — the signature is free and moves no money.");
+    var signature;
+    try {
+      signature = await provider.request({ method: "personal_sign", params: [message, account] });
+    } catch (e) {
+      setAuth(isReject(e) ? "Signature declined — click connect to try again." : "Could not sign — please retry.");
+      connectBtn.disabled = false; return;
+    }
+    try {
+      var vr = await fetch("/api/auth/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ address: account, signature: signature }) });
+      if (vr.status === 401) {
+        setAuth("Signature could not be verified — click connect to try again.");
+        connectBtn.disabled = false; return;
+      }
+      if (!vr.ok) throw new Error("verify");
+      sessionToken = (await vr.json()).session_token;
+    } catch (e) {
+      setAuth("Could not verify signature — please retry.");
+      connectBtn.disabled = false; return;
+    }
+    connectBtn.hidden = true;
+    setAuth("Signed in as " + shortAddr(account) + ".");
+    loadLibrary();
+  }
+
+  /* ---- the library itself ---- */
+  async function loadLibrary() {
+    librarySec.hidden = false;
+    libList.textContent = "";
+    showLibStatus("Loading your purchases…", false, false);
+    var data;
+    try {
+      var r = await fetch("/api/library", { headers: { "Authorization": "Bearer " + sessionToken } });
+      if (r.status === 401) {
+        showLibStatus("Session expired — connect your wallet again.", false, false);
+        connectBtn.hidden = false; connectBtn.disabled = false;
+        setAuth("");
+        return;
+      }
+      if (!r.ok) throw new Error("library");
+      data = await r.json();
+    } catch (e) {
+      showLibStatus("Couldn't load your purchases —", true, false);
+      return;
+    }
+    if (typeof data.wallet === "string") libWallet.textContent = data.wallet;
+    var list = Array.isArray(data.purchases) ? data.purchases : [];
+    if (!list.length) {
+      showLibStatus("No purchases with this wallet yet —", false, true);
+      return;
+    }
+    libStatus.hidden = true;
+    for (var i = 0; i < list.length; i++) libList.appendChild(row(list[i]));
+  }
+
+  function row(item) {
+    var li = document.createElement("li");
+    li.className = "p-row";
+
+    var head = document.createElement("div");
+    head.className = "p-head";
+    var name = document.createElement("span");
+    name.className = "p-name";
+    name.textContent = String(item.product || "Purchase");
+    head.appendChild(name);
+    var kind = (item.kind === "file" || item.kind === "license") ? item.kind : "text";
+    var kindEl = document.createElement("span");
+    kindEl.className = "p-kind mono";
+    kindEl.textContent = kind;
+    head.appendChild(kindEl);
+    li.appendChild(head);
+
+    var meta = document.createElement("p");
+    meta.className = "p-meta mono";
+    var bits = [];
+    if (item.store_slug) bits.push("store /" + String(item.store_slug));
+    if (typeof item.amount === "number") bits.push(money(item.amount) + " USDT0");
+    var dt = fmtDate(item.paid_at);
+    if (dt) bits.push("paid " + dt);
+    if (item.order_id) bits.push("order " + String(item.order_id));
+    meta.textContent = bits.join(" · ");
+    li.appendChild(meta);
+
+    var act = document.createElement("div");
+    act.className = "p-act";
+    if (kind === "file") {
+      if (typeof item.download_url === "string" && item.download_url) {
+        var a = document.createElement("a");
+        a.className = "p-dl";
+        a.href = item.download_url;
+        a.rel = "noopener";
+        a.textContent = "Download your file";
+        act.appendChild(a);
+        var fresh = document.createElement("p");
+        fresh.className = "p-note";
+        fresh.textContent = "Fresh link minted for this visit — it expires and each use counts against the download limit.";
+        act.appendChild(fresh);
+      } else {
+        var no = document.createElement("p");
+        no.className = "p-note";
+        no.textContent = "No download link available — the download limit may be reached or access revoked. Keep your order id; the merchant can redeliver.";
+        act.appendChild(no);
+      }
+    } else if (kind === "license" && item.license_key) {
+      var lbl = document.createElement("p");
+      lbl.className = "p-label";
+      lbl.textContent = "Your license key";
+      act.appendChild(lbl);
+      var keyEl = document.createElement("div");
+      keyEl.className = "p-secret mono";
+      keyEl.textContent = String(item.license_key);
+      act.appendChild(keyEl);
+      var cb = document.createElement("button");
+      cb.type = "button";
+      cb.className = "p-copy mono";
+      cb.textContent = "Copy license";
+      cb.onclick = function () { copyText(String(item.license_key), cb); };
+      act.appendChild(cb);
+    } else {
+      var dl = document.createElement("p");
+      dl.className = "p-label";
+      dl.textContent = "Your delivery";
+      act.appendChild(dl);
+      var body = document.createElement("div");
+      body.className = "p-secret mono";
+      body.textContent = String(item.delivery || "Delivered — thank you!");
+      act.appendChild(body);
+    }
+    li.appendChild(act);
+    return li;
+  }
+
+  connectBtn.addEventListener("click", connectWallet);
+  libRetry.addEventListener("click", loadLibrary);
 })();
 </script>
 </body>
