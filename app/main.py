@@ -76,6 +76,7 @@ from app.models import (
     Merchant,
     Order,
     Product,
+    Review,
     ScreeningReceipt,
     Store,
     log_event,
@@ -1493,6 +1494,71 @@ def library_evaluate(
     )
     session.commit()
     return {"order_id": order.id, "eval_status": order.eval_status}
+
+
+class ReviewBody(BaseModel):
+    order_id: str = Field(min_length=1, max_length=32)
+    rating: StrictInt = Field(ge=1, le=5)
+    body: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/api/library/review")
+@limiter.limit("30/minute")
+def library_review(
+    request: Request, body: ReviewBody, session: Session = Depends(get_session)
+):
+    """A verified buyer writes ONE review for a delivered order they paid for (Phase
+    3). Gated by the same wallet-signature session as /api/library, and un-fakeable:
+    the order must exist, be delivered (TERMINAL_DELIVERED), and its on-chain payer
+    must equal the authenticated wallet — else an opaque 404 (no order oracle). The
+    body is Warden-screened before insert (BLOCK -> 422, unavailable -> 503) so no
+    unscreened text is stored; UNIQUE(order_id) makes a second review a 409.
+    Reputation-only: it never moves funds."""
+    if not config.SIGNING_KEY:
+        raise HTTPException(503, "sign-in not configured")
+    try:
+        wallet = delivery.load_session_token(_bearer(request))
+    except SignatureExpired:
+        raise HTTPException(401, "session expired") from None
+    except BadSignature:
+        raise HTTPException(401, "invalid session") from None
+    order = session.get(Order, body.order_id)
+    if (
+        order is None
+        or order.from_addr is None
+        or order.from_addr.lower() != wallet
+        or order.status not in checkout.TERMINAL_DELIVERED
+    ):
+        raise HTTPException(404, "order not found")
+    text_body = body.body.strip()
+    if not text_body:
+        raise HTTPException(422, "review body is empty")
+    # Screen fail-closed BEFORE any row is written: BLOCK -> 422, unavailable -> 503.
+    try:
+        outcome = screen(text_body)
+    except ScreeningBlocked as exc:
+        raise HTTPException(422, "content did not pass safety screening") from exc
+    if outcome.status != "allow":
+        raise HTTPException(503, "content screening temporarily unavailable")
+    review = Review(
+        store_id=order.store_id,
+        product_id=order.product_id,
+        order_id=order.id,
+        from_addr=order.from_addr.lower(),
+        rating=body.rating,
+        body=text_body,
+    )
+    try:
+        with session.begin_nested():
+            session.add(review)
+    except IntegrityError:
+        # UNIQUE(order_id): this completed order is already reviewed.
+        raise HTTPException(409, "order already reviewed") from None
+    log_event(
+        session, "api", "order.reviewed", store_id=order.store_id, order_id=order.id
+    )
+    session.commit()
+    return {"order_id": order.id, "rating": review.rating}
 
 
 class WaitlistBody(BaseModel):

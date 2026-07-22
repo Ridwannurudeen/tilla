@@ -56,6 +56,7 @@ from app.models import (
     Entitlement,
     Order,
     Product,
+    Review,
     Store,
     log_event,
 )
@@ -1735,6 +1736,51 @@ def feed_json(
     return JSONResponse(body, headers=_AGENT_HEADERS)
 
 
+@router.get("/s/{slug}/reviews")
+@limiter.limit("60/minute")
+def store_reviews(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    limit: int = 20,
+    session: Session = Depends(get_session),
+):
+    """Public, screened verified-buyer reviews for a store, newest first, plus the
+    aggregate (avg rating + count). Every listed body was Warden-screened before it
+    was stored, so nothing unscreened is ever served; the reviewer wallet is surfaced
+    only in an abbreviated 0x1234…cdef form (no full-wallet dump). JSON-only surface
+    (no HTML context to escape), 404 for any non-live store."""
+    store = _live_store(session, slug)
+    if store is None:  # 404 for ANY non-live store (never leak pending)
+        raise HTTPException(404, "store not found")
+    limit = max(1, min(limit, 100))
+    ravg, rcount = session.execute(
+        select(func.avg(Review.rating), func.count(Review.id)).where(
+            Review.store_id == store.id
+        )
+    ).one()
+    rows = session.scalars(
+        select(Review)
+        .where(Review.store_id == store.id)
+        .order_by(Review.created_at.desc(), Review.id.desc())
+        .limit(limit)
+    ).all()
+    body = {
+        "slug": store.slug,
+        "review_avg": round(float(ravg), 2) if ravg is not None else None,
+        "review_count": rcount or 0,
+        "reviews": [
+            {
+                "rating": r.rating,
+                "body": r.body,
+                "buyer": f"{r.from_addr[:6]}…{r.from_addr[-4:]}",
+                "created_at": r.created_at.isoformat() + "Z",
+            }
+            for r in rows
+        ],
+    }
+    return JSONResponse(body, headers=_AGENT_HEADERS)
+
+
 @router.get("/s/{slug}/llms.txt")
 @limiter.limit("60/minute")
 def llms_txt(
@@ -1873,7 +1919,17 @@ def _trust_tier(sold: int, success_rate: float | None) -> str:
 
 
 def _discovery_row(
-    store: Store, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending
+    store: Store,
+    pmin,
+    pmax,
+    sold,
+    buyers,
+    last_sale,
+    refunded,
+    rejected,
+    pending,
+    review_avg,
+    review_count,
 ) -> dict:
     # Reputation signals an agent buyer can rank on, computed from terminal orders:
     # sold_count = delivered count; success_rate = good / (good + rejected + refunded)
@@ -1881,6 +1937,7 @@ def _discovery_row(
     # unique_buyer_count = distinct payer addresses; last_sale_at = most recent delivery;
     # pending_eval_count = fresh sales inside the dispute window (not yet counted);
     # disputed_count = buyer-rejected deliveries; trust_tier = the graduation ladder above.
+    # review_avg/review_count = Phase 3 verified-buyer reviews (one per delivered order).
     # Abandoned/expired checkouts are the buyer's doing, not the store's, so excluded.
     sold = sold or 0
     refunded = refunded or 0
@@ -1909,6 +1966,8 @@ def _discovery_row(
         "pending_eval_count": pending,
         "disputed_count": rejected,
         "trust_tier": _trust_tier(good, success_rate),
+        "review_avg": round(float(review_avg), 2) if review_avg is not None else None,
+        "review_count": review_count or 0,
         "created_at": store.created_at.isoformat() + "Z",
     }
 
@@ -1959,6 +2018,17 @@ def _discovery_rows(
         .group_by(Product.store_id)
         .subquery()
     )
+    # Phase 3 verified-buyer reviews: avg rating + count per store. Un-fakeable — a
+    # review row only exists for a delivered order paid by the reviewer wallet.
+    reviews_sq = (
+        select(
+            Review.store_id.label("sid"),
+            func.avg(Review.rating).label("ravg"),
+            func.count(Review.id).label("rcount"),
+        )
+        .group_by(Review.store_id)
+        .subquery()
+    )
     sold_c = func.coalesce(metrics_sq.c.sold, 0)
     rejected_c = func.coalesce(metrics_sq.c.rejected, 0)
     pending_c = func.coalesce(metrics_sq.c.pending, 0)
@@ -1992,23 +2062,21 @@ def _discovery_rows(
             metrics_sq.c.refunded,
             metrics_sq.c.rejected,
             metrics_sq.c.pending,
+            reviews_sq.c.ravg,
+            reviews_sq.c.rcount,
         )
         .outerjoin(price_sq, price_sq.c.sid == Store.id)
         .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
+        .outerjoin(reviews_sq, reviews_sq.c.sid == Store.id)
         # Phase 1.7: hidden (sandbox) stores stay out of bulk discovery.
         .where(Store.status == "live", Store.visibility == "public", *where_clauses)
         .order_by(*order_by)
         .limit(limit)
         .offset(offset)
     )
-    return [
-        _discovery_row(
-            s, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending
-        )
-        for s, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending in (
-            session.execute(stmt).all()
-        )
-    ]
+    # The SELECT column order matches _discovery_row's parameter order, so each Row
+    # (row[0]=Store, then the scalar aggregates) unpacks straight into it.
+    return [_discovery_row(*row) for row in session.execute(stmt).all()]
 
 
 @router.get("/discovery/resources")

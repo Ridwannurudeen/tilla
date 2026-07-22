@@ -682,6 +682,64 @@ def test_migration_0013_additive_and_index_survives(tmp_path):
     assert r.returncode == 0, r.stderr
 
 
+def test_migration_0025_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m25.db"
+    r = _alembic(db, "upgrade", "0024_store_visibility")
+    assert r.returncode == 0, r.stderr
+
+    # seed a delivered order against the 0024 schema (no reviews table yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, expected_micro,"
+        " paid_micro, overpaid_micro, status, created_at)"
+        " VALUES ('m25ord',1,'0xabc',9000000,9000123,9000123,0,'delivered','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    assert "reviews" in _table_names(db)
+
+    con = sqlite3.connect(db)
+    rddl = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='reviews'"
+    ).fetchone()[0]
+    assert "uq_reviews_order_id" in rddl  # one review per completed order, ever
+    assert "ck_reviews_rating" in rddl  # rating bounded 1..5
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ix_reviews_store_id" in idx
+    # a new table never touches orders — the M3 partial unique index is intact
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    # up-down-up: the partial index must survive the downgrade + re-upgrade
+    r = _alembic(db, "downgrade", "0024_store_visibility")
+    assert r.returncode == 0, r.stderr
+    assert "reviews" not in _table_names(db)
+    con = sqlite3.connect(db)
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx  # untouched by the downgrade too
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    assert "reviews" in _table_names(db)
+
+
 def test_fresh_schema_has_marketplace_and_receipts():
     # Fresh create_all (conftest) must match the migrated schema: the new column +
     # table exist on the in-process engine used by the app/tests.
