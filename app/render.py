@@ -185,8 +185,17 @@ def render_og(content: Mapping, slug: str) -> str:
     """Render the per-store Open Graph card (SVG, 1200x630). Served statically at
     /s/<slug>/og.svg and referenced from og:image / twitter:image. Autoescaped
     like the themes, so untrusted copy stays inert inside the SVG text nodes."""
+    store_name = str(content.get("store_name", "My Store"))
+    # Monogram for the OG card: rsvg-convert (the og.png rasterizer) has no
+    # colour-emoji font, so an arbitrary merchant emoji can rasterise to tofu.
+    # The first alphanumeric letter of the brand always renders (DejaVu), so the
+    # card's identity mark is never broken.
+    store_initial = (next((c for c in store_name if c.isalnum()), "").upper() or "◆")[
+        :1
+    ]
     ctx = {
-        "STORE_NAME": str(content.get("store_name", "My Store")),
+        "STORE_NAME": store_name,
+        "STORE_INITIAL": store_initial,
         "TAGLINE": str(content.get("tagline", "")),
         "PRODUCT_NAME": str(content.get("product_name", "")),
         "PRICE": str(content.get("price_usdt", 0)),

@@ -2,16 +2,22 @@
   <!-- Proof-of-Purchase share card. Rasterized by og:image consumers with no
        external resources: generic font stacks only, no scripts, no refs.
        Rail discipline: ground/ink monochrome; palette only on the block-print
-       motif + price accent; lime #BCFF2F only on the chain chip. -->
+       marks (monogram tile + mosaic) + price accent; lime #BCFF2F only on the
+       chain chip. -->
 
   <!-- ground -->
   <rect width="1200" height="630" fill="{{C_BG}}"/>
   <!-- monochrome ink frame -->
   <rect x="30" y="30" width="1140" height="570" fill="none" stroke="{{C_TEXT}}" stroke-opacity="0.18" stroke-width="2"/>
 
-  <!-- block-print mark: emoji in a bordered square -->
-  <rect x="76" y="76" width="76" height="76" rx="3" fill="{{C_TEXT}}" fill-opacity="0.05" stroke="{{C_TEXT}}" stroke-opacity="0.28"/>
-  <text x="114" y="128" font-size="40" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">{{EMOJI}}</text>
+  <!-- monogram: brand initial on a block-print tile with an offset accent
+       impression (misregistered second pass). Palette = merchandise mark;
+       C_ON_PRIMARY keeps the letter legible on any primary. -->
+  <g>
+    <rect x="84" y="84" width="76" height="76" fill="{{C_ACCENT}}" fill-opacity="0.45"/>
+    <rect x="76" y="76" width="76" height="76" fill="{{C_PRIMARY}}"/>
+    <text x="114" y="131" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="46" font-weight="800" text-anchor="middle" fill="{{C_ON_PRIMARY}}">{{STORE_INITIAL}}</text>
+  </g>
 
   <!-- chain chip: the ONLY lime on the card, always black ink on it -->
   <rect x="724" y="86" width="400" height="56" rx="100" fill="#BCFF2F"/>
