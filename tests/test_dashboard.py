@@ -589,3 +589,44 @@ def test_merchant_product_crud_is_idor_gated(make_store, tmp_path, monkeypatch):
         ).status_code
         == 404
     )
+
+
+def test_merchant_list_deliverables_metadata_only_no_secret(make_store):
+    from sqlalchemy import select
+
+    from app.models import Deliverable, Product, Store
+
+    acct = Account.create()
+    _owned_store(acct, "delui", make_store)
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        sid = s.scalar(select(Store.id).where(Store.slug == "delui"))
+        pid = s.scalar(select(Product.id).where(Product.store_id == sid))
+        s.add(Deliverable(store_id=sid, kind="text", payload="SUPER SECRET", active=True))
+        s.add(
+            Deliverable(
+                store_id=sid, product_id=pid, kind="license",
+                max_activations=3, active=True,
+            )
+        )
+        s.commit()
+    r = client.get("/api/merchant/stores/delui/deliverables", headers=_auth(tok))
+    assert r.status_code == 200
+    dels = r.json()["deliverables"]
+    kinds = {(d["kind"], d["product_id"]) for d in dels}
+    assert ("text", None) in kinds and ("license", pid) in kinds
+    # the text deliverable's secret payload is NEVER exposed
+    assert "SUPER SECRET" not in r.text
+    assert all("payload" not in d for d in dels)
+
+
+def test_merchant_list_deliverables_idor_gated(make_store):
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "delui2", make_store)
+    other_tok = _merchant_token(other)
+    assert (
+        client.get(
+            "/api/merchant/stores/delui2/deliverables", headers=_auth(other_tok)
+        ).status_code
+        == 404
+    )

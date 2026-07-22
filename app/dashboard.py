@@ -44,6 +44,7 @@ from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.screening import ScreeningBlocked, screen
 from app.models import (
+    Deliverable,
     EmailSubscriber,
     EventLog,
     Merchant,
@@ -1205,6 +1206,39 @@ def merchant_edit_product(
         "name": product.name,
         "price_usdt": product.price_micro / 1e6,
         "active": product.active,
+    }
+
+
+@router.get("/api/merchant/stores/{slug}/deliverables")
+@limiter.limit("30/minute")
+def merchant_list_deliverables(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """The store's active deliverables as METADATA only — never the text secret
+    (`payload`) or file bytes. product_id NULL is the store-level default; a set
+    product_id is that product's deliverable. Lets the dashboard show what a buyer
+    receives per product and which products still fall back to the default."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    rows = session.scalars(
+        select(Deliverable)
+        .where(Deliverable.store_id == store.id, Deliverable.active.is_(True))
+        .order_by(Deliverable.id)
+    ).all()
+    return {
+        "deliverables": [
+            {
+                "id": d.id,
+                "product_id": d.product_id,
+                "kind": d.kind,
+                "file_name": d.file_name,
+                "max_downloads": d.max_downloads,
+                "max_activations": d.max_activations,
+            }
+            for d in rows
+        ]
     }
 
 

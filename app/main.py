@@ -1125,7 +1125,12 @@ async def create_deliverable(
         data={"kind": deliverable.kind, "deliverable_id": deliverable.id},
     )
     session.commit()
-    resp = {"id": deliverable.id, "kind": deliverable.kind, "active": True}
+    resp = {
+        "id": deliverable.id,
+        "product_id": deliverable.product_id,
+        "kind": deliverable.kind,
+        "active": True,
+    }
     if deliverable.kind == "file":
         resp.update(
             file_name=deliverable.file_name,
