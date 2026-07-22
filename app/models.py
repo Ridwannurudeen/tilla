@@ -56,6 +56,10 @@ class Store(Base):
             "('unlisted','prepared','submitted','listed','rejected')",
             name="ck_stores_marketplace_status",
         ),
+        # Phase 4 custom domains: one hostname → one store, so a verified domain can
+        # never be hijacked to a second store. SQLite treats the many unclaimed NULLs
+        # as distinct, so unclaimed stores are unaffected.
+        UniqueConstraint("custom_domain", name="uq_stores_custom_domain"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -83,6 +87,19 @@ class Store(Base):
     # the "clears a threshold" gate — and the owner can toggle it from the dashboard.
     visibility: Mapped[str] = mapped_column(
         String(10), nullable=False, default="public", server_default="public"
+    )
+    # Phase 4 custom domains (app-side up to the DNS/TLS/nginx gate). A merchant
+    # CLAIMS a hostname for their store; ownership is proven by a DNS TXT challenge.
+    # custom_domain is the validated, lowercased hostname (NULL until claimed);
+    # custom_domain_token is the per-claim challenge secret the owner publishes as a
+    # TXT record; custom_domain_verified_at is set ONLY once the TXT lookup matched.
+    # FAIL-CLOSED: host-based resolution serves a store only when verified_at is set,
+    # so an unverified (or merely claimed) domain serves nothing. The operator still
+    # provisions server_name + TLS out-of-band (docs/runbooks/custom-domains.md).
+    custom_domain: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    custom_domain_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    custom_domain_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
     )
     delivery: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

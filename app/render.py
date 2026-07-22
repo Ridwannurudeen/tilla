@@ -123,14 +123,23 @@ def _dna_ctx(content: Mapping) -> dict:
     }
 
 
-def _seo_ctx(content: Mapping, slug: str) -> dict:
+def _seo_ctx(content: Mapping, slug: str, base_url: str | None = None) -> dict:
     """Canonical URL, OG image path, meta description and a schema.org/Product
     JSON-LD object for the theme <head>. The JSON-LD is emitted with `| tojson`
     (which unicode-escapes `<`, `>`, `&`) so untrusted copy can't break out of
-    the <script type="application/ld+json"> block."""
-    base = PUBLIC_BASE_URL.rstrip("/")
-    canonical = f"{base}/s/{slug}/"
-    og_image = f"{base}/s/{slug}/og.png"
+    the <script type="application/ld+json"> block.
+
+    ``base_url`` overrides the platform base for a Phase 4 custom-domain render: the
+    store is served at the domain root, so canonical/OG resolve to ``https://<domain>/``
+    (and its ``og.png``), never the ``/s/<slug>/`` platform path."""
+    if base_url is not None:
+        base = base_url.rstrip("/")
+        canonical = f"{base}/"
+        og_image = f"{base}/og.png"
+    else:
+        base = PUBLIC_BASE_URL.rstrip("/")
+        canonical = f"{base}/s/{slug}/"
+        og_image = f"{base}/s/{slug}/og.png"
     store_name = str(content.get("store_name", "My Store"))
     description = str(content.get("hero_subcopy") or content.get("tagline") or "")
     product_name = str(content.get("product_name", "")) or store_name
@@ -204,10 +213,13 @@ def _products_ctx(content: Mapping) -> dict:
     return {"PRODUCTS": products}
 
 
-def _store_ctx(content: Mapping, addr: str, slug: str) -> dict:
+def _store_ctx(
+    content: Mapping, addr: str, slug: str, base_url: str | None = None
+) -> dict:
     """The full 15-token store-theme context (+ additive palette/SEO). Shared by
     :func:`render` and the M15.2 install-time :func:`render_source` check so a
-    candidate theme is exercised with the exact context a live one receives."""
+    candidate theme is exercised with the exact context a live one receives.
+    ``base_url`` (Phase 4 custom domains) re-points canonical/OG at the domain root."""
     return {
         "SLUG": slug,
         "STORE_NAME": str(content.get("store_name", "My Store")),
@@ -229,15 +241,22 @@ def _store_ctx(content: Mapping, addr: str, slug: str) -> dict:
         **_palette_ctx(content),
         **_dna_ctx(content),
         **_products_ctx(content),
-        **_seo_ctx(content, slug),
+        **_seo_ctx(content, slug, base_url),
     }
 
 
-def render(content: Mapping, addr: str, slug: str, theme: str = "original.html") -> str:
+def render(
+    content: Mapping,
+    addr: str,
+    slug: str,
+    theme: str = "original.html",
+    base_url: str | None = None,
+) -> str:
     """Render a store theme from generator output. `content` is untrusted
-    (LLM-produced); `addr`/`slug` are our own already-validated values."""
+    (LLM-produced); `addr`/`slug` are our own already-validated values. ``base_url``
+    (Phase 4 custom domains) re-points canonical/OG at ``https://<domain>/``."""
     template = _env.get_template(theme)
-    return template.render(**_store_ctx(content, addr, slug))
+    return template.render(**_store_ctx(content, addr, slug, base_url))
 
 
 def render_source(source: str, content: Mapping, addr: str, slug: str) -> str:

@@ -36,6 +36,7 @@ from app import (
     checkout,
     config,
     delivery,
+    domains,
     engine,
     refunds,
     render,
@@ -294,6 +295,152 @@ def merchant_store_visibility(
     store.visibility = body.visibility
     session.commit()
     return {"slug": store.slug, "visibility": store.visibility}
+
+
+class CustomDomainBody(BaseModel):
+    domain: str = Field(min_length=1, max_length=253)
+
+
+def _custom_domain_view(store: Store) -> dict:
+    """The owner-facing claim state + the exact DNS TXT record to publish. ``verified``
+    is the fail-closed gate host resolution reads; the record is echoed so the merchant
+    can copy it verbatim (rendered via textContent in the dashboard, never innerHTML)."""
+    domain = store.custom_domain
+    token = store.custom_domain_token
+    verified = store.custom_domain_verified_at is not None
+    record = None
+    if domain and token and not verified:
+        record = {
+            "type": "TXT",
+            "name": domains.challenge_name(domain),
+            "value": domains.txt_record_value(token),
+        }
+    return {
+        "slug": store.slug,
+        "custom_domain": domain,
+        "verified": verified,
+        "verified_at": (
+            store.custom_domain_verified_at.isoformat() if verified else None
+        ),
+        "dns_record": record,
+    }
+
+
+@router.get("/api/merchant/stores/{slug}/custom-domain")
+@limiter.limit("60/minute")
+def merchant_get_custom_domain(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """The store's custom-domain claim state and the DNS TXT record to publish (when
+    unverified). Owner-gated (404 for a non-owned/unknown slug)."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    return _custom_domain_view(store)
+
+
+@router.post("/api/merchant/stores/{slug}/custom-domain")
+@limiter.limit("10/minute")
+def merchant_claim_custom_domain(
+    request: Request,
+    body: CustomDomainBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Claim a custom domain for the store. The domain is validated as a strict public
+    hostname (422 on anything else), a fresh DNS TXT challenge token is minted, and the
+    claim is stored UNVERIFIED — host resolution serves nothing until the owner publishes
+    the record and calls verify. One hostname maps to one store: a domain already held by
+    another store is 409 (no hijack). Re-claiming (same or new domain) resets the token
+    and clears any prior verification. Owner-gated (404)."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    try:
+        domain = domains.normalize_domain(body.domain)
+    except domains.DomainError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    taken = session.scalar(
+        select(Store).where(Store.custom_domain == domain, Store.id != store.id)
+    )
+    if taken is not None:
+        raise HTTPException(409, "domain is already claimed by another store")
+    store.custom_domain = domain
+    store.custom_domain_token = domains.new_token()
+    store.custom_domain_verified_at = None
+    log_event(
+        session,
+        "merchant",
+        "custom_domain.claimed",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "domain": domain},
+    )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        # A concurrent claim of the same domain won the unique index at commit.
+        session.rollback()
+        raise HTTPException(409, "domain is already claimed by another store") from exc
+    return _custom_domain_view(store)
+
+
+@router.post("/api/merchant/stores/{slug}/custom-domain/verify")
+@limiter.limit("10/minute")
+def merchant_verify_custom_domain(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Check the DNS TXT challenge for the claimed domain (read-only DNS lookup, no
+    connection to the domain). On a match the domain is marked verified and host
+    resolution begins serving the store on it; on no match it stays unverified (422,
+    fail-closed). Owner-gated (404); 409 when no domain is claimed."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    if not store.custom_domain or not store.custom_domain_token:
+        raise HTTPException(409, "no custom domain claimed")
+    if store.custom_domain_verified_at is not None:
+        return _custom_domain_view(store)
+    if not domains.verify_domain(store.custom_domain, store.custom_domain_token):
+        raise HTTPException(
+            422, "TXT challenge record not found yet — add it and retry"
+        )
+    store.custom_domain_verified_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    log_event(
+        session,
+        "merchant",
+        "custom_domain.verified",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "domain": store.custom_domain},
+    )
+    session.commit()
+    return _custom_domain_view(store)
+
+
+@router.delete("/api/merchant/stores/{slug}/custom-domain")
+@limiter.limit("10/minute")
+def merchant_delete_custom_domain(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Release the store's custom domain (clears the claim, token, and verification, so
+    host resolution stops serving it). Idempotent. Owner-gated (404)."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    if store.custom_domain is not None:
+        store.custom_domain = None
+        store.custom_domain_token = None
+        store.custom_domain_verified_at = None
+        log_event(
+            session,
+            "merchant",
+            "custom_domain.released",
+            store_id=store.id,
+            data={"merchant_id": merchant.id},
+        )
+        session.commit()
+    return {"slug": store.slug, "custom_domain": None, "verified": False}
 
 
 class StoreCopyBody(BaseModel):

@@ -26,6 +26,10 @@ dependencies = [
     "sqlalchemy==2.0.51",
     "alembic==1.18.5",
     "itsdangerous==2.2.0",
+    # Phase 4 custom domains: DNS TXT ownership challenge lookups (read-only, no
+    # connection to the claimed host). Already present transitively; pinned here
+    # because app/domains.py imports it on the request path.
+    "dnspython==2.8.0",
     "python-multipart==0.0.32",
     "eth-account==0.13.7",
     # M11 EAS receipt attester. Imported LAZILY inside app/attest.py's enabled path
