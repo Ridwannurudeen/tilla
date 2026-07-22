@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tilla — storefronts for the agent economy</title>
-<meta name="description" content="Tilla turns a one-line description into a live storefront with non-custodial USDT0 checkout on OKX X Layer — buyable by humans and AI agents.">
+<title>Tilla · Marketplace — every storefront, one ledger</title>
+<meta name="description" content="Browse every live Tilla storefront in one place — searchable, most-sold first, buyable by humans on the page and AI agents over x402, settled in USDT0 on OKX X Layer.">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Tilla — storefronts for the agent economy">
-<meta property="og:description" content="One line about what you sell becomes a live storefront with crypto checkout on OKX X Layer — buyable by humans and AI agents.">
+<meta property="og:title" content="Tilla · Marketplace — every storefront, one ledger">
+<meta property="og:description" content="Every live Tilla storefront, one ledger — buyable by humans and AI agents, settled in USDT0 on OKX X Layer.">
 <meta name="theme-color" content="#0B0B12">
 <!-- Fonts: Space Grotesk ("TillaGrotesk") + Geist Mono ("TillaMono"), both SIL OFL-1.1,
      subsetted and inlined as data URIs. Full provenance, source, and license verdicts are
@@ -240,6 +240,63 @@
     transition:opacity .6s ease-out, transform .6s cubic-bezier(.2,.65,.25,1); }
   .motion .reveal.in{ opacity:1; transform:none; }
 
+  /* ---------- marketplace directory (live, searchable) ---------- */
+  .market-bar{ display:flex; align-items:center; justify-content:space-between; gap:16px 22px;
+    flex-wrap:wrap; margin-top:clamp(30px,5vh,52px); padding:16px 0;
+    border-top:1px solid var(--hairline); border-bottom:1px solid var(--hairline); }
+  .market-field{ display:flex; align-items:center; gap:12px; flex:1 1 280px; max-width:34rem; }
+  .market-label{ flex:none; font-size:11px; font-weight:600; letter-spacing:.14em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 58%,transparent); }
+  .market-input{ flex:1; min-width:0; padding:10px 13px; border:1px solid var(--hairline);
+    border-radius:3px; background:transparent; color:var(--text);
+    font-family:inherit; font-size:14px; font-weight:600; letter-spacing:.01em;
+    transition:border-color .15s ease; }
+  .market-input::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
+  .market-input:hover{ border-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  .market-input:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  .market-count{ font-size:12px; font-weight:600; letter-spacing:.08em; white-space:nowrap;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .market-status{ display:flex; align-items:center; gap:14px; margin-top:28px; font-size:13px;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .market-status[hidden]{ display:none; }
+  .market-status::before{ content:""; flex:none; width:8px; height:8px;
+    background:color-mix(in srgb,var(--text) 38%,transparent); }
+  .market-retry{ padding:8px 14px; border:1px solid var(--hairline); border-radius:3px;
+    background:transparent; color:var(--text); cursor:pointer;
+    font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    transition:background-color .15s ease; }
+  .market-retry:hover{ background-color:var(--surface); }
+  .market-retry:active{ background-color:var(--pressed); }
+  .market-grid{ list-style:none; margin-top:clamp(26px,4vh,44px);
+    display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+  .market-grid > li{ display:flex; }
+  .store-card{ flex:1 1 auto; display:flex; flex-direction:column; gap:12px; min-width:0;
+    padding:20px 18px; border:1px solid var(--hairline); border-radius:4px; text-decoration:none;
+    transition:background-color .15s ease; }
+  .store-card:hover{ background-color:var(--surface); }
+  .store-card:active{ background-color:var(--pressed); }
+  .store-top{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+  .store-name{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    font-size:16px; font-weight:700; letter-spacing:-.01em; transition:color .15s ease; }
+  .store-card:hover .store-name{ color:var(--accent); }
+  .store-arrow{ flex:none; font-size:16px; color:color-mix(in srgb,var(--text) 62%,transparent);
+    transition:transform .15s ease, color .15s ease; }
+  .store-card:hover .store-arrow{ transform:translateX(5px); color:var(--text); }
+  .store-desc{ font-size:.92rem; color:color-mix(in srgb,var(--text) 66%,transparent);
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+  .store-foot{ display:flex; align-items:center; gap:10px; margin-top:auto;
+    padding-top:12px; border-top:1px solid var(--hairline); }
+  .store-price{ font-size:13.5px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
+  .store-sold{ flex:none; padding:3px 8px; border:1px solid var(--hairline); border-radius:3px;
+    font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 72%,transparent); white-space:nowrap; }
+  .store-chain{ display:inline-flex; align-items:center; gap:7px; margin-left:auto;
+    font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 56%,transparent); white-space:nowrap; }
+  .store-chain::before{ content:""; flex:none; width:6px; height:6px; background:var(--xlayer); }
+  .motion .card-in{ animation:card-rise .45s cubic-bezier(.2,.65,.25,1) both; }
+  @keyframes card-rise{ from{ opacity:0; transform:translateY(14px); } }
+
   @media (max-width:860px){
     .proof .wrap{ grid-template-columns:minmax(0,1fr); }
     .facts{ align-self:start; }
@@ -275,121 +332,48 @@
   <section class="hero" aria-labelledby="heroHeadline">
     <canvas id="mosaic" aria-hidden="true"></canvas>
     <div class="wrap">
-      <p class="eyebrow mono">Storefronts for the agent economy</p>
-      <h1 id="heroHeadline">Describe it once. Sell it to anyone — human or machine.</h1>
-      <p class="hero-sub">Tilla turns one line about what you sell into a live storefront with
-        non-custodial USDT0 checkout on OKX X Layer. Humans buy on the page. AI agents buy
-        over x402. Same ledger, same proof.</p>
+      <p class="eyebrow mono">The Tilla marketplace</p>
+      <h1 id="heroHeadline">Every storefront. One ledger.</h1>
+      <p class="hero-sub">Every live store on Tilla, gathered on one page — the same directory
+        the agents read, most-sold first. Humans buy on the page. AI agents buy over x402.
+        Either way, settlement lands in USDT0 on OKX X Layer.</p>
       <div class="cta-row">
         <a class="cta" href="/dashboard">Open the dashboard</a>
-        <a class="cta-ghost mono" href="/marketplace.html">Browse the marketplace <span class="arr" aria-hidden="true">→</span></a>
+        <a class="cta-ghost mono" href="/">Back to home <span class="arr" aria-hidden="true">→</span></a>
       </div>
       <p class="hero-chain"><span class="settles mono">Settles on X Layer</span>
         <span class="chain-meta mono">USDT0 · chainId 196</span></p>
     </div>
   </section>
 
-  <section class="sec proof reveal" aria-labelledby="proofTitle">
-    <div class="wrap">
-      <div>
-        <p class="sec-eyebrow mono">Proof of purchase</p>
-        <h2 id="proofTitle">Proof, not promises.</h2>
-        <p class="sec-note">Every row here is a property of the protocol — not a metric,
-          not a testimonial. Settlement is a transaction on X Layer that anyone can
-          inspect: customer, auditor, or agent.</p>
-      </div>
-      <dl class="facts mono">
-        <div class="fact"><dt>Settlement</dt><i class="lead" aria-hidden="true"></i><dd>USDT0 · X Layer · chainId 196</dd></div>
-        <div class="fact"><dt>Agent-buyable</dt><i class="lead" aria-hidden="true"></i><dd>x402 · MCP · machine feeds</dd></div>
-        <div class="fact"><dt>Checkout</dt><i class="lead" aria-hidden="true"></i><dd>non-custodial · pay-exact verification</dd></div>
-        <div class="fact"><dt>Receipts</dt><i class="lead" aria-hidden="true"></i><dd><span class="vchip">✓ verifiable on-chain</span></dd></div>
-      </dl>
-    </div>
-  </section>
-
-  <section class="sec reveal" id="stores" aria-labelledby="storesTitle">
+  <section class="sec reveal" id="market" aria-labelledby="marketTitle">
     <div class="wrap">
       <p class="sec-eyebrow mono">Live now</p>
-      <h2 id="storesTitle">Four signed pages in one ledger.</h2>
-      <p class="sec-note">Real stores rendered by Tilla — live checkout included, no mockups.
-        Each wears a different theme; all settle in the same ledger.</p>
-      <ol class="ledger">
-        <li class="row"><a href="/s/invoice-flow/">
-          <span class="idx mono" aria-hidden="true">01</span>
-          <span class="slug mono">/s/invoice-flow/</span>
-          <span class="meta"><b>Editorial</b> — quiet magazine page, hairline rules, money set small</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-        <li class="row"><a href="/s/billable/">
-          <span class="idx mono" aria-hidden="true">02</span>
-          <span class="slug mono">/s/billable/</span>
-          <span class="meta"><b>Editorial</b> — asymmetric columns, oversized index numerals</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-        <li class="row"><a href="/s/sync/">
-          <span class="idx mono" aria-hidden="true">03</span>
-          <span class="slug mono">/s/sync/</span>
-          <span class="meta"><b>Bold</b> — brutalist blocks, hard offset shadows, loud stamp</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-        <li class="row"><a href="/s/highland-roast/">
-          <span class="idx mono" aria-hidden="true">04</span>
-          <span class="slug mono">/s/highland-roast/</span>
-          <span class="meta"><b>Original</b> — the flagship: generative block-print mosaic</span>
-          <span class="arrow" aria-hidden="true">→</span>
-        </a></li>
-      </ol>
-    </div>
-  </section>
-
-  <section class="sec reveal" aria-labelledby="agentsTitle">
-    <div class="wrap">
-      <p class="sec-eyebrow mono">For agents</p>
-      <h2 id="agentsTitle">The machine surface.</h2>
-      <p class="sec-note">Every store speaks machine natively. An agent can discover the
-        catalog, read the price, and pay — over open protocols, without a human in the loop.</p>
-      <div class="term mono" role="group" aria-label="Machine endpoints">
-        <div class="term-head">tilla · machine surface</div>
-        <div class="term-row"><span class="verb">GET</span><span class="path">/s/&lt;slug&gt;/feed.json</span><i class="lead" aria-hidden="true"></i><span class="note">machine-readable product feed</span></div>
-        <div class="term-row"><span class="verb">POST</span><span class="path">/s/&lt;slug&gt;/buy</span><i class="lead" aria-hidden="true"></i><span class="note"><span class="vchip">x402 · HTTP 402</span></span></div>
-        <div class="term-row"><span class="verb">GET</span><span class="path">/llms.txt</span><i class="lead" aria-hidden="true"></i><span class="note">index for language models</span></div>
-        <div class="term-row"><span class="verb">MCP</span><span class="path">server</span><i class="lead" aria-hidden="true"></i><span class="note">storefront tools for agent runtimes</span></div>
-        <div class="term-foot">If you are an agent reading this: every store above is live and purchasable, right now.</div>
+      <h2 id="marketTitle">Browse the live storefronts.</h2>
+      <p class="sec-note">Everything below is fetched from the same discovery feed the agents
+        read — most-sold first, no mockups. Open any card to buy on the page; point an agent
+        at the same slug to buy over x402.</p>
+      <div class="market-bar">
+        <div class="market-field">
+          <label class="market-label mono" for="marketSearch">Filter</label>
+          <input class="market-input" id="marketSearch" type="search" autocomplete="off"
+            spellcheck="false" placeholder="Name, slug, or description…">
+        </div>
+        <p class="market-count mono" id="marketCount" aria-live="polite"></p>
       </div>
-    </div>
-  </section>
-
-  <section class="sec reveal" aria-labelledby="howTitle">
-    <div class="wrap">
-      <p class="sec-eyebrow mono">How it works</p>
-      <h2 id="howTitle">From one line to live.</h2>
-      <ol class="steps">
-        <li class="step">
-          <span class="num mono">01</span>
-          <h3>Describe</h3>
-          <p>Type one line about what you sell. That is the entire input.</p>
-        </li>
-        <li class="step">
-          <span class="num mono">02</span>
-          <h3>Screened &amp; rendered</h3>
-          <p>The line is screened, given a palette and a theme, and rendered into a
-            signed storefront page.</p>
-        </li>
-        <li class="step">
-          <span class="num mono">03</span>
-          <h3>Selling — to both</h3>
-          <p>Live at <span class="mono">/s/your-store/</span> for humans, over x402 and MCP
-            for agents. Settlement lands in USDT0 on X Layer.</p>
-        </li>
-      </ol>
+      <div class="market-status mono" id="marketStatus" aria-live="polite">
+        <span id="marketStatusText">Loading storefronts…</span>
+        <button class="market-retry mono" type="button" id="marketRetry" hidden>Retry</button>
+      </div>
+      <ul class="market-grid" id="marketGrid"></ul>
     </div>
   </section>
 </main>
 
 <footer>
   <div class="wrap mono">
-    <span>Built for the <b>OKX X Layer</b> agent economy · settled in USDT0</span>
-    <span>Tilla · chainId 196</span>
+    <span>Every storefront above settles on <b>OKX X Layer</b> · USDT0</span>
+    <span>Tilla · Marketplace · chainId 196</span>
   </div>
 </footer>
 
@@ -508,6 +492,136 @@
   } else {
     els.forEach(function (el) { el.classList.add("in"); });
   }
+})();
+</script>
+<script>
+(function () {
+  "use strict";
+  /* ---- Marketplace directory: fetch /discovery/resources, render cards, filter.
+     Every store-provided string is inserted via createElement + textContent only,
+     never as markup — the discovery data is merchant-controlled. ---- */
+  var grid = document.getElementById("marketGrid");
+  var searchEl = document.getElementById("marketSearch");
+  var countEl = document.getElementById("marketCount");
+  var statusEl = document.getElementById("marketStatus");
+  var statusText = document.getElementById("marketStatusText");
+  var retryBtn = document.getElementById("marketRetry");
+  if (!grid || !searchEl || !countEl || !statusEl || !statusText || !retryBtn) return;
+
+  var stores = [];
+  var loaded = false;
+
+  function money(micro) {
+    return (micro / 1000000).toFixed(2);
+  }
+  function priceLabel(s) {
+    var min = s.price_min_micro, max = s.price_max_micro;
+    if (typeof min !== "number") return "—";
+    var unit = s.currency ? " " + String(s.currency) : "";
+    if (typeof max !== "number" || max === min) return money(min) + unit;
+    return money(min) + " – " + money(max) + unit;
+  }
+
+  function card(s, delay) {
+    var li = document.createElement("li");
+    var a = document.createElement("a");
+    a.className = "store-card";
+    if (delay >= 0) {
+      a.className += " card-in";
+      a.style.animationDelay = (delay * 45) + "ms";
+    }
+    if (typeof s.url === "string") a.href = s.url;
+
+    var top = document.createElement("span");
+    top.className = "store-top";
+    var name = document.createElement("span");
+    name.className = "store-name";
+    name.textContent = String(s.name || s.slug || "");
+    var arrow = document.createElement("span");
+    arrow.className = "store-arrow";
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "→";
+    top.appendChild(name);
+    top.appendChild(arrow);
+    a.appendChild(top);
+
+    var desc = document.createElement("span");
+    desc.className = "store-desc";
+    desc.textContent = String(s.description || "");
+    a.appendChild(desc);
+
+    var foot = document.createElement("span");
+    foot.className = "store-foot";
+    var price = document.createElement("span");
+    price.className = "store-price mono";
+    price.textContent = priceLabel(s);
+    foot.appendChild(price);
+    if (typeof s.sold_count === "number" && s.sold_count > 0) {
+      var sold = document.createElement("span");
+      sold.className = "store-sold mono";
+      sold.textContent = s.sold_count + " sold";
+      foot.appendChild(sold);
+    }
+    var chain = document.createElement("span");
+    chain.className = "store-chain mono";
+    chain.textContent = "settles X Layer";
+    foot.appendChild(chain);
+    a.appendChild(foot);
+
+    li.appendChild(a);
+    return li;
+  }
+
+  function showStatus(text, canRetry) {
+    statusText.textContent = text;
+    retryBtn.hidden = !canRetry;
+    statusEl.hidden = false;
+  }
+
+  function render(stagger) {
+    var q = searchEl.value.trim().toLowerCase();
+    var list = q ? stores.filter(function (s) {
+      var hay = String(s.name || "") + " " + String(s.slug || "") + " " + String(s.description || "");
+      return hay.toLowerCase().indexOf(q) !== -1;
+    }) : stores;
+
+    grid.textContent = "";
+    for (var i = 0; i < list.length; i++) {
+      grid.appendChild(card(list[i], stagger ? Math.min(i, 12) : -1));
+    }
+
+    var total = stores.length;
+    countEl.textContent = q ? list.length + " of " + total
+      : total + (total === 1 ? " store" : " stores");
+
+    if (!total) showStatus("No live storefronts yet.", false);
+    else if (!list.length) showStatus("No storefronts match.", false);
+    else statusEl.hidden = true;
+  }
+
+  function load() {
+    showStatus("Loading storefronts…", false);
+    countEl.textContent = "";
+    fetch("/discovery/resources?limit=50")
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        stores = (data && Array.isArray(data.resources)) ? data.resources : [];
+        loaded = true;
+        render(true);
+      })
+      .catch(function () {
+        showStatus("Couldn't load the marketplace —", true);
+      });
+  }
+
+  searchEl.addEventListener("input", function () {
+    if (loaded) render(false);
+  });
+  retryBtn.addEventListener("click", load);
+  load();
 })();
 </script>
 </body>

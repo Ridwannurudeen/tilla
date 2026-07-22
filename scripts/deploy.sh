@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy Tilla to the VPS by shipping changed files individually.
 # Never a full-directory clobber: stores/ and .env are server-owned
-# (www/index.html is repo-owned; the rest of www/ stays server-owned).
+# (the www/ pages listed below are repo-owned; the rest of www/ stays server-owned).
 set -euo pipefail
 
 VPS="root@75.119.153.252"
@@ -67,6 +67,7 @@ FILES=(
   themes/_dashboard.html
   themes/og.svg
   www/index.html
+  www/marketplace.html
   www/receipt-demo.html
 )
 
