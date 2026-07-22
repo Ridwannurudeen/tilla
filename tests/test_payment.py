@@ -61,7 +61,7 @@ def test_build_payment_option_field_mapping():
     assert opt.network == "eip155:196"
     assert opt.pay_to == VALID_ENV["PAY_TO_ADDRESS"]
     assert opt.max_timeout_seconds == 300
-    assert opt.price.amount == "1000000"
+    assert opt.price.amount == "50000"
     assert opt.price.asset == "0x779ded0c9e1022225f8e0630b35a9b54be713736"
     assert opt.price.extra == {
         "name": PAYMENT_EIP712_NAME,

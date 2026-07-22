@@ -117,7 +117,7 @@ def test_402_challenge_byte_identical():
     expected_create = (
         '{"max_timeout_seconds":300,"network":"eip155:196",'
         '"pay_to":"0xcccccccccccccccccccccccccccccccccccccccc",'
-        '"price":{"amount":"1000000",'
+        '"price":{"amount":"50000",'
         '"asset":"0x779ded0c9e1022225f8e0630b35a9b54be713736",'
         '"extra":{"name":"USD₮0","version":"1"}},"scheme":"exact"}'
     )

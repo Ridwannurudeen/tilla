@@ -678,7 +678,7 @@ def upgrade_store_get(request: Request):
             "error": "method not allowed; use POST to upgrade a store",
             "how": (
                 "POST {slug, description?, theme?} + Authorization: Bearer "
-                "<manage_key> (x402-paid, 1 USDT) → regenerates, re-screens, and "
+                "<manage_key> (x402-paid, 0.03 USDT) → regenerates, re-screens, and "
                 "re-renders a store you own"
             ),
         },
@@ -764,7 +764,7 @@ def add_product_get(request: Request):
             "error": "method not allowed; use POST to add a product",
             "how": (
                 "POST {slug, name, price_usdt} + Authorization: Bearer "
-                "<manage_key> (x402-paid, 0.5 USDT) → adds a second product to a "
+                "<manage_key> (x402-paid, 0.01 USDT) → adds a second product to a "
                 "store you own"
             ),
         },
@@ -2135,13 +2135,13 @@ if os.getenv("OKX_API_KEY"):
     # x402-check probes GET and expects a 402 challenge (the Warden 405->402
     # lesson); a paid GET with no body returns service-usage JSON.
     _upgrade_route = RouteConfig(
-        accepts=[build_fee_payment_option(_rail, "1000000")],
-        description="Tilla — upgrade an existing storefront (1 USDT)",
+        accepts=[build_fee_payment_option(_rail, "30000")],
+        description="Tilla — upgrade an existing storefront (0.03 USDT)",
         mime_type="application/json",
     )
     _add_product_route = RouteConfig(
-        accepts=[build_fee_payment_option(_rail, "500000")],
-        description="Tilla — add a product to a storefront (0.5 USDT)",
+        accepts=[build_fee_payment_option(_rail, "10000")],
+        description="Tilla — add a product to a storefront (0.01 USDT)",
         mime_type="application/json",
     )
     _paid = {

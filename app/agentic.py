@@ -1945,7 +1945,7 @@ def agent_card(request: Request):
                 "id": "create-store",
                 "name": "Create a storefront",
                 "description": "Spin up a live one-product crypto store.",
-                "x402": {"endpoint": "/create-store", "price": "1 USDT"},
+                "x402": {"endpoint": "/create-store", "price": "0.05 USDT"},
                 "input_schema": CreateStoreBody.model_json_schema(),
                 "sample_request": {
                     "description": "single-origin coffee beans, roasted to order",
@@ -1960,7 +1960,7 @@ def agent_card(request: Request):
                         "endpoint": "/create-store",
                         "protocol": "x402-v2",
                         "description": (
-                            "POST {description, theme} with an x402 payment (1 USDT) "
+                            "POST {description, theme} with an x402 payment (0.05 USDT) "
                             "to spin up a live store."
                         ),
                     }

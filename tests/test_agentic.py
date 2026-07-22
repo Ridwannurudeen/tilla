@@ -233,11 +233,11 @@ def test_agent_card_offering_envelope():
     card = client.get("/.well-known/agent-card.json").json()
     skills = {s["id"]: s for s in card["skills"]}
     # create-store carries a fixed requiredFunds equal to the real /create-store 402
-    # charge (PAYMENT_AMOUNT = 1 USDT); its nextActions POST /create-store.
+    # charge (PAYMENT_AMOUNT = 0.05 USDT); its nextActions POST /create-store.
     from app.payment import PAYMENT_AMOUNT
 
     cs = skills["create-store"]
-    assert cs["requiredFunds"]["amount_micro"] == int(PAYMENT_AMOUNT) == 1_000_000
+    assert cs["requiredFunds"]["amount_micro"] == int(PAYMENT_AMOUNT) == 50_000
     assert cs["requiredFunds"]["asset"] == config.USDT0
     assert any(a["endpoint"] == "/create-store" for a in cs["nextActions"])
     # the buy skill routes to per-store surfaces for the per-offering requiredFunds
