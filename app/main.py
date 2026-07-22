@@ -32,7 +32,7 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from app import (
     acp,
@@ -53,6 +53,7 @@ from app import (
     payment,
     providers,
     reconcile,
+    render,
     subscriptions,
     webhooks,
 )
@@ -72,6 +73,7 @@ from app.models import (
     Delivery,
     EmailSubscriber,
     Entitlement,
+    Merchant,
     Order,
     Product,
     ScreeningReceipt,
@@ -358,12 +360,71 @@ def sitemap(request: Request, session: Session = Depends(get_session)):
     urls += "".join(
         f"<url><loc>{escape(base)}/s/{escape(slug)}/</loc></url>" for slug in slugs
     )
+    # Phase 4 link-in-bio: one /m/{address} profile per merchant with at least one
+    # live, public store — the SAME visibility filter as the store URLs above, so it
+    # surfaces no address a crawler couldn't already read off those stores' checkout
+    # pages (every store renders its receive wallet). Addresses are a restricted
+    # 0x-hex charset, XML-escaped regardless.
+    profile_addrs = session.scalars(
+        select(Merchant.wallet_address)
+        .join(Store, Store.merchant_id == Merchant.id)
+        .where(Store.status == "live", Store.visibility == "public")
+        .distinct()
+        .order_by(Merchant.wallet_address)
+    ).all()
+    urls += "".join(
+        f"<url><loc>{escape(base)}/m/{escape(addr)}</loc></url>"
+        for addr in profile_addrs
+    )
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
         f"{urls}</urlset>"
     )
     return Response(content=xml, media_type="application/xml")
+
+
+@app.get("/m/{address}")
+@limiter.limit("60/minute")
+def merchant_profile(
+    request: Request,
+    address: str = Path(..., min_length=1, max_length=64),
+    session: Session = Depends(get_session),
+):
+    """Phase 4 link-in-bio: a merchant's PUBLIC 'all my stores' profile — their LIVE,
+    PUBLIC stores (Phase 1.7 visibility) as one shareable page. Hidden/pending/blocked
+    stores are excluded (the same filter as discovery + the sitemap). An unknown
+    address, a malformed address, or a merchant with no public stores is a uniform 404
+    (no existence oracle). Store names/descriptions are screened LLM copy rendered
+    through the autoescaped Jinja env, so they stay inert text; the wallet shown is
+    already public (it is every store's on-chain receive address)."""
+    addr = address.lower()
+    if not _EVM_ADDRESS.fullmatch(addr):
+        raise HTTPException(404, "profile not found")
+    merchant = session.scalar(select(Merchant).where(Merchant.wallet_address == addr))
+    if merchant is None:
+        raise HTTPException(404, "profile not found")
+    stores = session.scalars(
+        select(Store)
+        .where(
+            Store.merchant_id == merchant.id,
+            Store.status == "live",
+            Store.visibility == "public",
+        )
+        .order_by(Store.created_at.desc())
+    ).all()
+    if not stores:
+        raise HTTPException(404, "profile not found")
+    items = [
+        {
+            "slug": s.slug,
+            "name": agentic._store_name(s),
+            "description": agentic._store_description(s),
+            "url": f"/s/{s.slug}/",
+        }
+        for s in stores
+    ]
+    return HTMLResponse(render.render_profile(addr, items))
 
 
 # ---------- ASP endpoint: create a store (x402-paid) ----------

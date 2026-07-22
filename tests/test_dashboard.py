@@ -717,3 +717,122 @@ def test_store_agent_view_hidden_reports_not_listed(make_store):
     ).json()
     # honest: a hidden store tells its owner it is not currently discoverable
     assert body["discovery"] == {"listed": False, "reason": "hidden"}
+
+
+# --------------------------------------------- plain-language store copy editing
+@respx.mock
+def test_merchant_edit_store_copy_rerenders(make_store, tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "copystore", make_store)
+    tok = _merchant_token(acct)
+    r = client.post(
+        "/api/merchant/stores/copystore/description",
+        headers=_auth(tok),
+        json={
+            "tagline": "Roasted to order",
+            "hero_subcopy": "Single-origin beans {{7*7}}",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["tagline"] == "Roasted to order"
+    assert r.json()["hero_subcopy"].startswith("Single-origin beans")
+    # the storefront re-rendered from content with the new plain-language copy
+    html = (tmp_path / "copystore" / "index.html").read_text(encoding="utf-8")
+    assert "Roasted to order" in html
+    assert "Single-origin beans" in html
+    # SSTI canary: merchant copy is data — {{7*7}} renders literally, never 49
+    assert "{{7*7}}" in html
+    # persisted to content so the next build re-renders it
+    with SessionLocal() as s:
+        content = s.scalar(select(Store.content).where(Store.slug == "copystore"))
+        assert content["tagline"] == "Roasted to order"
+
+
+@respx.mock
+def test_store_copy_edit_screening_refuses_and_leaves_store_untouched(
+    make_store, tmp_path, monkeypatch
+):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"verdict": "BLOCK", "risk_level": "high"}
+        )
+    )
+    acct = Account.create()
+    _owned_store(acct, "badcopy", make_store)
+    tok = _merchant_token(acct)
+    r = client.post(
+        "/api/merchant/stores/badcopy/description",
+        headers=_auth(tok),
+        json={"hero_subcopy": "something the screener rejects"},
+    )
+    assert r.status_code == 422
+    # fail-closed: nothing persisted, no static page rendered
+    assert not (tmp_path / "badcopy" / "index.html").exists()
+    with SessionLocal() as s:
+        assert s.scalar(select(Store.content).where(Store.slug == "badcopy")) is None
+
+
+@respx.mock
+def test_store_copy_edit_idor_gated(make_store, tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "copyidor", make_store)
+    other_tok = _merchant_token(other)
+    # a non-owner gets a uniform 404 (no existence oracle)
+    assert (
+        client.post(
+            "/api/merchant/stores/copyidor/description",
+            headers=_auth(other_tok),
+            json={"tagline": "hijack"},
+        ).status_code
+        == 404
+    )
+    # and an unauthenticated caller is 401
+    assert (
+        client.post(
+            "/api/merchant/stores/copyidor/description",
+            json={"tagline": "hijack"},
+        ).status_code
+        == 401
+    )
+
+
+def test_store_copy_edit_requires_a_field(make_store):
+    acct = Account.create()
+    _owned_store(acct, "emptycopy", make_store)
+    tok = _merchant_token(acct)
+    # a body with no copy fields is a 422 (rejected before any screening/render)
+    r = client.post(
+        "/api/merchant/stores/emptycopy/description", headers=_auth(tok), json={}
+    )
+    assert r.status_code == 422
+
+
+@respx.mock
+def test_store_copy_get_returns_current(make_store, tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "getcopy", make_store)
+    tok = _merchant_token(acct)
+    client.post(
+        "/api/merchant/stores/getcopy/description",
+        headers=_auth(tok),
+        json={"tagline": "Hello", "hero_subcopy": "World"},
+    )
+    c = client.get(
+        "/api/merchant/stores/getcopy/description", headers=_auth(tok)
+    ).json()
+    assert c["tagline"] == "Hello" and c["hero_subcopy"] == "World"

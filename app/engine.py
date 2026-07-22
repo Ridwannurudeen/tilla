@@ -245,6 +245,24 @@ def resync_catalog(session, store, extras_override=None) -> None:
     _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
 
 
+def update_store_copy(session, store, updates: dict) -> None:
+    """Merge plain-language copy edits (tagline / hero_subcopy) into a LIVE store's
+    persisted ``content`` and re-render its static pages — WITHOUT an LLM
+    regeneration. Only the caller-supplied, already-screened copy keys change; the
+    catalog, palette, theme, and Design DNA are preserved untouched. Mirrors
+    :func:`resync_catalog`'s persist+re-render contract; runs inside the caller's
+    transaction (the commit is the caller's job)."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    content = dict(store.content or {})
+    content.update(updates)
+    store.content = content
+    flag_modified(store, "content")
+    d = STORES_DIR / store.slug
+    d.mkdir(parents=True, exist_ok=True)
+    _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+
+
 def _write_store_pages(d, content: dict, addr: str, slug: str, theme: str) -> None:
     """Write the nginx-served static assets for a live store: index.html (the chosen
     theme), og.svg (the Open Graph card source), and og.png (its raster for social
