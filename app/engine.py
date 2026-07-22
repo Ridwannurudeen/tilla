@@ -16,7 +16,13 @@ import unicodedata
 from typing import Literal, get_args
 
 import requests
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -79,6 +85,17 @@ class DesignDNA(BaseModel):
         return v if v in get_args(field.annotation) else field.default
 
 
+class ProductContent(BaseModel):
+    """One product in a store's catalog (docs multi-product). price_usdt allows 0
+    here — generate() clamps any non-positive price to MIN_PRICE_USDT before it can
+    reach a Product row (whose CHECK enforces price_micro > 0)."""
+
+    name: str = Field(default="", max_length=120)
+    blurb: str = Field(default="", max_length=400)
+    price_usdt: float = Field(default=0, ge=0, le=10000)
+    cta_text: str = Field(default="Buy now", max_length=40)
+
+
 class GeneratedContent(BaseModel):
     """Bounds on what the LLM is allowed to hand back before it ever reaches
     a template or a price tag."""
@@ -91,6 +108,12 @@ class GeneratedContent(BaseModel):
     product_blurb: str = Field(default="", max_length=400)
     cta_text: str = Field(default="Buy now", max_length=40)
     price_usdt: float = Field(default=0, ge=0.01, le=10000)
+    # The store catalog. The LLM may return several products; an old-style output
+    # with only the scalar product_* fields is coerced to a one-item list by
+    # _ensure_products, and products[0] is always mirrored back onto the scalar
+    # fields so every existing single-product consumer (store.json, render
+    # fallback, screening) keeps working unchanged.
+    products: list[ProductContent] = Field(default_factory=list, max_length=8)
     emoji: str = Field(default="🛍️", max_length=8)
     palette: dict = Field(default_factory=dict)
     # The LLM's theme suggestion (used only when the caller didn't pick one). A
@@ -112,6 +135,28 @@ class GeneratedContent(BaseModel):
         # A stray non-object design_dna (string/list/number) is dropped rather
         # than failing generation; the renderer then uses the default look.
         return v if isinstance(v, dict) else None
+
+    @model_validator(mode="after")
+    def _ensure_products(self):
+        """Reconcile the catalog with the legacy scalar fields, both ways: an
+        old-style output with no products[] synthesizes a one-item catalog from
+        the scalar product_* fields; then products[0] is mirrored back onto the
+        scalar fields so every single-product consumer keeps working."""
+        if not self.products:
+            self.products = [
+                ProductContent(
+                    name=self.product_name,
+                    blurb=self.product_blurb,
+                    price_usdt=self.price_usdt,
+                    cta_text=self.cta_text,
+                )
+            ]
+        primary = self.products[0]
+        self.product_name = primary.name
+        self.product_blurb = primary.blurb
+        self.cta_text = primary.cta_text
+        self.price_usdt = primary.price_usdt
+        return self
 
 
 def _resolve_theme(name: str | None) -> str:
@@ -237,12 +282,16 @@ def _post_generation(prompt: str) -> dict:
 def generate(desc):
     prompt = (
         "You are a world-class brand designer and DTC copywriter. A solo entrepreneur wants to sell "
-        "something. Turn their description into a polished one-product storefront.\n\n"
+        "something. Turn their description into a polished storefront with a focused product catalog.\n\n"
         f'Merchant description: "{desc}"\n\n'
         "Output ONLY valid JSON (no markdown) with EXACTLY these keys: "
         "store_name (short brand), tagline (<=6 words), hero_headline (punchy, <=8 words), "
-        "hero_subcopy (1 sentence), product_name, product_blurb (1-2 sentences, benefit-led), "
-        "cta_text (<=4 words), price_usdt (number), emoji (single emoji for the brand), "
+        "hero_subcopy (1 sentence), "
+        "products (an array of 1 to 4 objects, each an object with: name, blurb (1-2 sentences, "
+        "benefit-led), price_usdt (number), cta_text (<=4 words)) — a focused catalog of related "
+        "items that fit the brand; use a single item when the merchant clearly sells one thing, "
+        "otherwise 2 to 4 distinct items, "
+        "emoji (single emoji for the brand), "
         "palette (object: primary, accent, bg, text as hex colors — modern, high-contrast, premium; "
         "bg must be decisively near-dark or near-light, never mid-gray, with text strongly contrasting it), "
         "theme (one of exactly: original, bold, editorial — pick the layout that best fits the brand: "
@@ -274,15 +323,22 @@ def generate(desc):
         # Braces present but unparseable / schema-invalid is still a bad-output
         # outage from the caller's view — fold into the same 503 path, not a 500.
         raise GenerationUnavailable(f"LLM returned unusable JSON: {exc}") from exc
-    # A missing price_usdt defaults to 0 (pydantic doesn't validate defaults);
-    # a 0 amount would make checkout auto-confirm with no payment. Clamp any
-    # non-positive price up to a sane floor before it can reach a live store.
-    if data["price_usdt"] <= 0:
-        logger.warning(
-            "generated content had no valid price; coercing to %.2f USDT",
-            MIN_PRICE_USDT,
-        )
-        data["price_usdt"] = MIN_PRICE_USDT
+    # A non-positive price would make checkout auto-confirm with no payment (and a
+    # 0 would violate the Product price_micro>0 CHECK). Clamp every product up to a
+    # sane floor, then re-mirror the primary product onto the scalar fields.
+    for product in data["products"]:
+        if product["price_usdt"] <= 0:
+            logger.warning(
+                "generated product %r had no valid price; coercing to %.2f USDT",
+                product.get("name", ""),
+                MIN_PRICE_USDT,
+            )
+            product["price_usdt"] = MIN_PRICE_USDT
+    primary = data["products"][0]
+    data["product_name"] = primary["name"]
+    data["product_blurb"] = primary["blurb"]
+    data["cta_text"] = primary["cta_text"]
+    data["price_usdt"] = primary["price_usdt"]
     # Surface token spend to the caller (create_store/upgrade_store log it to
     # event_log) and to journald, so llm cost is queryable per store. Under
     # reserved keys the caller strips before persisting/rendering content.
@@ -354,7 +410,6 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     llm_out = content.pop("_llm_out", 0)
     theme_file = _resolve_theme(theme or content.get("theme"))
     outcome = screening.screen(_screening_text(desc, content))
-    price_micro = int(round(float(content.get("price_usdt", 0)) * 1e6))
     pending = outcome.status == "pending"
     # Per-store capability secret returned ONCE to the paid caller (the store
     # owner by construction). Only its sha256 hash is persisted.
@@ -427,14 +482,28 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                 )
                 session.add(store)
                 session.flush()
-                session.add(
-                    Product(
-                        store_id=store.id,
-                        name=content.get("product_name", ""),
-                        price_micro=price_micro,
-                        active=True,
+                # One Product row per catalog item, in content order — the first
+                # (lowest id) is the primary product every single-product code
+                # path selects. The price floor guarantees price_micro > 0 (the
+                # Product CHECK) even if an unclamped item ever slips through.
+                catalog = content.get("products") or [
+                    {
+                        "name": content.get("product_name", ""),
+                        "price_usdt": content.get("price_usdt", 0),
+                    }
+                ]
+                for item in catalog:
+                    session.add(
+                        Product(
+                            store_id=store.id,
+                            name=str(item.get("name", "")),
+                            price_micro=max(
+                                int(round(float(item.get("price_usdt", 0)) * 1e6)),
+                                int(MIN_PRICE_USDT * 1e6),
+                            ),
+                            active=True,
+                        )
                     )
-                )
                 # Record the screening receipt in the SAME txn as the store row. A
                 # pending (screening-unavailable) create has no verdict, so no
                 # receipt — one is written when resume_pending flips it live.

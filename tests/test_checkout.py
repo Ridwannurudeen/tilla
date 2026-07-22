@@ -779,3 +779,38 @@ def test_deliver_with_license_deliverable_issues_unique_key(make_store):
         d = s.scalar(select(Delivery).where(Delivery.order_id == cid))
         assert ent.license_key.startswith("TILLA-")
         assert d.kind == "license" and d.payload == ent.license_key
+
+
+def _add_product(store_id, name, price_micro):
+    from app.models import Product
+
+    with SessionLocal() as s:
+        s.add(Product(store_id=store_id, name=name, price_micro=price_micro, active=True))
+        s.commit()
+
+
+def test_checkout_product_index_selects_that_product(make_store):
+    # A store with two products: primary "Thing" @ 9, index 1 "Deluxe" @ 20.
+    sid = make_store(slug="multi", price_micro=9_000_000)
+    _add_product(sid, "Deluxe", 20_000_000)
+    r = client.post("/api/checkout/multi", json={"product_index": 1})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_name"] == "Deluxe"
+    with SessionLocal() as s:
+        # amount_micro is the exact product price (offset only affects expected_micro)
+        assert s.get(Order, r.json()["id"]).amount_micro == 20_000_000
+    r0 = client.post("/api/checkout/multi", json={})
+    assert r0.json()["product_name"] == "Thing"
+    with SessionLocal() as s:
+        assert s.get(Order, r0.json()["id"]).amount_micro == 9_000_000
+
+
+def test_checkout_product_index_out_of_range_fails_closed(make_store):
+    make_store(slug="oor", price_micro=9_000_000)
+    assert client.post("/api/checkout/oor", json={"product_index": 5}).status_code == 400
+
+
+def test_checkout_no_body_defaults_to_primary(make_store):
+    make_store(slug="prim", price_micro=9_000_000)
+    r = client.post("/api/checkout/prim")
+    assert r.status_code == 200 and r.json()["product_name"] == "Thing"

@@ -150,6 +150,47 @@ def _seo_ctx(content: Mapping, slug: str) -> dict:
     }
 
 
+def _products_ctx(content: Mapping) -> dict:
+    """The store's product catalog as display-safe dicts for the theme's product
+    loop. Old single-product content (only the scalar product_* fields, no
+    `products` list) coerces to a one-item catalog, so pre-multi-product stores
+    render unchanged. Each item carries its 0-based ``index``, which the buy button
+    hands to checkout to select the Nth active product (by id) — the catalog is
+    rendered in the same order the Product rows were created."""
+    raw = content.get("products")
+    if not isinstance(raw, list) or not raw:
+        raw = [
+            {
+                "name": content.get("product_name", ""),
+                "blurb": content.get("product_blurb", ""),
+                "price_usdt": content.get("price_usdt", 0),
+                "cta_text": content.get("cta_text", "Buy now"),
+            }
+        ]
+    products = [
+        {
+            "index": i,
+            "name": str(item.get("name", "")),
+            "blurb": str(item.get("blurb", "")),
+            "price": str(item.get("price_usdt", 0)),
+            "cta": str(item.get("cta_text", "Buy now")),
+        }
+        for i, item in enumerate(raw)
+        if isinstance(item, Mapping)
+    ]
+    if not products:  # every item malformed — fall back to the scalar primary
+        products = [
+            {
+                "index": 0,
+                "name": str(content.get("product_name", "")),
+                "blurb": str(content.get("product_blurb", "")),
+                "price": str(content.get("price_usdt", 0)),
+                "cta": str(content.get("cta_text", "Buy now")),
+            }
+        ]
+    return {"PRODUCTS": products}
+
+
 def render(content: Mapping, addr: str, slug: str, theme: str = "original.html") -> str:
     """Render a store theme from generator output. `content` is untrusted
     (LLM-produced); `addr`/`slug` are our own already-validated values."""
@@ -167,6 +208,7 @@ def render(content: Mapping, addr: str, slug: str, theme: str = "original.html")
         "ADDR": addr,
         **_palette_ctx(content),
         **_dna_ctx(content),
+        **_products_ctx(content),
         **_seo_ctx(content, slug),
     }
     template = _env.get_template(theme)

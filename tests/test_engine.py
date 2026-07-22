@@ -283,3 +283,70 @@ def test_write_store_pages_writes_svg_and_index_without_rsvg(tmp_path, monkeypat
     assert (d / "index.html").exists()
     assert (d / "og.svg").exists()
     assert not (d / "og.png").exists()
+
+
+def test_generated_content_multiproduct_mirrors_primary():
+    from app.engine import GeneratedContent
+
+    g = GeneratedContent.model_validate(
+        {
+            "store_name": "Cafe",
+            "products": [
+                {"name": "Guji", "blurb": "floral", "price_usdt": 18, "cta_text": "Buy"},
+                {"name": "Yirg", "blurb": "citrus", "price_usdt": 16},
+            ],
+        }
+    ).model_dump()
+    assert [p["name"] for p in g["products"]] == ["Guji", "Yirg"]
+    # the legacy scalar fields mirror the primary (first) product
+    assert g["product_name"] == "Guji" and g["price_usdt"] == 18
+
+
+def test_generated_content_oldstyle_synthesizes_one_product():
+    from app.engine import GeneratedContent
+
+    g = GeneratedContent.model_validate(
+        {
+            "store_name": "S",
+            "product_name": "Widget",
+            "product_blurb": "b",
+            "price_usdt": 9,
+            "cta_text": "Get",
+        }
+    ).model_dump()
+    assert len(g["products"]) == 1
+    assert g["products"][0]["name"] == "Widget" and g["products"][0]["price_usdt"] == 9
+
+
+@respx.mock
+def test_create_store_creates_a_product_row_per_catalog_item(tmp_path, monkeypatch):
+    import app.engine as engine
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Cafe",
+            "products": [
+                {"name": "Guji", "blurb": "floral", "price_usdt": 18, "cta_text": "Buy"},
+                {"name": "Yirg", "blurb": "citrus", "price_usdt": 16, "cta_text": "Buy"},
+            ],
+        },
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("i sell coffee")
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == result["slug"]))
+        rows = s.scalars(
+            select(Product).where(Product.store_id == store.id).order_by(Product.id)
+        ).all()
+    assert [(r.name, r.price_micro) for r in rows] == [
+        ("Guji", 18_000_000),
+        ("Yirg", 16_000_000),
+    ]

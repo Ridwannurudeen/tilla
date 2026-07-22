@@ -681,6 +681,10 @@ class CheckoutCreateBody(BaseModel):
     # wallet; themes forward `?ref=` here. Validated + lowercased, zero-address
     # rejected. Absent/empty -> no attribution, byte-identical to the pre-M13 flow.
     ref: str | None = None
+    # Multi-product: 0-based index of the catalog product the buyer chose (the Nth
+    # active product by id, matching the storefront's render order). Absent -> the
+    # primary product, byte-identical to the single-product flow.
+    product_index: int | None = None
 
     @field_validator("ref")
     @classmethod
@@ -707,11 +711,23 @@ def create_checkout(
         raise HTTPException(409, "store is not yet live (pending content screening)")
     if store.status != "live":
         raise HTTPException(404, "store not found")
-    product = session.scalar(
+    products = session.scalars(
         select(Product)
         .where(Product.store_id == store.id, Product.active.is_(True))
         .order_by(Product.id)
-    )
+    ).all()
+    if not products:
+        raise HTTPException(409, "store has no active product")
+    # Select the buyer's chosen product by its render-order index; absent -> the
+    # primary product. An out-of-range index fails closed (400) rather than
+    # silently charging the wrong product.
+    idx = body.product_index if body is not None else None
+    if idx is None:
+        product = products[0]
+    elif 0 <= idx < len(products):
+        product = products[idx]
+    else:
+        raise HTTPException(400, "product_index out of range")
     referrer_addr = body.ref if body is not None else None
     try:
         order = checkout.create_order(session, store, product, referrer_addr)
@@ -722,6 +738,7 @@ def create_checkout(
     return {
         "id": order.id,
         "pay_to": store.pay_to,
+        "product_name": product.name,
         "amount": order.expected_micro / 1e6,
         # Exact base-unit amount so the browser builds ERC-20 calldata with BigInt
         # only (amount*1e6 in JS can be off by one micro, which the exact-match
