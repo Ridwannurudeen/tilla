@@ -175,6 +175,18 @@
   #whSecret .mono.ok{ margin-top:6px; font-size:12.5px; }
   #backToMain, #backFromOrder{ margin:2px 0 4px; }
 
+  /* ---------- products panel (catalog is UI state, not chain state: no lime) ---------- */
+  .pitem{ border-bottom:1px solid var(--hairline); }
+  .pitem:last-child{ border-bottom:0; }
+  .prow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding:10px 2px; }
+  .prow strong{ flex:1; min-width:8ch; }
+  .prow button{ padding:5px 10px; font-size:12px; }
+  .pill.on{ color:var(--profit);
+    border-color:color-mix(in srgb,var(--profit) 45%,transparent);
+    background:color-mix(in srgb,var(--profit) 8%,transparent); }
+  .pill.off{ color:var(--muted); }
+  .pedit{ margin:0 0 12px; padding:12px; border:1px dashed var(--hairline); border-radius:4px; }
+
   /* ---------- intentional empty states ---------- */
   #underpaid > .muted, .card.muted{
     font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
@@ -293,6 +305,29 @@
   <div id="viewStore" class="hide">
     <button id="backToMain" class="ghost">&larr; Back</button>
     <h3 id="storeTitle"></h3>
+
+    <h3>Products</h3>
+    <div id="productMsg" class="small hide"></div>
+    <div id="products"></div>
+    <div class="card">
+      <div class="row head">
+        <strong>Add product</strong>
+        <span class="muted mono">name screened before listing</span>
+      </div>
+      <label for="pName">Name</label>
+      <input id="pName" maxlength="120" placeholder="e.g. Founder tee" />
+      <label for="pPrice">Price (USDT0)</label>
+      <input id="pPrice" type="number" min="0.01" max="10000" step="0.01" placeholder="25.00" />
+      <label for="pBlurb">Blurb (optional)</label>
+      <input id="pBlurb" maxlength="400" placeholder="One line about the product" />
+      <label for="pCta">Button text (optional)</label>
+      <input id="pCta" maxlength="40" placeholder="Buy now" />
+      <div class="row" style="margin-top:12px">
+        <button id="pAdd" class="primary">Add product</button>
+      </div>
+    </div>
+
+    <h3>Orders</h3>
     <div id="storeOrders" class="card scroll"></div>
   </div>
 
@@ -339,7 +374,11 @@
     if (r.status === 401) { signOut(); throw new Error("Session expired — sign in again."); }
     var body = null;
     try { body = await r.json(); } catch (e) {}
-    if (!r.ok) throw new Error((body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : ("request failed (" + r.status + ")"));
+    if (!r.ok) {
+      var err = new Error((body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : ("request failed (" + r.status + ")"));
+      err.status = r.status;
+      throw err;
+    }
     return body;
   }
 
@@ -538,7 +577,117 @@
       tb.appendChild(row);
     });
     t.appendChild(tb); box.appendChild(t);
+    pmsg("");
     show("viewStore");
+    await loadProducts(slug);
+  }
+
+  // ---- products (catalog CRUD; every API string rendered via textContent only) ----
+  function pmsg(text, isErr) {
+    var m = byId("productMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+  function productErr(e, ctx) {
+    if (e.status === 409) return ctx === "toggle" ? "Can't deactivate your last active product." : "Store isn't live yet — products can be added once it is.";
+    if (e.status === 422) return "Name didn't pass screening — try a different one.";
+    if (e.status === 503) return "Name screening is temporarily unavailable — try again in a minute.";
+    if (e.status === 404) return "That product wasn't found — it may have changed in another tab.";
+    return e.message;
+  }
+  function productPath(slug, pid) { return "/api/merchant/stores/" + encodeURIComponent(slug) + "/products/" + pid; }
+  function money(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return String(v);
+    var s = n.toFixed(6).replace(/0+$/, "");
+    var dp = s.split(".")[1] || "";
+    return dp.length >= 2 ? s : n.toFixed(2);
+  }
+
+  async function loadProducts(slug) {
+    var box = byId("products");
+    var data;
+    try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/products"); }
+    catch (e) { clear(box); box.appendChild(el("div", "card muted", "Could not load products.")); return; }
+    clear(box);
+    var items = data.products || [];
+    if (!items.length) { box.appendChild(el("div", "card muted", "No products yet.")); return; }
+    var card = el("div", "card");
+    items.forEach(function (p) { card.appendChild(productItem(slug, p)); });
+    box.appendChild(card);
+  }
+
+  function productItem(slug, p) {
+    var item = el("div", "pitem");
+    var row = el("div", "prow");
+    row.appendChild(el("strong", null, p.name));
+    row.appendChild(el("span", "mono", money(p.price_usdt) + " USDT0"));
+    row.appendChild(el("span", p.active ? "pill on" : "pill off", p.active ? "Active" : "Inactive"));
+
+    var ed = el("div", "pedit hide");
+    ed.appendChild(el("label", null, "Name"));
+    var ni = el("input"); ni.maxLength = 120; ni.value = p.name; ed.appendChild(ni);
+    ed.appendChild(el("label", null, "Price (USDT0)"));
+    var pi = el("input"); pi.type = "number"; pi.min = "0.01"; pi.max = "10000"; pi.step = "0.01";
+    pi.value = String(p.price_usdt); ed.appendChild(pi);
+    var edRow = el("div", "row"); edRow.style.marginTop = "12px";
+    var save = el("button", "primary", "Save");
+    save.onclick = async function () {
+      var nm = ni.value.trim();
+      var pr = parseFloat(pi.value);
+      if (!nm) { pmsg("Name can't be empty.", true); return; }
+      if (isNaN(pr) || pr < 0.01 || pr > 10000) { pmsg("Price must be between 0.01 and 10000 USDT0.", true); return; }
+      var body = {};
+      if (nm !== p.name) body.name = nm;
+      if (pr !== p.price_usdt) body.price_usdt = pr;
+      if (!Object.keys(body).length) { ed.classList.add("hide"); return; }
+      save.disabled = true;
+      try {
+        await api(productPath(slug, p.id), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        await loadProducts(slug);
+        pmsg("Saved — " + nm + " updated.");
+      } catch (e) { save.disabled = false; pmsg(productErr(e, "edit"), true); }
+    };
+    var cancel = el("button", "ghost", "Cancel");
+    cancel.onclick = function () { ed.classList.add("hide"); ni.value = p.name; pi.value = String(p.price_usdt); };
+    edRow.appendChild(save); edRow.appendChild(cancel); ed.appendChild(edRow);
+
+    var eb = el("button", "ghost", "Edit");
+    eb.onclick = function () { ed.classList.toggle("hide"); };
+    row.appendChild(eb);
+    var tog = el("button", "ghost", p.active ? "Deactivate" : "Activate");
+    tog.onclick = async function () {
+      tog.disabled = true;
+      try {
+        await api(productPath(slug, p.id), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: !p.active }) });
+        await loadProducts(slug);
+        pmsg(p.active ? "Product deactivated." : "Product activated.");
+      } catch (e) { tog.disabled = false; pmsg(productErr(e, "toggle"), true); }
+    };
+    row.appendChild(tog);
+
+    item.appendChild(row);
+    item.appendChild(ed);
+    return item;
+  }
+
+  async function addProduct() {
+    if (!LAST_STORE) return;
+    var nm = byId("pName").value.trim();
+    var pr = parseFloat(byId("pPrice").value);
+    if (!nm) { pmsg("Give the product a name first.", true); return; }
+    if (isNaN(pr) || pr < 0.01 || pr > 10000) { pmsg("Price must be between 0.01 and 10000 USDT0.", true); return; }
+    var body = { name: nm, price_usdt: pr };
+    var blurb = byId("pBlurb").value.trim(); if (blurb) body.blurb = blurb;
+    var cta = byId("pCta").value.trim(); if (cta) body.cta_text = cta;
+    var btn = byId("pAdd"); btn.disabled = true;
+    try {
+      await api("/api/merchant/stores/" + encodeURIComponent(LAST_STORE) + "/products", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      byId("pName").value = ""; byId("pPrice").value = ""; byId("pBlurb").value = ""; byId("pCta").value = "";
+      await loadProducts(LAST_STORE);
+      pmsg("Added " + nm + " to the catalog.");
+    } catch (e) { pmsg(productErr(e, "add"), true); }
+    btn.disabled = false;
   }
 
   // ---- one order ----
@@ -670,6 +819,7 @@
   byId("signOut").onclick = signOut;
   byId("backToMain").onclick = function () { show("viewMain"); };
   byId("backFromOrder").onclick = function () { if (LAST_STORE) openStore(LAST_STORE); else show("viewMain"); };
+  byId("pAdd").onclick = addProduct;
   byId("whSave").onclick = saveWebhook;
   byId("whDelete").onclick = deleteWebhook;
   byId("csvOrders").onclick = function () { downloadCsv("/api/merchant/export/orders.csv", "orders.csv"); };
