@@ -1260,6 +1260,8 @@ def library(request: Request, session: Session = Depends(get_session)):
             "product": product.name if product else None,
             "amount": order.expected_micro / 1e6,
             "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+            # Phase 1.6: lets the buyer UI offer confirm/dispute while still 'pending'.
+            "eval_status": order.eval_status,
             "kind": delivery_row.kind if delivery_row else "text",
             # The authenticated wallet owner may see the full Delivery payload —
             # this is the ONLY post-gating path to an entitlement-backed text
@@ -1269,6 +1271,51 @@ def library(request: Request, session: Session = Depends(get_session)):
         _augment_gated(session, order, item)
         purchases.append(item)
     return {"wallet": wallet, "purchases": purchases}
+
+
+class EvaluateBody(BaseModel):
+    order_id: str = Field(min_length=1, max_length=32)
+    verdict: Literal["confirm", "reject"]
+
+
+@app.post("/api/library/evaluate")
+@limiter.limit("30/minute")
+def library_evaluate(
+    request: Request, body: EvaluateBody, session: Session = Depends(get_session)
+):
+    """The paying buyer confirms or disputes a delivered order (Phase 1.6). Gated by
+    the same wallet-signature session as /api/library, and only for an order whose
+    on-chain payer IS the authenticated wallet. Reputation-only: it never moves funds
+    (a dispute is not a refund) — it feeds success_rate. Idempotent: a settled
+    evaluation is not re-opened; an unknown/foreign order is an opaque 404."""
+    if not config.SIGNING_KEY:
+        raise HTTPException(503, "sign-in not configured")
+    try:
+        wallet = delivery.load_session_token(_bearer(request))
+    except SignatureExpired:
+        raise HTTPException(401, "session expired") from None
+    except BadSignature:
+        raise HTTPException(401, "invalid session") from None
+    order = session.get(Order, body.order_id)
+    if (
+        order is None
+        or order.from_addr is None
+        or order.from_addr.lower() != wallet
+        or order.status not in checkout.TERMINAL_DELIVERED
+    ):
+        raise HTTPException(404, "order not found")
+    if order.eval_status not in ("none", "pending"):
+        raise HTTPException(409, "order already evaluated")
+    order.eval_status = "confirmed" if body.verdict == "confirm" else "rejected"
+    log_event(
+        session,
+        "api",
+        f"order.eval_{order.eval_status}",
+        store_id=order.store_id,
+        order_id=order.id,
+    )
+    session.commit()
+    return {"order_id": order.id, "eval_status": order.eval_status}
 
 
 class WaitlistBody(BaseModel):

@@ -70,6 +70,7 @@ def _order(
     oid=None,
     from_addr=None,
     paid_at=None,
+    eval_status="none",
 ):
     import uuid
 
@@ -85,6 +86,7 @@ def _order(
                 channel=channel,
                 from_addr=from_addr,
                 paid_at=paid_at,
+                eval_status=eval_status,
             )
         )
         s.commit()
@@ -483,7 +485,7 @@ def test_discovery_trust_tier_graduation_and_demote():
         for i in range(n):
             _order(sid, "delivered", from_addr="0x" + str(i) * 40, oid=f"{sid}d{i}")
 
-    fresh = _seed(slug="tier-new")  # 0 sales
+    _seed(slug="tier-new")  # 0 sales
     emerging = _seed(slug="tier-emerging")
     deliver(emerging, 1)
     established = _seed(slug="tier-established")
@@ -504,6 +506,130 @@ def test_discovery_trust_tier_graduation_and_demote():
     assert rows["tier-established"]["trust_tier"] == "established"
     assert rows["tier-trusted"]["trust_tier"] == "trusted"
     assert rows["tier-watch"]["trust_tier"] == "watch"  # auto-demoted (refunds)
+
+
+def test_discovery_eval_window_excludes_pending_and_counts_disputes():
+    from datetime import timedelta
+
+    from app import checkout
+    from app.agentic import EVAL_WINDOW_DAYS
+
+    recent = checkout._now()
+    old = checkout._now() - timedelta(days=EVAL_WINDOW_DAYS + 1)
+    sid = _seed(slug="evalshop")
+    # buyer-confirmed -> good
+    _order(
+        sid, "delivered", from_addr="0x" + "1" * 40, eval_status="confirmed", oid="ev1"
+    )
+    # pending, still inside the window -> not yet counted (auto-confirm pending)
+    _order(
+        sid,
+        "delivered",
+        from_addr="0x" + "2" * 40,
+        paid_at=recent,
+        eval_status="pending",
+        oid="ev2",
+    )
+    # pending but past the window -> auto-confirmed at read -> good
+    _order(
+        sid,
+        "delivered",
+        from_addr="0x" + "3" * 40,
+        paid_at=old,
+        eval_status="pending",
+        oid="ev3",
+    )
+    # buyer-rejected -> a failure the rate must reflect
+    _order(
+        sid, "delivered", from_addr="0x" + "4" * 40, eval_status="rejected", oid="ev4"
+    )
+
+    row = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "evalshop"
+    )
+    assert row["sold_count"] == 4  # raw delivered count is unchanged
+    assert row["pending_eval_count"] == 1  # only the in-window pending
+    assert row["disputed_count"] == 1
+    # good = confirmed + window-elapsed = 2; settled = good + rejected = 3 -> 0.6667
+    assert row["success_rate"] == round(2 / 3, 4)
+
+
+def test_library_evaluate_confirm_then_locks():
+    from app import delivery
+
+    buyer = "0x" + "b" * 40
+    sid = _seed(slug="evalep")
+    _order(sid, "delivered", from_addr=buyer, eval_status="pending", oid="epord")
+    auth = {"Authorization": f"Bearer {delivery.mint_session_token(buyer)}"}
+
+    r = client.post(
+        "/api/library/evaluate",
+        json={"order_id": "epord", "verdict": "confirm"},
+        headers=auth,
+    )
+    assert r.status_code == 200 and r.json()["eval_status"] == "confirmed"
+    # a settled evaluation is not re-opened
+    r2 = client.post(
+        "/api/library/evaluate",
+        json={"order_id": "epord", "verdict": "reject"},
+        headers=auth,
+    )
+    assert r2.status_code == 409
+
+
+def test_library_evaluate_reject_feeds_success_rate():
+    from app import delivery
+
+    buyer = "0x" + "b" * 40
+    sid = _seed(slug="evalrej")
+    _order(sid, "delivered", from_addr=buyer, eval_status="pending", oid="rejord")
+    # a fresh pending delivery is not yet counted -> rate is None
+    row0 = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "evalrej"
+    )
+    assert row0["success_rate"] is None and row0["pending_eval_count"] == 1
+
+    auth = {"Authorization": f"Bearer {delivery.mint_session_token(buyer)}"}
+    client.post(
+        "/api/library/evaluate",
+        json={"order_id": "rejord", "verdict": "reject"},
+        headers=auth,
+    )
+    row1 = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "evalrej"
+    )
+    # now settled as a dispute: good 0 / settled 1 -> 0.0, and no longer pending
+    assert row1["disputed_count"] == 1 and row1["pending_eval_count"] == 0
+    assert row1["success_rate"] == 0.0
+
+
+def test_library_evaluate_rejects_foreign_and_unauthed():
+    from app import delivery
+
+    buyer = "0x" + "b" * 40
+    sid = _seed(slug="evalep2")
+    _order(sid, "delivered", from_addr=buyer, eval_status="pending", oid="epord2")
+    # a different wallet cannot evaluate someone else's order -> opaque 404
+    foreign = {
+        "Authorization": f"Bearer {delivery.mint_session_token('0x' + 'c' * 40)}"
+    }
+    r = client.post(
+        "/api/library/evaluate",
+        json={"order_id": "epord2", "verdict": "reject"},
+        headers=foreign,
+    )
+    assert r.status_code == 404
+    # no session at all -> 401
+    r2 = client.post(
+        "/api/library/evaluate", json={"order_id": "epord2", "verdict": "confirm"}
+    )
+    assert r2.status_code == 401
 
 
 def test_discovery_search_escapes_like_and_bounds_query():

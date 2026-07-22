@@ -214,6 +214,16 @@ class Order(Base):
         DateTime, nullable=False, default=_utcnow
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Phase 1.6 evaluation window: a delivered order's buyer-evaluation state, the
+    # basis for a dispute-aware success_rate. 'none' = untracked (every pre-1.6 order,
+    # counted as good — unchanged legacy reputation); a NEW delivery sets 'pending';
+    # the paying buyer may 'confirmed' (self-eval accept) or 'rejected' (dispute). A
+    # 'pending' order auto-confirms by TIME at read (paid_at older than the window =
+    # ACP 'skip' mode) — computed in the discovery query, so there is no poller and no
+    # crash-window to reconcile. Single writer per order (deliver, then one buyer act).
+    eval_status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="none", server_default="none"
+    )
     # M11 on-chain depth: the EAS receipt attestation for this order. attest_status
     # walks none -> pending -> sent -> attested | failed, driven ONLY by the dormant
     # attester worker (app.attest) — a single writer, so no CHECK constraint (which

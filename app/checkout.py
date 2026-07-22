@@ -139,7 +139,14 @@ def deliver(session: Session, order: Order):
     txn (begin_nested + UNIQUE(order_id), same idempotency as the Delivery row)
     and the Delivery payload is the text secret / license key / a short file-ready
     message. With no deliverable the behaviour is EXACTLY the legacy text path."""
-    if not transition(session, order.id, READY_TO_DELIVER, "delivered", paid_at=_now()):
+    if not transition(
+        session,
+        order.id,
+        READY_TO_DELIVER,
+        "delivered",
+        paid_at=_now(),
+        eval_status="pending",
+    ):
         return session.scalar(select(Delivery).where(Delivery.order_id == order.id))
     store = session.get(Store, order.store_id)
     deliverable = _active_deliverable(session, order.store_id, order.product_id)

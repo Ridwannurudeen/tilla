@@ -81,6 +81,10 @@ TILLA_VERSION = "0.1.0"
 # goods deliver on payment confirmation and store generation completes within the
 # request, so 10 minutes is a conservative honest upper bound covering both.
 DELIVERY_SLA_MINUTES = 10
+# Phase 1.6: a delivered sale is provisional for this window — the buyer may confirm
+# or dispute it; if they do neither, it auto-confirms (ACP 'skip' mode) and counts
+# toward success_rate. Short, because digital delivery is validated fast.
+EVAL_WINDOW_DAYS = 3
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
 # Short cache + nosniff on every machine surface. Stored content is Warden-screened
@@ -1529,17 +1533,23 @@ def _trust_tier(sold: int, success_rate: float | None) -> str:
     return "emerging"
 
 
-def _discovery_row(store: Store, pmin, pmax, sold, buyers, last_sale, refunded) -> dict:
+def _discovery_row(
+    store: Store, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending
+) -> dict:
     # Reputation signals an agent buyer can rank on, computed from terminal orders:
-    # sold = delivered count; success_rate = delivered / (delivered + refunded), the
-    # clean-delivery rate (None until a sale completes); unique_buyer_count = distinct
-    # payer addresses; last_sale_at = most recent delivery; trust_tier = the graduation
-    # ladder above. Abandoned/expired checkouts are the buyer's doing, not the store's,
-    # so they are excluded from the rate.
+    # sold_count = delivered count; success_rate = good / (good + rejected + refunded)
+    # where good = delivered minus buyer-rejected minus still-in-window (Phase 1.6);
+    # unique_buyer_count = distinct payer addresses; last_sale_at = most recent delivery;
+    # pending_eval_count = fresh sales inside the dispute window (not yet counted);
+    # disputed_count = buyer-rejected deliveries; trust_tier = the graduation ladder above.
+    # Abandoned/expired checkouts are the buyer's doing, not the store's, so excluded.
     sold = sold or 0
     refunded = refunded or 0
-    completed = sold + refunded
-    success_rate = round(sold / completed, 4) if completed else None
+    rejected = rejected or 0
+    pending = pending or 0
+    good = sold - rejected - pending
+    settled = good + rejected + refunded
+    success_rate = round(good / settled, 4) if settled else None
     return {
         "slug": store.slug,
         "name": _store_name(store),
@@ -1557,7 +1567,9 @@ def _discovery_row(store: Store, pmin, pmax, sold, buyers, last_sale, refunded) 
         "success_rate": success_rate,
         "unique_buyer_count": buyers or 0,
         "last_sale_at": (last_sale.isoformat() + "Z") if last_sale else None,
-        "trust_tier": _trust_tier(sold, success_rate),
+        "pending_eval_count": pending,
+        "disputed_count": rejected,
+        "trust_tier": _trust_tier(good, success_rate),
         "created_at": store.created_at.isoformat() + "Z",
     }
 
@@ -1571,6 +1583,18 @@ def _discovery_rows(
     session: Session, where_clauses, limit: int, offset: int, sort: str = "sold"
 ):
     delivered = Order.status.in_(checkout.TERMINAL_DELIVERED)
+    # Phase 1.6: a delivery counts toward the rate only once it is settled-evaluated —
+    # rejected is a failure; still 'pending' AND inside the dispute window (or with an
+    # unknown delivery time) is not yet counted. 'none'/'confirmed'/window-elapsed all
+    # fall through to good. cutoff = now - window, so the auto-confirm is a read-time
+    # comparison (no poller).
+    cutoff = checkout._now() - timedelta(days=EVAL_WINDOW_DAYS)
+    rejected_case = delivered & (Order.eval_status == "rejected")
+    pending_case = (
+        delivered
+        & (Order.eval_status == "pending")
+        & or_(Order.paid_at.is_(None), Order.paid_at >= cutoff)
+    )
     metrics_sq = (
         select(
             Order.store_id.label("sid"),
@@ -1580,6 +1604,8 @@ def _discovery_rows(
             ),
             func.max(case((delivered, Order.paid_at))).label("last_sale"),
             func.count(case((Order.status == "refunded", Order.id))).label("refunded"),
+            func.count(case((rejected_case, Order.id))).label("rejected"),
+            func.count(case((pending_case, Order.id))).label("pending"),
         )
         .group_by(Order.store_id)
         .subquery()
@@ -1595,9 +1621,15 @@ def _discovery_rows(
         .subquery()
     )
     sold_c = func.coalesce(metrics_sq.c.sold, 0)
-    completed_c = sold_c + func.coalesce(metrics_sq.c.refunded, 0)
-    # Untried stores (no completed sale) sort last on 'success' via a -1 sentinel.
-    success_c = case((completed_c > 0, sold_c * 1.0 / completed_c), else_=-1.0)
+    rejected_c = func.coalesce(metrics_sq.c.rejected, 0)
+    pending_c = func.coalesce(metrics_sq.c.pending, 0)
+    refunded_c = func.coalesce(metrics_sq.c.refunded, 0)
+    # good = delivered, not rejected, not still-in-window; settled excludes in-window
+    # pending, so a store's rate reflects only buyer-validated (or window-elapsed) sales.
+    good_c = sold_c - rejected_c - pending_c
+    settled_c = good_c + rejected_c + refunded_c
+    # Untried stores (nothing settled) sort last on 'success' via a -1 sentinel.
+    success_c = case((settled_c > 0, good_c * 1.0 / settled_c), else_=-1.0)
     sorts = {
         "sold": [sold_c.desc(), Store.created_at.desc(), Store.id.desc()],
         "success": [success_c.desc(), sold_c.desc(), Store.id.desc()],
@@ -1619,6 +1651,8 @@ def _discovery_rows(
             metrics_sq.c.buyers,
             metrics_sq.c.last_sale,
             metrics_sq.c.refunded,
+            metrics_sq.c.rejected,
+            metrics_sq.c.pending,
         )
         .outerjoin(price_sq, price_sq.c.sid == Store.id)
         .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
@@ -1628,10 +1662,12 @@ def _discovery_rows(
         .offset(offset)
     )
     return [
-        _discovery_row(s, pmin, pmax, sold, buyers, last_sale, refunded)
-        for s, pmin, pmax, sold, buyers, last_sale, refunded in session.execute(
-            stmt
-        ).all()
+        _discovery_row(
+            s, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending
+        )
+        for s, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending in (
+            session.execute(stmt).all()
+        )
     ]
 
 
