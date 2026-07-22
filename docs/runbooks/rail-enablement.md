@@ -31,6 +31,40 @@ or marks a settlement. Flag names below are verified against `app/config.py` on 
 | Escrow / commission jobs | `TILLA_ESCROW` | — (see custody note) | funded → released commission job |
 | Growth-draft scheduler | `TILLA_GROWTH_SCHED_ENABLED` | (incurs LLM spend; not a payment rail) | first draft→approve→publish |
 
+## Turnkey command sequence (mechanics verified from code + `docs/OPS.md`)
+
+Config is `/opt/tilla/.env` on the VPS (`root@75.119.153.252`, code at `/opt/tilla`, systemd unit
+`tilla-api`). The `.env` is **server-owned** — `scripts/deploy.sh` never writes it. Flipping a flag =
+edit that file + restart. Every `[YOU]` / `[FUNDS]` step runs as root on the VPS and **cannot be
+automated by an agent**; the `[verify]`/`[probe]` steps are read-only.
+
+**Generic per-rail sequence**
+1. `[probe]` For x402 rails, confirm the facilitator lists the scheme first. The app already runs a
+   boot-time `_probe_supported()` (`app/main.py`); `app/config.py:182` warns to flip `aggr_deferred`
+   only *after* `/supported` confirms it. Check the current `/supported` result before enabling.
+2. `[YOU]` Add the rail's env line(s) to `/opt/tilla/.env` (values are yours; secrets never leave the VPS).
+3. `[YOU]` `systemctl restart tilla-api` (systemd `Restart=always`; `/ready` may `503` for ~30s until the
+   first sweeper tick — expected).
+4. `[verify]` `curl -s https://tilla.gudman.xyz/ready` → `200` (DB + migration head + sweeper/RPC fresh).
+   The migration-head check is **dynamic** — `db.expected_migration_head()` reads the alembic scripts and
+   compares to the DB's applied head — so it auto-matches the deployed head (`0027_commission_jobs`) once
+   you migrate. (`OPS.md`'s `0008_onchain_receipts` is a stale example, not a hardcoded value.)
+5. `[FUNDS]` One real arm's-length settlement over the rail — **exactly one send**, verified with a read
+   call (`GET /api/checkout/<id>` + an independent `eth_getTransactionReceipt`), never a re-send to "check".
+6. `[record]` Append the tx to `docs/PROOF-onchain.md` in the existing format (labeled arm's-length).
+
+**Per-rail `.env` additions** (verified flag names from `app/config.py`):
+
+| Rail | `.env` lines to add | Notes |
+|---|---|---|
+| Subscriptions | `TILLA_SUBSCRIPTIONS_ENABLED=1` | + the subscription sidecar running at `TILLA_SIDECAR_URL` + `OKX_API_KEY` |
+| Metering (MPP) | `TILLA_MPP_ENABLED=1` | + `OKX_API_KEY` |
+| Batch (aggr_deferred) | `TILLA_AGGR_DEFERRED=1` | + `OKX_API_KEY` + `TILLA_SWEEP_ENABLED=1`; **probe `/supported` first** |
+| EAS attestation | `TILLA_ATTEST=1` · `TILLA_ATTESTER_KEY=<minted+funded>` | + attest RPC reachable (triple-gated) |
+| Paid Warden | `TILLA_WARDEN_PAID=1` · `TILLA_WARDEN_PAYER_KEY=<funded>` | payer wallet needs a few USDT0 |
+| ACP checkout | `TILLA_ACP_ENABLED=1` · `TILLA_ACP_SIGNING_SECRET=<secret>` | — |
+| Escrow | `TILLA_ESCROW=1` | custodial surface — read the custody note below; still no fund-moving code |
+
 ## Escrow — custody note (read before enabling `TILLA_ESCROW`)
 
 Escrow is the only custodial-adjacent surface, so it is opt-in and its flag stays OFF until you decide
