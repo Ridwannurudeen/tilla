@@ -602,11 +602,16 @@ def test_merchant_list_deliverables_metadata_only_no_secret(make_store):
     with SessionLocal() as s:
         sid = s.scalar(select(Store.id).where(Store.slug == "delui"))
         pid = s.scalar(select(Product.id).where(Product.store_id == sid))
-        s.add(Deliverable(store_id=sid, kind="text", payload="SUPER SECRET", active=True))
+        s.add(
+            Deliverable(store_id=sid, kind="text", payload="SUPER SECRET", active=True)
+        )
         s.add(
             Deliverable(
-                store_id=sid, product_id=pid, kind="license",
-                max_activations=3, active=True,
+                store_id=sid,
+                product_id=pid,
+                kind="license",
+                max_activations=3,
+                active=True,
             )
         )
         s.commit()

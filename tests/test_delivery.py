@@ -873,7 +873,9 @@ def test_per_product_deliverable_delivered_end_to_end(make_store):
     with SessionLocal() as s:
         store = s.scalar(select(Store).where(Store.slug == "pintg"))
         s.add(
-            Product(store_id=store.id, name="Deluxe", price_micro=20_000_000, active=True)
+            Product(
+                store_id=store.id, name="Deluxe", price_micro=20_000_000, active=True
+            )
         )
         s.commit()
         ids = s.scalars(
@@ -916,13 +918,17 @@ def test_per_product_deliverable_delivered_end_to_end(make_store):
         )
         assert default_dv is not None and deluxe_dv is not None  # both active
     # Buy the DELUXE product -> its Entitlement points at the deluxe deliverable.
-    cid_d = client.post("/api/checkout/pintg", json={"product_id": deluxe_id}).json()["id"]
+    cid_d = client.post("/api/checkout/pintg", json={"product_id": deluxe_id}).json()[
+        "id"
+    ]
     _confirm(cid_d, "0x" + "b" * 40, "0x" + "1" * 64)
     with SessionLocal() as s:
         ent_d = s.scalar(select(Entitlement).where(Entitlement.order_id == cid_d))
         assert ent_d is not None and ent_d.deliverable_id == deluxe_dv.id
     # Buy the PRIMARY product -> no product-specific deliverable, falls back to the default.
-    cid_p = client.post("/api/checkout/pintg", json={"product_id": primary_id}).json()["id"]
+    cid_p = client.post("/api/checkout/pintg", json={"product_id": primary_id}).json()[
+        "id"
+    ]
     _confirm(cid_p, "0x" + "c" * 40, "0x" + "2" * 64)
     with SessionLocal() as s:
         ent_p = s.scalar(select(Entitlement).where(Entitlement.order_id == cid_p))
