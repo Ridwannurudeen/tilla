@@ -75,6 +75,10 @@ ASSET = PAYMENT_ASSET  # USDT0 on X Layer
 SERVICE = "tilla"
 AGENT_ID = 6961  # Tilla's ERC-8004 agent id (OKX ASP #6961)
 TILLA_VERSION = "0.1.0"
+# Delivery-time promise surfaced to agent buyers (the ACP 'SLA' analog). Digital
+# goods deliver on payment confirmation and store generation completes within the
+# request, so 10 minutes is a conservative honest upper bound covering both.
+DELIVERY_SLA_MINUTES = 10
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
 # Short cache + nosniff on every machine surface. Stored content is Warden-screened
@@ -1245,6 +1249,11 @@ def llms_txt(
 @limiter.limit("60/minute")
 def agent_card(request: Request):
     base = config.PUBLIC_BASE_URL.rstrip("/")
+    # Lazy import avoids the agentic<-main circular import at module load. Advertising
+    # create-store's exact input contract lets an agent hiring Tilla self-serve without
+    # trial and error (the ACP 'requirement schema' idea, applied to our own service).
+    from app.main import CreateStoreBody
+
     body = {
         "name": "Tilla",
         "description": (
@@ -1259,12 +1268,32 @@ def agent_card(request: Request):
                 "name": "Create a storefront",
                 "description": "Spin up a live one-product crypto store.",
                 "x402": {"endpoint": "/create-store", "price": "1 USDT"},
+                "input_schema": CreateStoreBody.model_json_schema(),
+                "sample_request": {
+                    "description": "single-origin coffee beans, roasted to order",
+                    "theme": "original",
+                },
+                "sla_minutes": DELIVERY_SLA_MINUTES,
             },
             {
                 "id": "buy",
                 "name": "Buy from a store",
                 "description": "Purchase a store's product; payTo is the merchant.",
                 "x402": {"endpoint": "/s/{slug}/buy"},
+                "input_schema": {
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {
+                        "slug": {"type": "string", "description": "store slug"},
+                        "product_id": {
+                            "type": "integer",
+                            "description": (
+                                "product to buy; omit for the primary product"
+                            ),
+                        },
+                    },
+                },
+                "sla_minutes": DELIVERY_SLA_MINUTES,
             },
         ],
         "payment": {

@@ -104,6 +104,19 @@ def test_agent_card_shape():
     assert card["discovery"]["resources"] == "/discovery/resources"
 
 
+def test_agent_card_skills_carry_input_schema_and_sla():
+    card = client.get("/.well-known/agent-card.json").json()
+    skills = {s["id"]: s for s in card["skills"]}
+    cs = skills["create-store"]
+    # the create-store input contract is the real CreateStoreBody schema
+    assert "description" in cs["input_schema"]["properties"]
+    assert "description" in cs["input_schema"]["required"]
+    assert cs["sample_request"]["description"]
+    assert isinstance(cs["sla_minutes"], int) and cs["sla_minutes"] > 0
+    # buy advertises the optional product_id selector
+    assert "product_id" in skills["buy"]["input_schema"]["properties"]
+
+
 # ------------------------------------------------------------ feed.json
 def test_feed_validates_against_pinned_schema():
     _seed(slug="feedshop", price_micro=9_500_000)
