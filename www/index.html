@@ -197,6 +197,7 @@
     color:color-mix(in srgb,var(--text) 62%,transparent);
     display:inline-block; transition:transform .15s ease, color .15s ease; }
   .row a:hover .arrow{ transform:translateX(6px); color:var(--text); }
+  .stores-all{ margin-top:clamp(20px,3.5vh,32px); }
 
   /* ---------- the machine surface (terminal / ledger) ---------- */
   .term{ margin-top:clamp(30px,5vh,52px); border:1px solid var(--hairline); border-radius:4px;
@@ -310,9 +311,9 @@
   <section class="sec reveal" id="stores" aria-labelledby="storesTitle">
     <div class="wrap">
       <p class="sec-eyebrow mono">Live now</p>
-      <h2 id="storesTitle">Four signed pages in one ledger.</h2>
+      <h2 id="storesTitle">Signed pages in one ledger.</h2>
       <p class="sec-note">Real stores rendered by Tilla — live checkout included, no mockups.
-        Each wears a different theme; all settle in the same ledger.</p>
+        Every one settles in the same ledger, bought by humans on the page and by agents over x402.</p>
       <ol class="ledger">
         <li class="row"><a href="/s/invoice-flow/">
           <span class="idx mono" aria-hidden="true">01</span>
@@ -339,6 +340,7 @@
           <span class="arrow" aria-hidden="true">→</span>
         </a></li>
       </ol>
+      <p class="stores-all"><a class="cta-ghost mono" id="storesAll" href="/marketplace.html">Browse the full marketplace <span class="arr" aria-hidden="true">→</span></a></p>
     </div>
   </section>
 
@@ -508,6 +510,84 @@
   } else {
     els.forEach(function (el) { el.classList.add("in"); });
   }
+})();
+</script>
+<script>
+(function () {
+  "use strict";
+  /* ---- Live store teaser: upgrade the static ledger rows with discovery data.
+     Progressive enhancement — on any fetch failure or an empty feed the static
+     fallback rows and the count-agnostic headline stay untouched. Every
+     store-provided string is inserted via createElement + textContent only,
+     never as markup — the discovery data is merchant-controlled. ---- */
+  var ol = document.querySelector("#stores .ledger");
+  var title = document.getElementById("storesTitle");
+  if (!ol || !title) return;
+
+  function row(s, i) {
+    var li = document.createElement("li");
+    li.className = "row";
+    var a = document.createElement("a");
+    if (typeof s.url === "string") a.href = s.url;
+
+    var idx = document.createElement("span");
+    idx.className = "idx mono";
+    idx.setAttribute("aria-hidden", "true");
+    idx.textContent = (i < 9 ? "0" : "") + (i + 1);
+    a.appendChild(idx);
+
+    var slug = document.createElement("span");
+    slug.className = "slug mono";
+    slug.textContent = String(s.url || "");
+    a.appendChild(slug);
+
+    var meta = document.createElement("span");
+    meta.className = "meta";
+    var b = document.createElement("b");
+    b.textContent = String(s.name || s.slug || "");
+    meta.appendChild(b);
+    meta.appendChild(document.createTextNode(" — " + String(s.description || "")));
+    a.appendChild(meta);
+
+    var arrow = document.createElement("span");
+    arrow.className = "arrow";
+    arrow.setAttribute("aria-hidden", "true");
+    arrow.textContent = "→";
+    a.appendChild(arrow);
+
+    li.appendChild(a);
+    return li;
+  }
+
+  fetch("/discovery/resources?limit=6")
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .then(function (data) {
+      if (!data || !Array.isArray(data.resources) || !data.resources.length) return;
+      ol.textContent = "";
+      for (var i = 0; i < data.resources.length; i++) {
+        ol.appendChild(row(data.resources[i], i));
+      }
+      if (typeof data.total === "number" && data.total > 0) {
+        title.textContent = data.total === 1
+          ? "1 signed page in one ledger."
+          : data.total + " signed pages in one ledger.";
+        var all = document.getElementById("storesAll");
+        if (all && data.total > 1) {
+          all.textContent = "Browse all " + data.total + " storefronts ";
+          var arr = document.createElement("span");
+          arr.className = "arr";
+          arr.setAttribute("aria-hidden", "true");
+          arr.textContent = "→";
+          all.appendChild(arr);
+        }
+      }
+    })
+    .catch(function () {
+      /* static fallback rows stay — a marketing page never shows a broken list */
+    });
 })();
 </script>
 </body>
