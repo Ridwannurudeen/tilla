@@ -29,7 +29,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0029_custom_domain"
-down_revision: Union[str, None] = "0027_commission_jobs"
+down_revision: Union[str, None] = "0028_storefront_depth"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

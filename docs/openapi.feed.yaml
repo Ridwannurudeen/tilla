@@ -142,3 +142,17 @@ properties:
                 type: string
               description:
                 type: string
+        # Phase 1.2 agent-surface (additive): a typed JSON-Schema of the fields an
+        # agent may supply to the x402 buy endpoint. Both are optional query params —
+        # the product is fixed by the x402 endpoint path and payment travels in the
+        # x402 header. Feed consumers that predate it ignore the unknown key.
+        input_schema:
+          type: object
+          additionalProperties: true
+          required: [type, properties]
+          properties:
+            type:
+              type: string
+              const: object
+            properties:
+              type: object
