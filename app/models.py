@@ -322,6 +322,15 @@ class Deliverable(Base):
     )
     # kind='license' only (default 3); NULL for file/text.
     max_activations: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Versioned releases (0028): the release number within a (store, product, kind)
+    # lineage. A plain replace inserts a fresh version 1 row (past buyers keep their
+    # bought version); publishing a NEW VERSION inserts version = prev + 1, and a past
+    # buyer's entitlement rolls forward to the highest active version of the same kind
+    # (main._current_version), so they re-download the newest release. Every pre-0028
+    # deliverable backfills to 1.
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow

@@ -263,6 +263,7 @@ def create_order(
     store: Store,
     product: Product,
     referrer_addr: str | None = None,
+    price_micro_override: int | None = None,
 ) -> Order:
     """Insert a pending order with a unique per-address expected_micro. Redraws
     the offset on collision (app check) or IntegrityError (index backstop);
@@ -270,12 +271,24 @@ def create_order(
 
     ``referrer_addr`` (M13, additive) is the referring agent's payout wallet, already
     validated + lowercased by the caller. First-write-wins: it is set once here and
-    never mutated, so attribution is immutable after order creation."""
+    never mutated, so attribution is immutable after order creation.
+
+    ``price_micro_override`` (storefront depth, additive) is the buyer-chosen price for a
+    membership tier or a pay-what-you-want product — a positive micro-USDT int the CALLER
+    has already validated against the product's pricing_params (tier price / >= PWYW
+    floor). None keeps the product's list price, byte-identical to the pre-override flow.
+    It is recorded on ``amount_micro`` (so the paid amount maps back to the chosen tier),
+    while ``expected_micro`` still carries the unique matching offset."""
     now = _now()
     created_block = _current_head()
+    base_price = (
+        price_micro_override
+        if price_micro_override is not None
+        else product.price_micro
+    )
     for _ in range(config.AMOUNT_ALLOC_RETRIES):
         offset = random.randint(config.AMOUNT_OFFSET_MIN, config.AMOUNT_OFFSET_MAX)
-        expected = product.price_micro + offset
+        expected = base_price + offset
         if _amount_taken(session, store.pay_to, expected, now):
             continue
         order = Order(
@@ -284,7 +297,7 @@ def create_order(
             product_id=product.id,
             pay_to=store.pay_to,
             network=payment.CANONICAL_CHAIN.caip2,
-            amount_micro=product.price_micro,
+            amount_micro=base_price,
             expected_micro=expected,
             status="pending",
             referrer_addr=referrer_addr,

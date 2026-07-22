@@ -745,6 +745,10 @@ def _order_response(
         "amount_micro": order.expected_micro,
         "pay_to": order.pay_to,
     }
+    # Storefront depth: the membership tier the paid amount maps to (if any).
+    tier_name = _membership_tier_name(session, order)
+    if tier_name:
+        out["tier"] = tier_name
     if terminal:
         delivery_row = session.scalar(
             select(Delivery).where(Delivery.order_id == order.id)
@@ -786,6 +790,27 @@ def _order_response(
     return out
 
 
+def _current_version(session: Session, deliverable: Deliverable) -> Deliverable:
+    """Roll an entitlement's deliverable FORWARD to the store's current active version in
+    the same (store, product, kind) lineage — the versioned-releases mechanism: a past
+    buyer re-downloads the newest release. Returns the highest active deliverable of the
+    same kind whose ``version`` is strictly greater, else the deliverable unchanged. A
+    plain replace (which keeps version 1) never satisfies ``version >`` so it never rolls
+    a past buyer forward; only an explicit new version (version = prev + 1) does."""
+    q = select(Deliverable).where(
+        Deliverable.store_id == deliverable.store_id,
+        Deliverable.kind == deliverable.kind,
+        Deliverable.active.is_(True),
+        Deliverable.version > deliverable.version,
+    )
+    if deliverable.product_id is None:
+        q = q.where(Deliverable.product_id.is_(None))
+    else:
+        q = q.where(Deliverable.product_id == deliverable.product_id)
+    newer = session.scalar(q.order_by(Deliverable.version.desc()).limit(1))
+    return newer or deliverable
+
+
 def _augment_gated(session: Session, order: Order, out: dict) -> None:
     """Add the additive M4 keys — ``download_url`` (file) / ``license_key``
     (license) — minted fresh at read time. Deployed store pages ignore unknown
@@ -798,6 +823,11 @@ def _augment_gated(session: Session, order: Order, out: dict) -> None:
     deliverable = session.get(Deliverable, ent.deliverable_id)
     if deliverable is None:
         return
+    # Versioned releases: a file re-download follows the lineage forward to the current
+    # active version, so a past buyer always gets the newest file. License keys live on
+    # the entitlement (version-independent), so a license is left unchanged.
+    if deliverable.kind == "file":
+        deliverable = _current_version(session, deliverable)
     if deliverable.kind == "license" and ent.license_key:
         out["license_key"] = ent.license_key
     elif deliverable.kind == "file" and ent.download_count < deliverable.max_downloads:
@@ -817,6 +847,12 @@ class CheckoutCreateBody(BaseModel):
     # Both absent -> the primary product, byte-identical to the single-product flow.
     product_id: int | None = None
     product_index: int | None = None
+    # Storefront depth (additive, optional). ``tier`` is the buyer-chosen membership tier
+    # NAME (its configured price becomes the order amount); ``amount_micro`` is the
+    # buyer-chosen pay-what-you-want amount (must be >= the configured floor). Both absent
+    # -> the product list price, byte-identical to the pre-storefront-depth flow.
+    tier: str | None = Field(default=None, max_length=60)
+    amount_micro: StrictInt | None = None
 
     @field_validator("ref")
     @classmethod
@@ -825,6 +861,64 @@ class CheckoutCreateBody(BaseModel):
             return affiliates.normalize_ref(v)
         except affiliates.RefRejected as exc:
             raise ValueError(str(exc)) from exc
+
+
+def _pricing_params(product: Product) -> dict:
+    return product.pricing_params if isinstance(product.pricing_params, dict) else {}
+
+
+def _resolve_checkout_price(
+    product: Product, tier: str | None, amount_micro: int | None
+) -> int | None:
+    """The buyer-chosen order price (micro-USDT) for a membership / pay-what-you-want
+    product, or None for a plain list-price product. Fail-closed:
+
+    - Membership: the buyer MUST name a configured tier (400 if none picked, 404 if the
+      name is unknown); the tier's price is returned.
+    - Pay-what-you-want: the buyer MUST name an amount (400 if absent) that is at or above
+      the configured floor (400 below the floor).
+
+    A product without membership/pwyw config ignores tier/amount and returns None so the
+    caller uses the product list price."""
+    params = _pricing_params(product)
+    membership = params.get("membership_tiers")
+    pwyw_min = params.get("pwyw_min_micro")
+    if isinstance(membership, list) and membership:
+        if not tier:
+            raise HTTPException(400, "select a membership tier")
+        match = next(
+            (t for t in membership if isinstance(t, dict) and t.get("name") == tier),
+            None,
+        )
+        if match is None:
+            raise HTTPException(404, "unknown membership tier")
+        return int(match["price_micro"])
+    if isinstance(pwyw_min, int):
+        if amount_micro is None:
+            raise HTTPException(400, "choose an amount to pay")
+        if amount_micro < pwyw_min:
+            raise HTTPException(400, "amount is below the minimum")
+        return int(amount_micro)
+    return None
+
+
+def _membership_tier_name(session: Session, order: Order) -> str | None:
+    """The membership tier NAME an order's paid amount maps to, or None. Derived by
+    matching ``order.amount_micro`` (the chosen tier price recorded at checkout) against
+    the product's configured membership tiers — so the tier is recorded by the amount,
+    with no extra column."""
+    if order.product_id is None:
+        return None
+    product = session.get(Product, order.product_id)
+    if product is None:
+        return None
+    membership = _pricing_params(product).get("membership_tiers")
+    if not isinstance(membership, list):
+        return None
+    for t in membership:
+        if isinstance(t, dict) and int(t.get("price_micro", -1)) == order.amount_micro:
+            return t.get("name")
+    return None
 
 
 # ---------- store checkout: buyer pays the merchant ----------
@@ -868,16 +962,32 @@ def create_checkout(
     else:
         product = products[0]
     referrer_addr = body.ref if body is not None else None
+    tier = body.tier if body is not None else None
+    chosen_amount = body.amount_micro if body is not None else None
+    price_override = _resolve_checkout_price(product, tier, chosen_amount)
     try:
-        order = checkout.create_order(session, store, product, referrer_addr)
+        order = checkout.create_order(
+            session, store, product, referrer_addr, price_micro_override=price_override
+        )
     except checkout.AmountUnavailable as exc:
         raise HTTPException(503, "checkout busy, retry") from exc
-    log_event(session, "api", "order.created", store_id=store.id, order_id=order.id)
+    log_event(
+        session,
+        "api",
+        "order.created",
+        store_id=store.id,
+        order_id=order.id,
+        data={"tier": _membership_tier_name(session, order)}
+        if price_override is not None
+        else None,
+    )
     session.commit()
+    tier_name = _membership_tier_name(session, order)
     return {
         "id": order.id,
         "pay_to": store.pay_to,
         "product_name": product.name,
+        **({"tier": tier_name} if tier_name else {}),
         # Phase 1.3 SLA: the delivery-time promise (minutes) shown to the buyer as
         # an ETA, and consumed by embed/custom checkout frontends.
         "sla_minutes": agentic._effective_sla(product),
@@ -1019,6 +1129,43 @@ def _deliverable_product_id(session: Session, store: Store, raw: object) -> int 
     return pid
 
 
+def _truthy(value: object) -> bool:
+    """Coerce a form/JSON flag to bool: JSON true, or the strings '1'/'true'/'yes'/'on'
+    (a multipart field is always a string)."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_deliverable_version(
+    session: Session,
+    store_id: int,
+    product_id: int | None,
+    kind: str,
+    versioned: bool,
+) -> int:
+    """The ``version`` for a new deliverable. A plain create/replace is a fresh lineage
+    (version 1). A versioned release (versioned=True) is ``max(existing version) + 1`` over
+    every deliverable of the SAME (store, product, kind) — active or not, so the number is
+    strictly monotonic and always greater than any past buyer's entitlement version. It
+    409s when no deliverable of that kind exists yet (nothing to version)."""
+    if not versioned:
+        return 1
+    q = select(func.max(Deliverable.version)).where(
+        Deliverable.store_id == store_id, Deliverable.kind == kind
+    )
+    if product_id is None:
+        q = q.where(Deliverable.product_id.is_(None))
+    else:
+        q = q.where(Deliverable.product_id == product_id)
+    prev_max = session.scalar(q)
+    if prev_max is None:
+        raise HTTPException(
+            409, "no existing deliverable of this kind to publish a new version of"
+        )
+    return int(prev_max) + 1
+
+
 def _positive_int(value, default: int) -> int:
     if value is None:
         return default
@@ -1104,6 +1251,17 @@ class _WholesaleTier(BaseModel):
         raise ValueError("buyer must be 'any_agent' or 'erc8004:<id>'")
 
 
+class _MembershipTier(BaseModel):
+    # Storefront depth: one named access tier a buyer may pick at checkout. name is
+    # merchant copy (rendered client-side via textContent — never innerHTML); price_micro
+    # is a StrictInt (no float amounts) in the same micro-USDT range as a wholesale tier.
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=60)
+    price_micro: StrictInt = Field(
+        ge=config.TIER_PRICE_MICRO_MIN, le=config.TIER_PRICE_MICRO_MAX
+    )
+
+
 class PricingBody(BaseModel):
     pricing_model: Literal["one_time", "batch", "metered", "subscription"]
     params: dict | None = None
@@ -1111,6 +1269,15 @@ class PricingBody(BaseModel):
     # migration. A pricing call rewrites the product's wholesale terms wholesale:
     # omitted/None clears any prior tiers (the same replace semantics as params).
     tiers: list[_WholesaleTier] | None = None
+    # Storefront depth — membership tiers + pay-what-you-want, both additive on the SAME
+    # pricing_params JSON column (no migration). A buyer picks a membership tier by name
+    # (its price becomes the order amount) OR names an amount >= pwyw_min_micro; the two
+    # are mutually exclusive (rejected together). Omitted/None clears any prior value, the
+    # same replace semantics as tiers/params.
+    membership_tiers: list[_MembershipTier] | None = None
+    pwyw_min_micro: StrictInt | None = Field(
+        default=None, ge=config.TIER_PRICE_MICRO_MIN, le=config.TIER_PRICE_MICRO_MAX
+    )
 
 
 _PRICING_PARAM_MODELS = {
@@ -1138,6 +1305,22 @@ def _validate_tiers(
             raise HTTPException(
                 422, "tier price_micro must not exceed the base product price"
             )
+    return [t.model_dump() for t in tiers]
+
+
+def _validate_membership_tiers(
+    tiers: list[_MembershipTier] | None,
+) -> list[dict] | None:
+    """Normalize membership tiers or raise 422: at most TIERS_MAX and no duplicate
+    names (case-insensitive — 'Gold' and 'gold' would be an ambiguous pick). Per-tier
+    shape/bounds are enforced by the model."""
+    if not tiers:
+        return None
+    if len(tiers) > config.TIERS_MAX:
+        raise HTTPException(422, f"at most {config.TIERS_MAX} membership tiers")
+    names = [t.name.strip().lower() for t in tiers]
+    if len(set(names)) != len(names):
+        raise HTTPException(422, "duplicate membership tier name")
     return [t.model_dump() for t in tiers]
 
 
@@ -1198,10 +1381,22 @@ async def set_pricing(
     if product is None:
         raise HTTPException(409, "store has no active product")
     tiers = _validate_tiers(parsed.tiers, product.price_micro)
-    # Tiers ride the SAME JSON column under a 'tiers' key alongside any model params.
+    membership_tiers = _validate_membership_tiers(parsed.membership_tiers)
+    # Membership tiers and pay-what-you-want are two ways to set the checkout price, so a
+    # single product can carry only one (both together is an ambiguous checkout).
+    if membership_tiers and parsed.pwyw_min_micro is not None:
+        raise HTTPException(
+            422, "a product cannot set both membership tiers and pay-what-you-want"
+        )
+    # Tiers/membership/pwyw all ride the SAME JSON column under their own keys alongside
+    # any model params. Absent keys clear prior values (whole-rewrite semantics).
     merged = dict(params) if params else {}
     if tiers:
         merged["tiers"] = tiers
+    if membership_tiers:
+        merged["membership_tiers"] = membership_tiers
+    if parsed.pwyw_min_micro is not None:
+        merged["pwyw_min_micro"] = parsed.pwyw_min_micro
     product.pricing_model = parsed.pricing_model
     product.pricing_params = merged or None
     log_event(
@@ -1217,6 +1412,8 @@ async def set_pricing(
         "pricing_model": parsed.pricing_model,
         "params": params,
         "tiers": tiers,
+        "membership_tiers": membership_tiers,
+        "pwyw_min_micro": parsed.pwyw_min_micro,
     }
 
 
@@ -1252,6 +1449,9 @@ async def create_deliverable(
         except delivery.UploadTooLarge:
             raise HTTPException(413, "file exceeds the size cap") from None
         product_id = _deliverable_product_id(session, store, form.get("product_id"))
+        version = _resolve_deliverable_version(
+            session, store.id, product_id, "file", _truthy(form.get("version"))
+        )
         _deactivate_deliverables(session, store.id, product_id)
         deliverable = Deliverable(
             store_id=store.id,
@@ -1267,6 +1467,7 @@ async def create_deliverable(
             link_ttl_seconds=_positive_int(
                 form.get("link_ttl_seconds"), config.LINK_TTL_DEFAULT
             ),
+            version=version,
             active=True,
         )
     else:
@@ -1284,15 +1485,22 @@ async def create_deliverable(
                 raise HTTPException(
                     422, "text deliverable requires a non-empty payload"
                 )
+            version = _resolve_deliverable_version(
+                session, store.id, product_id, "text", _truthy(body.get("version"))
+            )
             _deactivate_deliverables(session, store.id, product_id)
             deliverable = Deliverable(
                 store_id=store.id,
                 product_id=product_id,
                 kind="text",
                 payload=payload,
+                version=version,
                 active=True,
             )
         elif kind == "license":
+            version = _resolve_deliverable_version(
+                session, store.id, product_id, "license", _truthy(body.get("version"))
+            )
             _deactivate_deliverables(session, store.id, product_id)
             deliverable = Deliverable(
                 store_id=store.id,
@@ -1301,6 +1509,7 @@ async def create_deliverable(
                 max_activations=_positive_int(
                     body.get("max_activations"), config.LICENSE_ACTIVATIONS_DEFAULT
                 ),
+                version=version,
                 active=True,
             )
         else:
@@ -1320,6 +1529,7 @@ async def create_deliverable(
         "id": deliverable.id,
         "product_id": deliverable.product_id,
         "kind": deliverable.kind,
+        "version": deliverable.version,
         "active": True,
     }
     if deliverable.kind == "file":
@@ -1452,6 +1662,9 @@ def library(request: Request, session: Session = Depends(get_session)):
             # secret (file/license also get download_url/license_key below).
             "delivery": delivery_row.payload if delivery_row else DEFAULT_DELIVERY,
         }
+        tier_name = _membership_tier_name(session, order)
+        if tier_name:
+            item["tier"] = tier_name
         _augment_gated(session, order, item)
         purchases.append(item)
     return {"wallet": wallet, "purchases": purchases}
