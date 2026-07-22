@@ -10,6 +10,8 @@ import hashlib
 import io
 import secrets
 
+import httpx
+import respx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
@@ -17,8 +19,9 @@ from sqlalchemy import select
 
 import app.main as main
 from app import checkout
+from app.config import WARDEN_SCREEN_URL
 from app.db import SessionLocal
-from app.models import Merchant, Order, Product
+from app.models import Merchant, Order, Product, Store
 
 client = TestClient(main.app)
 
@@ -448,3 +451,269 @@ def test_export_store_param_must_be_owned(make_store):
 def test_export_requires_merchant_auth():
     assert client.get("/api/merchant/export/orders.csv").status_code == 401
     assert client.get("/api/merchant/export/customers.csv").status_code == 401
+
+
+# ------------------------------------------------- merchant product catalog CRUD
+def _allow_screening():
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+
+
+@respx.mock
+def test_merchant_add_product_resyncs_storefront(make_store, tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "cat", make_store)  # primary "Thing" @ 9
+    tok = _merchant_token(acct)
+    r = client.post(
+        "/api/merchant/stores/cat/products",
+        headers=_auth(tok),
+        json={
+            "name": "Deluxe Tier",
+            "price_usdt": 25,
+            "blurb": "premium",
+            "cta_text": "Get it",
+        },
+    )
+    assert r.status_code == 200, r.text
+    rows = client.get("/api/merchant/stores/cat/products", headers=_auth(tok)).json()[
+        "products"
+    ]
+    assert [p["name"] for p in rows] == ["Thing", "Deluxe Tier"]
+    # storefront re-rendered with the new product + a second buy button
+    html = (tmp_path / "cat" / "index.html").read_text(encoding="utf-8")
+    assert "Deluxe Tier" in html and html.count('class="buy"') == 2
+    # buying the new product (index 1) charges its price
+    co = client.post("/api/checkout/cat", json={"product_index": 1}).json()
+    assert co["product_name"] == "Deluxe Tier"
+    with SessionLocal() as s:
+        assert s.get(Order, co["id"]).amount_micro == 25_000_000
+
+
+@respx.mock
+def test_merchant_edit_reprice_reflects_on_storefront_and_checkout(
+    make_store, tmp_path, monkeypatch
+):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "cat2", make_store, price_micro=9_000_000)
+    tok = _merchant_token(acct)
+    pid = client.get("/api/merchant/stores/cat2/products", headers=_auth(tok)).json()[
+        "products"
+    ][0]["id"]
+    r = client.patch(
+        f"/api/merchant/stores/cat2/products/{pid}",
+        headers=_auth(tok),
+        json={"name": "Renamed", "price_usdt": 30},
+    )
+    assert (
+        r.status_code == 200
+        and r.json()["price_usdt"] == 30.0
+        and r.json()["name"] == "Renamed"
+    )
+    html = (tmp_path / "cat2" / "index.html").read_text(encoding="utf-8")
+    assert "Renamed" in html
+    co = client.post("/api/checkout/cat2").json()
+    with SessionLocal() as s:
+        assert s.get(Order, co["id"]).amount_micro == 30_000_000
+
+
+@respx.mock
+def test_merchant_deactivate_hides_product_and_guards_last(
+    make_store, tmp_path, monkeypatch
+):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "cat3", make_store)
+    tok = _merchant_token(acct)
+    pid2 = client.post(
+        "/api/merchant/stores/cat3/products",
+        headers=_auth(tok),
+        json={"name": "Second", "price_usdt": 12},
+    ).json()["id"]
+    r = client.patch(
+        f"/api/merchant/stores/cat3/products/{pid2}",
+        headers=_auth(tok),
+        json={"active": False},
+    )
+    assert r.status_code == 200 and r.json()["active"] is False
+    html = (tmp_path / "cat3" / "index.html").read_text(encoding="utf-8")
+    assert "Second" not in html and html.count('class="buy"') == 1
+    # cannot deactivate the last active product
+    primary = next(
+        p
+        for p in client.get(
+            "/api/merchant/stores/cat3/products", headers=_auth(tok)
+        ).json()["products"]
+        if p["active"]
+    )
+    r2 = client.patch(
+        f"/api/merchant/stores/cat3/products/{primary['id']}",
+        headers=_auth(tok),
+        json={"active": False},
+    )
+    assert r2.status_code == 409
+
+
+@respx.mock
+def test_merchant_product_crud_is_idor_gated(make_store, tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "cat4", make_store)
+    other_tok = _merchant_token(other)
+    # a non-owner gets a uniform 404 (no existence oracle) on list AND add
+    assert (
+        client.get(
+            "/api/merchant/stores/cat4/products", headers=_auth(other_tok)
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/api/merchant/stores/cat4/products",
+            headers=_auth(other_tok),
+            json={"name": "X", "price_usdt": 5},
+        ).status_code
+        == 404
+    )
+
+
+def test_merchant_list_deliverables_metadata_only_no_secret(make_store):
+    from sqlalchemy import select
+
+    from app.models import Deliverable, Product
+
+    acct = Account.create()
+    _owned_store(acct, "delui", make_store)
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        sid = s.scalar(select(Store.id).where(Store.slug == "delui"))
+        pid = s.scalar(select(Product.id).where(Product.store_id == sid))
+        s.add(
+            Deliverable(store_id=sid, kind="text", payload="SUPER SECRET", active=True)
+        )
+        s.add(
+            Deliverable(
+                store_id=sid,
+                product_id=pid,
+                kind="license",
+                max_activations=3,
+                active=True,
+            )
+        )
+        s.commit()
+    r = client.get("/api/merchant/stores/delui/deliverables", headers=_auth(tok))
+    assert r.status_code == 200
+    dels = r.json()["deliverables"]
+    kinds = {(d["kind"], d["product_id"]) for d in dels}
+    assert ("text", None) in kinds and ("license", pid) in kinds
+    # the text deliverable's secret payload is NEVER exposed
+    assert "SUPER SECRET" not in r.text
+    assert all("payload" not in d for d in dels)
+
+
+def test_merchant_list_deliverables_idor_gated(make_store):
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "delui2", make_store)
+    other_tok = _merchant_token(other)
+    assert (
+        client.get(
+            "/api/merchant/stores/delui2/deliverables", headers=_auth(other_tok)
+        ).status_code
+        == 404
+    )
+
+
+def test_store_visibility_toggle_owner_only(make_store):
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "vistoggle", make_store)
+    tok = _merchant_token(owner)
+
+    r = client.post(
+        "/api/merchant/stores/vistoggle/visibility",
+        json={"visibility": "hidden"},
+        headers=_auth(tok),
+    )
+    assert r.status_code == 200 and r.json()["visibility"] == "hidden"
+    with SessionLocal() as s:
+        assert (
+            s.scalar(select(Store.visibility).where(Store.slug == "vistoggle"))
+            == "hidden"
+        )
+    # a different merchant cannot touch it -> opaque 404 (the IDOR gate)
+    other_tok = _merchant_token(other)
+    assert (
+        client.post(
+            "/api/merchant/stores/vistoggle/visibility",
+            json={"visibility": "public"},
+            headers=_auth(other_tok),
+        ).status_code
+        == 404
+    )
+    # an invalid value is rejected by the Literal body -> 422
+    assert (
+        client.post(
+            "/api/merchant/stores/vistoggle/visibility",
+            json={"visibility": "bogus"},
+            headers=_auth(tok),
+        ).status_code
+        == 422
+    )
+
+
+def test_store_agent_view_owner_only(make_store):
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "agentview", make_store)
+    tok = _merchant_token(owner)
+    r = client.get("/api/merchant/stores/agentview/agent-view", headers=_auth(tok))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["machine_endpoints"]["feed"] == "/s/agentview/feed.json"
+    assert body["machine_endpoints"]["mcp"] == "/s/agentview/mcp"
+    # the feed the owner sees is byte-for-byte what an agent gets (SLA + x402 included)
+    assert body["feed_products"] and body["feed_products"][0]["sla_minutes"] == 10
+    assert {t["name"] for t in body["mcp_tools"]} >= {
+        "list_products",
+        "get_product",
+        "create_checkout",
+    }
+    # a live public store shows in its own discovery preview with reputation fields
+    assert body["discovery"]["trust_tier"] == "new"  # no sales yet
+    assert body["discovery"]["sold_count"] == 0
+    # IDOR: another merchant cannot view it (opaque 404)
+    other_tok = _merchant_token(other)
+    assert (
+        client.get(
+            "/api/merchant/stores/agentview/agent-view", headers=_auth(other_tok)
+        ).status_code
+        == 404
+    )
+
+
+def test_store_agent_view_hidden_reports_not_listed(make_store):
+    owner = Account.create()
+    _owned_store(owner, "hiddenview", make_store)
+    tok = _merchant_token(owner)
+    client.post(
+        "/api/merchant/stores/hiddenview/visibility",
+        json={"visibility": "hidden"},
+        headers=_auth(tok),
+    )
+    body = client.get(
+        "/api/merchant/stores/hiddenview/agent-view", headers=_auth(tok)
+    ).json()
+    # honest: a hidden store tells its owner it is not currently discoverable
+    assert body["discovery"] == {"listed": False, "reason": "hidden"}

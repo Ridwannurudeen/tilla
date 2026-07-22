@@ -28,6 +28,9 @@ properties:
     type: string
   network:
     type: string
+  sla_minutes:
+    type: integer
+    minimum: 1
   deliverable_kind:
     type: string
     enum: [file, text, license]

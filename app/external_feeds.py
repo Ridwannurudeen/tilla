@@ -63,7 +63,7 @@ def _openai_product(
         "enable_search": True,
         "enable_checkout": True,
         "x402": {
-            "endpoint": f"/s/{store.slug}/buy",
+            "endpoint": f"/s/{store.slug}/buy/{product.id}",
             "network": agentic.NETWORK,
             "asset": agentic.ASSET,
             "schemes": agentic.enabled_schemes(product),
@@ -106,7 +106,8 @@ def openai_aggregate(request: Request, session: Session = Depends(get_session)):
     stores = list(
         session.scalars(
             select(Store)
-            .where(Store.status == "live")
+            # Phase 1.7: hidden (sandbox) stores stay out of the aggregate feed too.
+            .where(Store.status == "live", Store.visibility == "public")
             .order_by(Store.created_at.desc(), Store.id.desc())
         )
     )

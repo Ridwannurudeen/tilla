@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Deploy Tilla to the VPS by shipping changed files individually.
-# Never a full-directory clobber: stores/, .env and www/ are server-owned.
+# Never a full-directory clobber: stores/ and .env are server-owned
+# (the www/ pages listed below are repo-owned; the rest of www/ stays server-owned).
 set -euo pipefail
 
 VPS="root@75.119.153.252"
@@ -32,6 +33,7 @@ FILES=(
   app/subscriptions.py
   app/import_stores.py
   app/dashboard.py
+  app/self_serve.py
   app/webhooks.py
   app/refunds.py
   app/attest.py
@@ -54,6 +56,7 @@ FILES=(
   alembic/versions/0007_marketplace_citizenship.py
   alembic/versions/0008_onchain_receipts.py
   alembic/versions/0009_growth.py
+  alembic/versions/0021_self_serve_create_store.py
   scripts/backup_db.sh
   scripts/backup_offsite.sh
   scripts/restore_drill.sh
@@ -61,6 +64,16 @@ FILES=(
   themes/original.html
   themes/bold.html
   themes/editorial.html
+  themes/_fonts.html
+  themes/_checkout.html
+  themes/_dashboard.html
+  themes/og.svg
+  www/index.html
+  www/marketplace.html
+  www/receipt-demo.html
+  www/library.html
+  www/404.html
+  www/robots.txt
 )
 
 # Subscription sidecar (Node). node_modules is server-owned (installed via
@@ -111,7 +124,18 @@ ssh "$VPS" "systemctl restart tilla-api"
 # Smoke: health is up, both live stores still render (nginx serves them
 # statically — unaffected by the restart), and an unpaid create-store is still
 # x402-gated.
-curl -fsS "$BASE/health" >/dev/null
+# The restart (and any watchdog bounce while uvicorn boots + rerender_stores runs)
+# briefly 502s at the edge, so poll /health rather than a single shot that would
+# abort the whole deploy on a transient bad gateway.
+health_ok=0
+for _ in $(seq 1 20); do
+  if curl -fsS "$BASE/health" >/dev/null 2>&1; then health_ok=1; break; fi
+  sleep 2
+done
+if [ "$health_ok" != 1 ]; then
+  echo "smoke failed: /health did not reach 200 within ~40s" >&2
+  exit 1
+fi
 for slug in invoice-flow billable; do
   curl -fsS "$BASE/s/$slug/" >/dev/null
 done

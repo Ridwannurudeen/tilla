@@ -524,6 +524,164 @@ def test_migration_0014_additive_and_index_survives(tmp_path):
     con.close()
 
 
+def test_migration_0011_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m14.db"
+    r = _alembic(db, "upgrade", "0021_self_serve_create_store")
+    assert r.returncode == 0, r.stderr
+
+    # seed a product against the 0021 schema (no sla_minutes yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.execute(
+        "INSERT INTO products (id, store_id, name, price_micro, active, pricing_model,"
+        " created_at) VALUES (1,1,'Thing',9000000,1,'one_time','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    pcols = {c[1] for c in con.execute("PRAGMA table_info(products)")}
+    assert "sla_minutes" in pcols
+    # additive column backfills to NULL for the existing product (no per-product SLA)
+    assert (
+        con.execute("SELECT sla_minutes FROM products WHERE id=1").fetchone()[0] is None
+    )
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    # products add_column never touches orders — the M3 partial unique index is safe
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    # up-down-up: the column drops and re-adds, the partial index is untouched
+    r = _alembic(db, "downgrade", "0021_self_serve_create_store")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    pcols = {c[1] for c in con.execute("PRAGMA table_info(products)")}
+    assert "sla_minutes" not in pcols
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+
+
+def test_migration_0012_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m15.db"
+    r = _alembic(db, "upgrade", "0022_product_sla")
+    assert r.returncode == 0, r.stderr
+
+    # seed a delivered order against the 0022 schema (no eval_status yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, expected_micro,"
+        " paid_micro, overpaid_micro, status, created_at)"
+        " VALUES ('m15ord',1,'0xabc',9000000,9000123,9000123,0,'delivered','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "eval_status" in ocols
+    # server_default backfills the existing delivered order to 'none' (counted as good)
+    assert (
+        con.execute("SELECT eval_status FROM orders WHERE id='m15ord'").fetchone()[0]
+        == "none"
+    )
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    # native ADD COLUMN on orders leaves the M3 partial unique index intact
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "downgrade", "0022_product_sla")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "eval_status" not in ocols
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx  # survives the downgrade rebuild too
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+
+
+def test_migration_0013_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m16.db"
+    r = _alembic(db, "upgrade", "0023_order_eval_status")
+    assert r.returncode == 0, r.stderr
+
+    # seed a store against the 0023 schema (no visibility yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    scols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert "visibility" in scols
+    # server_default backfills the existing store to 'public' (unchanged discovery)
+    assert (
+        con.execute("SELECT visibility FROM stores WHERE id=1").fetchone()[0]
+        == "public"
+    )
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    # a stores column never touches orders — the M3 partial unique index is intact
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "downgrade", "0023_order_eval_status")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    scols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert "visibility" not in scols
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+
+
 def test_fresh_schema_has_marketplace_and_receipts():
     # Fresh create_all (conftest) must match the migrated schema: the new column +
     # table exist on the in-process engine used by the app/tests.

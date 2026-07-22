@@ -76,6 +76,14 @@ class Store(Base):
     # sha256 hex of the per-store manage key (capability secret handed to the
     # paid create-store caller once). NULL for legacy stores until minted.
     manage_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase 1.7 sandbox/hidden mode: 'public' (default, every existing store) shows in
+    # discovery / the aggregate feed / the sitemap; 'hidden' keeps a live store out of
+    # those bulk surfaces while it stays fully reachable by direct link (owner + agent
+    # preview). A hidden store auto-graduates to 'public' on its first delivered sale —
+    # the "clears a threshold" gate — and the owner can toggle it from the dashboard.
+    visibility: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="public", server_default="public"
+    )
     delivery: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -114,6 +122,11 @@ class Product(Base):
         String(12), nullable=False, default="one_time", server_default="one_time"
     )
     pricing_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Phase 1.3 SLA: the merchant's delivery-time promise in minutes, surfaced to
+    # buyer agents as an ETA (feed.json / MCP). NULL = no per-product override, so
+    # the agent surfaces fall back to the platform default DELIVERY_SLA_MINUTES;
+    # every pre-1.3 product is NULL, an unchanged instant-delivery promise.
+    sla_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -224,6 +237,16 @@ class Order(Base):
         DateTime, nullable=False, default=_utcnow
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Phase 1.6 evaluation window: a delivered order's buyer-evaluation state, the
+    # basis for a dispute-aware success_rate. 'none' = untracked (every pre-1.6 order,
+    # counted as good — unchanged legacy reputation); a NEW delivery sets 'pending';
+    # the paying buyer may 'confirmed' (self-eval accept) or 'rejected' (dispute). A
+    # 'pending' order auto-confirms by TIME at read (paid_at older than the window =
+    # ACP 'skip' mode) — computed in the discovery query, so there is no poller and no
+    # crash-window to reconcile. Single writer per order (deliver, then one buyer act).
+    eval_status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="none", server_default="none"
+    )
     # M11 on-chain depth: the EAS receipt attestation for this order. attest_status
     # walks none -> pending -> sending -> sent -> attested | failed, driven ONLY by the
     # dormant attester worker (app.attest) — a single writer, so no CHECK constraint
@@ -822,6 +845,43 @@ def get_or_create_merchant(session: Session, wallet_address: str) -> Merchant:
         session.add(merchant)
         session.flush()
     return merchant
+
+
+class StoreCreation(Base):
+    """A human self-serve store-creation payment intent (the paid dashboard flow).
+    The merchant pays 1 USDT to Tilla's own rail; on a verified on-chain payment
+    the store is generated with their wallet as the receive address. The
+    description is screened BEFORE a payment is offered, so a merchant is never
+    charged for content that would be blocked. UNIQUE(tx_hash) makes one submitted
+    payment fund at most one creation (SQLite treats the many pending NULLs as
+    distinct)."""
+
+    __tablename__ = "store_creations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','paid','live','failed')",
+            name="ck_store_creations_status",
+        ),
+        UniqueConstraint("tx_hash", name="uq_store_creations_tx_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    merchant_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    theme: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    expected_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
+    # pending -> paid (payment verified) -> live (store generated); 'paid' with a
+    # NULL slug is the retry window when generation failed after a real payment.
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending")
+    tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    slug: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
 
 
 def log_event(

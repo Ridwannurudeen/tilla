@@ -788,3 +788,139 @@ def test_deliver_with_license_deliverable_issues_unique_key(make_store):
         d = s.scalar(select(Delivery).where(Delivery.order_id == cid))
         assert ent.license_key.startswith("TILLA-")
         assert d.kind == "license" and d.payload == ent.license_key
+
+
+def _add_product(store_id, name, price_micro):
+    from app.models import Product
+
+    with SessionLocal() as s:
+        s.add(
+            Product(store_id=store_id, name=name, price_micro=price_micro, active=True)
+        )
+        s.commit()
+
+
+def test_checkout_product_index_selects_that_product(make_store):
+    # A store with two products: primary "Thing" @ 9, index 1 "Deluxe" @ 20.
+    sid = make_store(slug="multi", price_micro=9_000_000)
+    _add_product(sid, "Deluxe", 20_000_000)
+    r = client.post("/api/checkout/multi", json={"product_index": 1})
+    assert r.status_code == 200, r.text
+    assert r.json()["product_name"] == "Deluxe"
+    with SessionLocal() as s:
+        # amount_micro is the exact product price (offset only affects expected_micro)
+        assert s.get(Order, r.json()["id"]).amount_micro == 20_000_000
+    r0 = client.post("/api/checkout/multi", json={})
+    assert r0.json()["product_name"] == "Thing"
+    with SessionLocal() as s:
+        assert s.get(Order, r0.json()["id"]).amount_micro == 9_000_000
+
+
+def test_checkout_product_index_out_of_range_fails_closed(make_store):
+    make_store(slug="oor", price_micro=9_000_000)
+    assert (
+        client.post("/api/checkout/oor", json={"product_index": 5}).status_code == 400
+    )
+
+
+def test_checkout_no_body_defaults_to_primary(make_store):
+    make_store(slug="prim", price_micro=9_000_000)
+    r = client.post("/api/checkout/prim")
+    assert r.status_code == 200 and r.json()["product_name"] == "Thing"
+
+
+def test_checkout_by_product_id_charges_that_product(make_store):
+    from sqlalchemy import select
+
+    from app.models import Product
+
+    sid = make_store(slug="byid", price_micro=9_000_000)  # primary "Thing" @ 9
+    _add_product(sid, "Deluxe", 20_000_000)
+    with SessionLocal() as s:
+        deluxe_id = s.scalars(
+            select(Product.id).where(Product.store_id == sid).order_by(Product.id)
+        ).all()[1]
+    r = client.post("/api/checkout/byid", json={"product_id": deluxe_id})
+    assert r.status_code == 200 and r.json()["product_name"] == "Deluxe"
+    with SessionLocal() as s:
+        assert s.get(Order, r.json()["id"]).amount_micro == 20_000_000
+
+
+def test_checkout_foreign_or_unknown_product_id_fails_closed(make_store):
+    from sqlalchemy import select
+
+    from app.models import Product
+
+    make_store(slug="sa", price_micro=9_000_000)
+    b = make_store(slug="sb", price_micro=5_000_000)
+    with SessionLocal() as s:
+        b_pid = s.scalar(select(Product.id).where(Product.store_id == b))
+    # store sa checkout with store sb's product id -> 404 (no IDOR, no wrong charge)
+    assert (
+        client.post("/api/checkout/sa", json={"product_id": b_pid}).status_code == 404
+    )
+    # a product id that doesn't exist -> 404
+    assert (
+        client.post("/api/checkout/sa", json={"product_id": 10_000_000}).status_code
+        == 404
+    )
+
+
+# ------------------------------------------------ per-product deliverables (C)
+def test_active_deliverable_prefers_product_then_store_default(make_store):
+    from sqlalchemy import select
+
+    import app.checkout as checkout
+    from app.models import Deliverable, Product
+
+    sid = make_store(slug="del", price_micro=9_000_000)  # primary "Thing"
+    _add_product(sid, "Deluxe", 20_000_000)
+    with SessionLocal() as s:
+        ids = s.scalars(
+            select(Product.id).where(Product.store_id == sid).order_by(Product.id)
+        ).all()
+        primary_id, deluxe_id = ids[0], ids[1]
+        s.add(
+            Deliverable(store_id=sid, kind="text", payload="STORE DEFAULT", active=True)
+        )
+        s.add(
+            Deliverable(
+                store_id=sid,
+                product_id=deluxe_id,
+                kind="text",
+                payload="DELUXE ONLY",
+                active=True,
+            )
+        )
+        s.commit()
+    with SessionLocal() as s:
+        # a deluxe order gets the deluxe-specific deliverable
+        assert checkout._active_deliverable(s, sid, deluxe_id).payload == "DELUXE ONLY"
+        # the primary order (no primary-specific deliverable) falls back to the default
+        assert (
+            checkout._active_deliverable(s, sid, primary_id).payload == "STORE DEFAULT"
+        )
+        # no product context -> store default (legacy behaviour)
+        assert checkout._active_deliverable(s, sid).payload == "STORE DEFAULT"
+
+
+def test_deliverable_product_id_rejects_foreign_product(make_store):
+    from sqlalchemy import select
+
+    import pytest
+    from fastapi import HTTPException
+
+    import app.main as main
+    from app.models import Product, Store
+
+    sid = make_store(slug="dpv", price_micro=9_000_000)
+    other = make_store(slug="dpv2", price_micro=5_000_000)
+    with SessionLocal() as s:
+        store = s.get(Store, sid)
+        pid = s.scalar(select(Product.id).where(Product.store_id == sid))
+        other_pid = s.scalar(select(Product.id).where(Product.store_id == other))
+        assert main._deliverable_product_id(s, store, None) is None
+        assert main._deliverable_product_id(s, store, str(pid)) == pid
+        with pytest.raises(HTTPException) as e:
+            main._deliverable_product_id(s, store, str(other_pid))
+        assert e.value.status_code == 422

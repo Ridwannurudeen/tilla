@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from app.render import DEFAULT_PALETTE, render, render_og
+from app.render import DEFAULT_PALETTE, _dna_ctx, render, render_og
 
 ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"
 SLUG = "acme-supply"
@@ -236,7 +236,7 @@ def test_og_and_canonical_meta_present(theme):
     }
     html = render(content, ADDR, SLUG, theme)
     canonical = f"https://tilla.gudman.xyz/s/{SLUG}/"
-    og_image = f"https://tilla.gudman.xyz/s/{SLUG}/og.svg"
+    og_image = f"https://tilla.gudman.xyz/s/{SLUG}/og.png"
     assert f'<link rel="canonical" href="{canonical}">' in html
     assert f'<meta property="og:image" content="{og_image}">' in html
     assert f'<meta name="twitter:image" content="{og_image}">' in html
@@ -262,7 +262,7 @@ def test_jsonld_present_and_valid_product(theme):
     assert ld["offers"]["price"] == "9"
     assert ld["offers"]["priceCurrency"] == "USDT"
     assert ld["offers"]["url"] == f"https://tilla.gudman.xyz/s/{SLUG}/"
-    assert ld["image"] == f"https://tilla.gudman.xyz/s/{SLUG}/og.svg"
+    assert ld["image"] == f"https://tilla.gudman.xyz/s/{SLUG}/og.png"
 
 
 @pytest.mark.parametrize("theme", THEMES)
@@ -310,3 +310,100 @@ def test_render_og_uses_valid_palette_and_copy():
     assert "Widget Pro" in svg
     assert "9 USDT" in svg
     assert "#111111" in svg and "#222222" in svg
+
+
+# ---------- Design DNA tokens (docs/DESIGN-DNA.md) ----------
+# Defaults = the pre-DNA look: a store without design_dna must get exactly these.
+DNA_DEFAULTS = {
+    "DNA_SCALE": "1.25",
+    "DNA_WEIGHT": "450",
+    "DNA_SPACE": "1",
+    "DNA_HERO": "stacked",
+    "DNA_TEXTURE": "medium",
+}
+
+VALID_DNA = {
+    "scale": "monumental",
+    "weight": "heavy",
+    "rhythm": "airy",
+    "hero": "offset",
+    "texture": "dense",
+}
+
+
+def test_dna_ctx_defaults_when_design_dna_absent():
+    assert _dna_ctx({"store_name": "X"}) == DNA_DEFAULTS
+    assert _dna_ctx({"design_dna": None}) == DNA_DEFAULTS
+    assert _dna_ctx({"design_dna": "not-an-object"}) == DNA_DEFAULTS
+    assert _dna_ctx({"design_dna": {}}) == DNA_DEFAULTS
+
+
+@pytest.mark.parametrize("axis", ["scale", "weight", "rhythm", "hero", "texture"])
+@pytest.mark.parametrize("bogus", ["BOGUS", "", None, 7, ["dense"], {"x": 1}])
+def test_dna_ctx_coerces_bogus_axis_value_to_default(axis, bogus):
+    # one bogus axis (every other axis absent) -> every token at its default;
+    # the bogus value itself never surfaces in any token.
+    ctx = _dna_ctx({"design_dna": {axis: bogus}})
+    assert ctx == DNA_DEFAULTS
+    assert bogus not in ctx.values()
+
+
+def test_dna_ctx_maps_valid_values_to_tokens():
+    assert _dna_ctx({"design_dna": VALID_DNA}) == {
+        "DNA_SCALE": "1.5",
+        "DNA_WEIGHT": "700",
+        "DNA_SPACE": "1.35",
+        "DNA_HERO": "offset",
+        "DNA_TEXTURE": "dense",
+    }
+    assert _dna_ctx(
+        {
+            "design_dna": {
+                "scale": "compact",
+                "weight": "light",
+                "rhythm": "tight",
+                "hero": "split",
+                "texture": "sparse",
+            }
+        }
+    ) == {
+        "DNA_SCALE": "1.18",
+        "DNA_WEIGHT": "300",
+        "DNA_SPACE": "0.82",
+        "DNA_HERO": "split",
+        "DNA_TEXTURE": "sparse",
+    }
+
+
+def _probe_env():
+    # A one-template env that echoes the five DNA tokens, to observe render()'s
+    # context without depending on any theme consuming the tokens yet.
+    from jinja2 import DictLoader, Environment, select_autoescape
+
+    return Environment(
+        loader=DictLoader(
+            {
+                "probe.html": "{{ DNA_SCALE }}|{{ DNA_WEIGHT }}|{{ DNA_SPACE }}"
+                "|{{ DNA_HERO }}|{{ DNA_TEXTURE }}"
+            }
+        ),
+        autoescape=select_autoescape(["html"], default_for_string=True, default=True),
+    )
+
+
+def test_render_ctx_carries_valid_dna_tokens(monkeypatch):
+    import app.render as render_mod
+
+    monkeypatch.setattr(render_mod, "_env", _probe_env())
+    html = render_mod.render(
+        {"store_name": "X", "design_dna": VALID_DNA}, ADDR, SLUG, "probe.html"
+    )
+    assert html == "1.5|700|1.35|offset|dense"
+
+
+def test_render_ctx_carries_default_dna_tokens_when_absent(monkeypatch):
+    import app.render as render_mod
+
+    monkeypatch.setattr(render_mod, "_env", _probe_env())
+    html = render_mod.render({"store_name": "X"}, ADDR, SLUG, "probe.html")
+    assert html == "1.25|450|1|stacked|medium"

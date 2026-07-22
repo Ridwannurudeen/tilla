@@ -2,104 +2,439 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="robots" content="noindex, nofollow" />
 <title>Tilla · Merchant dashboard</title>
+{% include "_fonts.html" %}
 <style>
-  :root { --bg:#0b0b12; --panel:#15151f; --line:#26263a; --text:#f5f5fa; --muted:#9a9ab0; --primary:#6c5ce7; --accent:#00d1b2; --danger:#ff5c72; }
-  * { box-sizing:border-box; }
-  body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text); }
-  a { color:var(--accent); }
-  header { display:flex; align-items:center; justify-content:space-between; padding:14px 20px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:5; }
-  header h1 { font-size:16px; margin:0; letter-spacing:.02em; }
-  .wrap { max-width:960px; margin:0 auto; padding:20px; }
-  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:8px; padding:9px 14px; }
-  button.primary { background:var(--primary); border-color:var(--primary); }
-  button.ghost { background:transparent; }
-  button:disabled { opacity:.5; cursor:default; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
-  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
-  .stat { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
-  .stat .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
-  .stat .v { font-size:22px; font-weight:600; margin-top:4px; word-break:break-word; }
-  table { width:100%; border-collapse:collapse; font-size:14px; }
-  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; }
-  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; word-break:break-all; }
-  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid var(--line); color:var(--muted); }
-  .muted { color:var(--muted); }
-  .err { color:var(--danger); }
-  .ok { color:var(--accent); }
-  input, select { font:inherit; background:#0f0f18; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 11px; }
-  input { width:100%; }
-  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
-  .hide { display:none; }
-  .clickable { cursor:pointer; }
-  .clickable:hover td { background:#1b1b28; }
-  .scroll { overflow-x:auto; }
+  /* Ops shell scheme — deliberately NOT merchant-palette-driven.
+     OKD-style surface ladder (near-black ground) + fixed rail tokens. */
+  :root{
+    --bg:#121212; --surface:#1a1a1e; --pressed:#26262c;
+    --hairline:#2b2b31; --text:#f2f2f6; --muted:#9a9aa6;
+    --xlayer:#BCFF2F; --on-xlayer:#000; --xlayer-tint:#e6ffb0;
+    --profit:#31bd65; --danger:#f5384f; --warning:#ffb117;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; font-family:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif;
+    font-size:14px; line-height:1.55; background:var(--bg); color:var(--text);
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  .mono{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; font-size:12.5px; word-break:break-all;
+  }
+  a{ color:var(--text); text-underline-offset:2px;
+    text-decoration-color:color-mix(in srgb,var(--text) 40%,transparent); }
+  a:hover{ text-decoration-color:var(--text); }
+  ::selection{ background:var(--text); color:var(--bg); }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible{
+    outline:2px solid var(--text); outline-offset:2px; }
+
+  .skip{ position:fixed; left:16px; top:-60px; z-index:100; padding:10px 16px;
+    background:var(--text); color:var(--bg); font-weight:700; font-size:14px;
+    border-radius:3px; text-decoration:none; transition:top .15s ease; }
+  .skip:focus{ top:12px; }
+
+  /* ---------- header rail ---------- */
+  header{
+    position:sticky; top:0; z-index:5;
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+    height:56px; padding:0 20px; border-bottom:1px solid var(--hairline);
+    background:color-mix(in srgb,var(--bg) 88%,transparent);
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+  }
+  .brand{ display:flex; align-items:center; gap:11px; min-width:0; text-decoration:none; }
+  header h1{ font-size:15px; font-weight:700; margin:0; letter-spacing:-.01em; white-space:nowrap; }
+  .mark{ flex:none; display:grid; grid-template-columns:1fr 1fr; gap:2px; width:22px; height:22px; }
+  .mark i{ background:color-mix(in srgb,var(--text) 88%,transparent); border-radius:1px; }
+  .mark i:nth-child(2){ background:color-mix(in srgb,var(--text) 42%,transparent); }
+  .mark i:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
+  .mark i:nth-child(4){ background:color-mix(in srgb,var(--text) 64%,transparent); }
+  .head-right{ flex:none; }
+  .navlink{ padding:14px 4px; text-decoration:none;
+    font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 70%,transparent); white-space:nowrap;
+    transition:color .15s ease; }
+  .navlink:hover{ color:var(--text); }
+  #whoami{ max-width:15ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11.5px; }
+
+  /* ---------- chips: lime = on-chain only (dot or bg-chip + black text) ---------- */
+  .chip{
+    display:inline-flex; align-items:center; gap:7px; padding:5px 10px;
+    border:1px solid var(--hairline); border-radius:999px;
+    font-size:10.5px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 76%,transparent); white-space:nowrap; word-break:normal;
+  }
+  .dot{ flex:none; width:7px; height:7px; border-radius:50%; }
+  .dot-chain{ background:var(--xlayer);
+    box-shadow:0 0 8px color-mix(in srgb,var(--xlayer) 55%,transparent); }
+  .dot-warn{ background:var(--warning); }
+  .settle-chip{
+    display:inline-flex; align-items:center; gap:7px; padding:5px 10px; border-radius:4px;
+    background:var(--xlayer); color:var(--on-xlayer);
+    font-size:10.5px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; word-break:normal;
+  }
+
+  /* ---------- layout ---------- */
+  .wrap{ max-width:1060px; margin:0 auto; padding:24px 20px 72px; }
+  .row{ display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+  .row.head{ justify-content:space-between; margin-bottom:2px; }
+  .cols{ display:grid; grid-template-columns:1fr 1fr; gap:14px; align-items:start; }
+  .cols .card{ margin-bottom:0; }
+
+  .sec-h{ display:flex; align-items:center; gap:8px; margin:28px 0 10px;
+    font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.16em;
+    color:color-mix(in srgb,var(--text) 66%,transparent); }
+  .sec-h::after{ content:""; flex:1; height:1px; background:var(--hairline); }
+  .sec-link{ font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:none;
+    color:color-mix(in srgb,var(--text) 60%,transparent);
+    text-decoration-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  .sec-link:hover{ color:var(--text); }
+  #storeTitle{ display:block; margin:16px 0 12px; font-size:16px; font-weight:600;
+    text-transform:none; letter-spacing:0; color:var(--text);
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; }
+  #storeTitle::after{ content:none; }
+
+  /* ---------- buttons: pill primaries, 4px small elements ---------- */
+  button{
+    font:inherit; font-size:13px; font-weight:600; cursor:pointer;
+    color:var(--text); background:var(--surface);
+    border:1px solid var(--hairline); border-radius:4px; padding:8px 14px;
+    transition:transform .12s ease, opacity .12s ease;
+  }
+  button:hover{ background:var(--pressed); }
+  button:active{ transform:translateY(1px); }
+  button.primary{
+    background:var(--text); border-color:var(--text); color:var(--bg);
+    border-radius:999px; padding:8px 18px;
+  }
+  button.primary:hover{ transform:translateY(-1px); }
+  button.ghost{ background:transparent; }
+  button.ghost:hover{ background:var(--surface);
+    border-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  button:disabled{ opacity:.5; cursor:default; transform:none; }
+  .ghost-btn{ display:inline-block; padding:8px 14px; border:1px solid var(--hairline);
+    border-radius:4px; color:var(--text); text-decoration:none;
+    font-size:13px; font-weight:600; vertical-align:middle; }
+  .ghost-btn:hover{ background:var(--surface);
+    border-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  .ghost-link{ font-size:13px; color:var(--muted);
+    text-decoration-color:color-mix(in srgb,var(--muted) 50%,transparent); }
+  .ghost-link:hover{ color:var(--text); }
+  td button{ padding:5px 10px; font-size:12px; }
+  #csvOrders, #csvCustomers{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace; font-weight:500; }
+
+  /* ---------- cards & stats ---------- */
+  .card{ background:var(--surface); border:1px solid var(--hairline);
+    border-radius:8px; padding:16px; margin-bottom:14px; }
+  .card.err{ border-color:color-mix(in srgb,var(--danger) 45%,transparent);
+    background:color-mix(in srgb,var(--danger) 8%,var(--surface)); }
+  #msg{ font-size:13px; font-weight:500; }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+  #summary{ margin-bottom:8px; }
+  .stat{ background:var(--surface); border:1px solid var(--hairline); border-radius:8px; padding:14px 16px; }
+  .stat .k{ color:var(--muted); font-size:10.5px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.12em; }
+  .stat .v{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; font-size:25px; font-weight:600;
+    letter-spacing:-.01em; margin-top:7px; word-break:break-word; }
+
+  /* ---------- tables: money reads in mono, tabular ---------- */
+  table{ width:100%; border-collapse:collapse; }
+  th, td{ text-align:left; padding:9px 10px; border-bottom:1px solid var(--hairline); vertical-align:top; }
+  th{ color:var(--muted); font-weight:600; font-size:10.5px;
+    text-transform:uppercase; letter-spacing:.1em; }
+  td{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; font-size:12.5px; }
+  tbody tr:last-child td{ border-bottom:0; }
+  .clickable{ cursor:pointer; }
+  .clickable:hover td{ background:var(--pressed); }
+  .scroll{ overflow-x:auto; }
+  .card.scroll{ padding:6px 14px; }
+
+  .pill{ display:inline-block; padding:3px 9px; border-radius:999px;
+    border:1px solid var(--hairline);
+    background:color-mix(in srgb,var(--text) 5%,transparent);
+    color:color-mix(in srgb,var(--text) 72%,transparent);
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+    word-break:normal; }
+
+  /* ---------- forms ---------- */
+  input, select, textarea{ font:inherit; font-size:13px; background:var(--bg); color:var(--text);
+    border:1px solid var(--hairline); border-radius:4px; padding:9px 11px; }
+  input, textarea{ width:100%;
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:12.5px; }
+  textarea{ min-height:110px; resize:vertical; }
+  #csDesc{ min-height:58px; }
+  input::placeholder, textarea::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
+  label{ display:block; font-size:10.5px; font-weight:600; text-transform:uppercase;
+    letter-spacing:.12em; color:var(--muted); margin:12px 0 6px; }
+
+  /* ---------- text utilities (JS-assigned classes) ---------- */
+  .muted{ color:var(--muted); }
+  .err{ color:var(--danger); }
+  .ok{ color:var(--profit); }
+  .hide{ display:none; }
+  .small{ font-size:12.5px; margin:8px 0 12px; }
+  strong{ font-weight:650; letter-spacing:.01em; }
+  .muted + strong{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; }
+  pre{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:11.5px; line-height:1.6; margin:0;
+    background:var(--bg); border:1px solid var(--hairline); border-radius:4px;
+    padding:10px 12px; }
+  #whStatus{ font-size:10.5px; text-transform:uppercase; letter-spacing:.08em; word-break:normal; }
+  #whSecret{ margin-top:12px; padding:12px; border:1px dashed var(--hairline); border-radius:4px; }
+  #whSecret .mono.ok{ margin-top:6px; font-size:12.5px; }
+  #backToMain, #backFromOrder{ margin:2px 0 4px; }
+
+  /* ---------- products panel (catalog is UI state, not chain state: no lime) ---------- */
+  .pitem{ border-bottom:1px solid var(--hairline); }
+  .pitem:last-child{ border-bottom:0; }
+  .prow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding:10px 2px; }
+  .prow strong{ flex:1; min-width:8ch; }
+  .prow button{ padding:5px 10px; font-size:12px; }
+  .pill.on{ color:var(--profit);
+    border-color:color-mix(in srgb,var(--profit) 45%,transparent);
+    background:color-mix(in srgb,var(--profit) 8%,transparent); }
+  .pill.off{ color:var(--muted); }
+  .pedit{ margin:0 0 12px; padding:12px; border:1px dashed var(--hairline); border-radius:4px; }
+
+  /* ---------- intentional empty states ---------- */
+  #underpaid > .muted, .card.muted{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-size:11.5px; letter-spacing:.08em; text-transform:uppercase;
+    text-align:center; color:var(--muted); }
+  #underpaid > .muted{ margin:10px 0; padding:22px 12px;
+    border:1px dashed var(--hairline); border-radius:4px; }
+  .card.muted{ padding:26px 16px; border-style:dashed; background:transparent; }
+  .card.muted.sentence{ font-family:inherit; font-size:13px; letter-spacing:0;
+    text-transform:none; }
+
+  /* ---------- signed-out console ---------- */
+  #viewLogin{ padding:clamp(22px,4.5vw,40px); }
+  .eyebrow{ display:inline-flex; align-items:center; gap:8px; margin:0;
+    font-size:10.5px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .eyebrow::before{ content:""; flex:none; width:7px; height:7px; background:var(--text); }
+  .lead{ margin:12px 0 8px; max-width:46rem; font-size:17px; line-height:1.5; letter-spacing:-.01em; }
+  .note{ margin:0 0 20px; max-width:42rem; font-size:13px; }
+  .login-rail{ display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+    padding-top:16px; border-top:1px solid var(--hairline); }
+
+  /* ---------- motion: transform/opacity only, gated ---------- */
+  @media (prefers-reduced-motion: no-preference){
+    .dot-chain{ animation:live 2.4s ease-in-out infinite; }
+    @keyframes live{ 50%{ opacity:.45; } }
+    #viewLogin, #viewMain, #viewStore, #viewOrder{ animation:view-in .18s ease-out; }
+    @keyframes view-in{ from{ opacity:0; transform:translateY(4px); } }
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{ transition:none !important; animation:none !important; }
+  }
+
+  @media (max-width:760px){
+    .cols{ grid-template-columns:1fr; }
+  }
+  @media (max-width:640px){
+    .chip.chain{ display:none; }
+    .navlink{ display:none; }
+    #whoami{ max-width:9ch; }
+  }
 </style>
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <header>
-  <h1>Tilla · Merchant</h1>
-  <div class="row">
+  <a class="brand" href="/">
+    <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    <h1>Tilla · Merchant</h1>
+  </a>
+  <div class="row head-right">
+    <a class="navlink mono" href="/">Home</a>
+    <a class="navlink mono" href="/marketplace.html">Marketplace</a>
+    <span class="chip chain mono"><span class="dot dot-chain" aria-hidden="true"></span>X Layer · chainId 196</span>
     <span id="whoami" class="muted mono"></span>
     <button id="signBtn" class="primary">Connect wallet</button>
     <button id="signOut" class="ghost hide">Sign out</button>
   </div>
 </header>
 
-<div class="wrap">
-  <div id="msg" class="card hide"></div>
+<main class="wrap" id="main">
+  <div id="msg" class="card hide" aria-live="polite"></div>
 
   <!-- signed-out -->
   <div id="viewLogin" class="card">
-    <p>Sign in with your store's receive wallet to see every store you own, its
-       orders and revenue, issue non-custodial refunds, export CSV, and configure
-       a webhook. Nothing is stored — you re-sign on refresh.</p>
-    <p class="muted">This dashboard never holds funds. A refund is a transfer you
-       send from your own wallet; paste the tx hash and Tilla verifies it on X Layer.</p>
+    <p class="eyebrow mono">Merchant console</p>
+    <p class="lead">This is where sellers run their stores. Sign in with the crypto wallet
+       that receives your store's payments — signing is free, moves no money, and just
+       proves the wallet is yours. No password, no account to create.</p>
+    <p class="note muted">Tilla never holds funds. Refunds are transfers you send from
+       your own wallet; paste the transaction ID and Tilla verifies it on X Layer.</p>
+    <div class="row" style="margin:4px 0 16px">
+      <button id="signBtn2" class="primary">Connect wallet</button>
+      <a class="ghost-link" href="/marketplace.html">Just browsing? See the marketplace →</a>
+    </div>
+    <p class="note muted">New to wallets? <a href="https://www.okx.com/web3" rel="noopener">Install OKX Wallet</a> first.</p>
+    <div class="login-rail">
+      <span class="settle-chip mono">Settles on X Layer</span>
+      <span class="chip mono">Non-custodial</span>
+      <span class="chip mono">USDT0 · chainId 196</span>
+    </div>
   </div>
 
   <!-- signed-in -->
   <div id="viewMain" class="hide">
     <div id="summary" class="grid"></div>
+
+    <h2 class="sec-h">Create a store</h2>
     <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <strong>Webhook</strong>
-        <span id="whStatus" class="muted"></span>
+      <div id="csStep1">
+        <div class="row head">
+          <strong>Describe it — Tilla builds it, your wallet gets every sale</strong>
+          <span class="muted mono">one-time 1 USDT fee</span>
+        </div>
+        <label for="csDesc">Describe your store in one line</label>
+        <textarea id="csDesc" maxlength="2000" placeholder="single-origin coffee beans, roasted to order"></textarea>
+        <label for="csTheme">Theme</label>
+        <select id="csTheme">
+          <option value="">Auto</option>
+          <option value="original">Original</option>
+          <option value="bold">Bold</option>
+          <option value="editorial">Editorial</option>
+        </select>
+        <div class="row" style="margin-top:12px">
+          <button id="csCreate" class="primary">Create my store — 1 USDT</button>
+        </div>
+        <p class="muted small">You pay a one-time 1 USDT store-creation fee from your wallet.
+           Your wallet also receives every sale — Tilla never holds your money.</p>
       </div>
-      <label for="whUrl">Endpoint URL (https only)</label>
-      <input id="whUrl" placeholder="https://example.com/tilla/webhook" />
-      <div class="row" style="margin-top:10px">
-        <button id="whSave">Save / rotate</button>
-        <button id="whDelete" class="ghost">Remove</button>
-      </div>
-      <div id="whSecret" class="hide" style="margin-top:10px"></div>
+      <div id="csStep2" class="hide"></div>
+      <div id="csStep3" class="hide"></div>
+      <div id="createMsg" class="small hide" aria-live="polite"></div>
     </div>
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <strong>Export</strong>
+
+    <h2 class="sec-h"><span class="dot dot-warn" aria-hidden="true"></span>Underpaid orders needing refund</h2>
+    <div id="underpaid" class="card scroll" tabindex="0" aria-label="Underpaid orders"></div>
+
+    <h2 class="sec-h">Your stores</h2>
+    <div id="stores"></div>
+
+    <h2 class="sec-h">Marketplace <a class="sec-link mono" href="/marketplace.html">View public marketplace →</a></h2>
+    <div id="marketplace"></div>
+
+    <h2 class="sec-h">Referrals</h2>
+    <div id="referrals"></div>
+
+    <h2 class="sec-h">Configuration</h2>
+    <div class="cols">
+      <div class="card">
+        <div class="row head">
+          <strong>Webhook</strong>
+          <span id="whStatus" class="muted mono" aria-live="polite"></span>
+        </div>
+        <label for="whUrl">Endpoint URL (https only)</label>
+        <input id="whUrl" placeholder="https://example.com/tilla/webhook" />
+        <div class="row" style="margin-top:12px">
+          <button id="whSave">Save / rotate</button>
+          <button id="whDelete" class="ghost">Remove</button>
+        </div>
+        <div id="whSecret" class="hide" aria-live="polite"></div>
+      </div>
+      <div class="card">
+        <div class="row head">
+          <strong>Export</strong>
+          <span class="muted mono">CSV</span>
+        </div>
+        <p class="muted small">Orders and customers for this wallet, scoped to your stores.</p>
         <div class="row">
           <button id="csvOrders" class="ghost">orders.csv</button>
           <button id="csvCustomers" class="ghost">customers.csv</button>
         </div>
       </div>
     </div>
-    <h3>Underpaid orders needing refund</h3>
-    <div id="underpaid" class="card scroll"></div>
-    <h3>Your stores</h3>
-    <div id="stores"></div>
-    <h3>Marketplace</h3>
-    <div id="marketplace"></div>
   </div>
 
   <!-- one store's orders -->
   <div id="viewStore" class="hide">
     <button id="backToMain" class="ghost">&larr; Back</button>
-    <h3 id="storeTitle"></h3>
-    <div id="storeOrders" class="card scroll"></div>
+    <h2 id="storeTitle" class="sec-h" tabindex="-1"></h2>
+
+    <h3 class="sec-h">Products</h3>
+    <div id="productMsg" class="small hide" aria-live="polite"></div>
+    <div id="products"></div>
+    <div class="card">
+      <div class="row head">
+        <strong>Add product</strong>
+        <span class="muted mono">names are checked for prohibited content before going live</span>
+      </div>
+      <label for="pName">Name</label>
+      <input id="pName" maxlength="120" placeholder="e.g. Founder tee" />
+      <label for="pPrice">Price (USDT0)</label>
+      <input id="pPrice" type="number" min="0.01" max="10000" step="0.01" placeholder="25.00" />
+      <label for="pBlurb">Blurb (optional)</label>
+      <input id="pBlurb" maxlength="400" placeholder="One line about the product" />
+      <label for="pCta">Button text (optional)</label>
+      <input id="pCta" maxlength="40" placeholder="Buy now" />
+      <div class="row" style="margin-top:12px">
+        <button id="pAdd" class="primary">Add product</button>
+      </div>
+    </div>
+
+    <h3 class="sec-h">Deliverables</h3>
+    <div id="delivMsg" class="small hide" aria-live="polite"></div>
+    <div id="deliverables"></div>
+    <div class="card">
+      <div class="row head">
+        <strong>Set / replace deliverable</strong>
+        <span class="muted mono">one scope at a time</span>
+      </div>
+      <label for="dScope">Scope</label>
+      <select id="dScope"></select>
+      <label for="dKind">Kind</label>
+      <select id="dKind">
+        <option value="file">File — buyer downloads it</option>
+        <option value="text">Text — secret shown to the buyer</option>
+        <option value="license">License — key with an activation cap</option>
+      </select>
+      <div id="dFileFields">
+        <label for="dFile">File (up to 25 MB)</label>
+        <input id="dFile" type="file" />
+        <label for="dMaxDl">Max downloads (optional)</label>
+        <input id="dMaxDl" type="number" min="1" step="1" placeholder="default 5" />
+      </div>
+      <div id="dTextFields" class="hide">
+        <label for="dPayload">Secret text the buyer receives</label>
+        <textarea id="dPayload" placeholder="An invite link, a coupon code, setup instructions…"></textarea>
+      </div>
+      <div id="dLicenseFields" class="hide">
+        <label for="dMaxAct">Max activations (optional)</label>
+        <input id="dMaxAct" type="number" min="1" step="1" placeholder="default 3" />
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button id="dSet" class="primary">Set deliverable</button>
+      </div>
+      <p class="muted small">Replacing a deliverable only changes the chosen scope for new orders —
+         buyers who already paid keep the version they bought.</p>
+    </div>
+
+    <h3 class="sec-h">Agent's-eye view</h3>
+    <p class="small muted">Exactly what a buyer-agent sees: your machine endpoints, the feed it reads (with delivery ETA), the tools it can call, and how you rank in agent discovery.</p>
+    <div id="agentView" class="card"></div>
+
+    <h3 class="sec-h">Orders</h3>
+    <div id="storeOrders" class="card scroll" tabindex="0" aria-label="Orders"></div>
   </div>
 
   <!-- one order -->
@@ -107,7 +442,7 @@
     <button id="backFromOrder" class="ghost">&larr; Back</button>
     <div id="orderDetail"></div>
   </div>
-</div>
+</main>
 
 <script>
 (function () {
@@ -130,13 +465,51 @@
   }
   function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
 
+  // ---- USDT0 payment rail (create-store fee; mirrors _checkout.html's proven transfer path) ----
+  var USDT0 = "0x779ded0c9e1022225f8e0630b35a9b54be713736";
+  var CHAIN_HEX = "0xc4"; // X Layer chainId 196
+  var CHAIN_PARAMS = {
+    chainId: "0xc4", chainName: "X Layer",
+    nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 },
+    rpcUrls: ["https://rpc.xlayer.tech"],
+    blockExplorerUrls: ["https://www.oklink.com/x-layer"]
+  };
+  function buildTransferData(payTo, micro) {
+    return "0xa9059cbb" + payTo.slice(2).toLowerCase().padStart(64, "0") + micro.toString(16).padStart(64, "0");
+  }
+
   // ---- helpers ----
   function byId(id) { return document.getElementById(id); }
   function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
-  function show(id) { ["viewLogin","viewMain","viewStore","viewOrder"].forEach(function (v) { byId(v).classList.toggle("hide", v !== id); }); }
-  function flash(text, isErr) { var m = byId("msg"); m.textContent = text || ""; m.className = "card" + (text ? "" : " hide") + (isErr ? " err" : ""); }
+  function show(id) {
+    ["viewLogin","viewMain","viewStore","viewOrder"].forEach(function (v) { byId(v).classList.toggle("hide", v !== id); });
+    if (id === "viewMain") setHash("#stores");
+    var focusId = id === "viewStore" ? "storeTitle" : (id === "viewOrder" ? "backFromOrder" : null);
+    if (focusId) byId(focusId).focus();
+  }
+  function flash(text, isErr) { var m = byId("msg"); m.textContent = text || ""; m.className = "card" + (text ? "" : " hide") + (isErr ? " err" : ""); m.setAttribute("role", isErr ? "alert" : "status"); }
   function auth() { return { "Authorization": "Bearer " + TOKEN }; }
+
+  // ---- hash routing (slugs/ids are server-validated; parse defensively anyway) ----
+  var ROUTING = false;
+  function setHash(h) {
+    if (location.hash === h) return;
+    ROUTING = true;
+    location.hash = h;
+  }
+  function routeHash() {
+    if (!TOKEN) return; // signed-out ignores hashes
+    var m = /^#store\/([a-z0-9][a-z0-9-]{0,63})$/.exec(location.hash);
+    if (m) { openStore(m[1]); return; }
+    m = /^#order\/([A-Za-z0-9_-]{1,80})$/.exec(location.hash);
+    if (m) { openOrder(m[1]); return; }
+    show("viewMain"); // fall back to #stores
+  }
+  window.addEventListener("hashchange", function () {
+    if (ROUTING) { ROUTING = false; return; }
+    routeHash();
+  });
 
   async function api(path, opts) {
     opts = opts || {};
@@ -145,7 +518,11 @@
     if (r.status === 401) { signOut(); throw new Error("Session expired — sign in again."); }
     var body = null;
     try { body = await r.json(); } catch (e) {}
-    if (!r.ok) throw new Error((body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : ("request failed (" + r.status + ")"));
+    if (!r.ok) {
+      var err = new Error((body && body.detail) ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : ("request failed (" + r.status + ")"));
+      err.status = r.status;
+      throw err;
+    }
     return body;
   }
 
@@ -153,7 +530,7 @@
   async function signIn() {
     flash("");
     var provider = pickProvider();
-    if (!provider) { flash("No wallet detected — open this page in your wallet's browser.", true); return; }
+    if (!provider) { flash("No wallet detected. Install the OKX Wallet extension (okx.com/web3) or open this page inside the OKX app's browser, then try again.", true); return; }
     var btn = byId("signBtn"); btn.disabled = true;
     var account;
     try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
@@ -191,8 +568,8 @@
     byId("whoami").textContent = ADDR;
     byId("signBtn").classList.add("hide");
     byId("signOut").classList.remove("hide");
-    show("viewMain");
-    await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace()]);
+    routeHash(); // restore the hash's view instead of always viewMain
+    await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace(), loadReferrals()]);
   }
 
   // ---- marketplace (read-only: listing status, sold split, screening receipts) ----
@@ -224,15 +601,15 @@
         c.appendChild(el("div", "muted", "No screening events yet."));
       } else {
         var t = el("table"), thead = el("thead"), tr = el("tr");
-        ["Mode", "Verdict", "Risk", "Amount", "Receipt", "When"].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+        ["Mode", "Verdict", "Risk", "Amount", "Receipt", "When"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
         thead.appendChild(tr); t.appendChild(thead);
         var tb = el("tbody");
         scr.forEach(function (r) {
           var row = el("tr");
           if (r.mode === "paid") {
-            var mtd = el("td"); mtd.appendChild(el("span", "pill", "Warden #3808 — paid scan")); row.appendChild(mtd);
+            var mtd = el("td"); mtd.appendChild(el("span", "pill", "Content screening — paid scan (Warden #3808)")); row.appendChild(mtd);
           } else {
-            row.appendChild(el("td", "muted", "demo"));
+            row.appendChild(el("td", "muted", "demo scan"));
           }
           row.appendChild(el("td", null, r.verdict || ""));
           row.appendChild(el("td", null, r.risk_level || "—"));
@@ -245,11 +622,61 @@
           tb.appendChild(row);
         });
         t.appendChild(tb);
-        var wrap = el("div", "scroll"); wrap.style.marginTop = "8px"; wrap.appendChild(t);
+        var wrap = el("div", "scroll"); wrap.style.marginTop = "8px";
+        wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Screening events");
+        wrap.appendChild(t);
         c.appendChild(wrap);
       }
       box.appendChild(c);
     });
+  }
+
+  // ---- referrals (this wallet's OWN rev-share earnings; the API only ever returns
+  //      the signed-in earner's balance — every string rendered via textContent) ----
+  async function loadReferrals() {
+    var box = byId("referrals");
+    var data;
+    try { data = await api("/api/affiliate/summary"); }
+    catch (e) { clear(box); box.appendChild(el("div", "muted small", "Could not load referral earnings.")); return; }
+    clear(box);
+    if (!data.stores || !data.stores.length) {
+      box.appendChild(el("div", "card muted sentence", "No referral earnings yet — share a store link with ?ref=<your wallet> to start."));
+      return;
+    }
+    var c = el("div", "card");
+    c.appendChild(el("p", "muted small", "Earnings from sales made through your referral links — share any store's link with ?ref=<your wallet> to earn a share."));
+    var g = el("div", "grid");
+    function stat(k, v) { var s = el("div", "stat"); s.appendChild(el("div", "k", k)); s.appendChild(el("div", "v", v)); g.appendChild(s); }
+    stat("Accrued (USDT0)", data.totals.accrued_usdt);
+    stat("Paid out (USDT0)", data.totals.paid_usdt);
+    stat("Void (USDT0)", data.totals.void_usdt);
+    c.appendChild(g);
+    var t = el("table"), thead = el("thead"), tr = el("tr");
+    ["Store", "Orders", "Accrued", "Paid out", "Void"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
+    thead.appendChild(tr); t.appendChild(thead);
+    var tb = el("tbody");
+    data.stores.forEach(function (st) {
+      var row = el("tr");
+      var std = el("td");
+      if (st.store_slug) {
+        // st.store_slug is server-validated to the slug pattern — safe in a path segment
+        var a = el("a", "mono", st.store_slug); a.href = "/s/" + st.store_slug + "/"; std.appendChild(a);
+      } else {
+        std.appendChild(el("span", "muted", "—"));
+      }
+      row.appendChild(std);
+      row.appendChild(el("td", null, String(st.orders)));
+      row.appendChild(el("td", null, st.accrued_usdt));
+      row.appendChild(el("td", null, st.paid_usdt));
+      row.appendChild(el("td", null, st.void_usdt));
+      tb.appendChild(row);
+    });
+    t.appendChild(tb);
+    var wrap = el("div", "scroll"); wrap.style.marginTop = "10px";
+    wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Referral earnings by store");
+    wrap.appendChild(t);
+    c.appendChild(wrap);
+    box.appendChild(c);
   }
 
   // ---- summary ----
@@ -261,13 +688,13 @@
     stat("Stores", String(s.store_count));
     stat("Revenue (USDT0)", s.revenue_usdt);
     stat("Delivered", String((s.counts && (s.counts.delivered || 0)) + (s.counts && (s.counts.paid || 0) || 0)));
-    stat("Outstanding overpay", s.outstanding_overpaid_usdt);
+    stat("Overpaid — owed back", s.outstanding_overpaid_usdt);
 
     var u = byId("underpaid"); clear(u);
     if (!s.underpaid || !s.underpaid.length) { u.appendChild(el("div", "muted", "None.")); }
     else {
       var t = el("table"), thead = el("thead"), tr = el("tr");
-      ["Order","Store","Expected","Paid","Buyer","",].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+      ["Order","Store","Expected","Paid","Buyer","Actions"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
       thead.appendChild(tr); t.appendChild(thead);
       var tb = el("tbody");
       s.underpaid.forEach(function (o) {
@@ -289,7 +716,7 @@
     var data;
     try { data = await api("/api/merchant/stores"); } catch (e) { flash(e.message, true); return; }
     var box = byId("stores"); clear(box);
-    if (!data.stores.length) { box.appendChild(el("div", "card muted", "No stores yet. Create one via the paid create-store service using this wallet as the receive address.")); return; }
+    if (!data.stores.length) { box.appendChild(el("div", "card muted sentence", "No stores yet — create your first one with the Create a store panel above.")); return; }
     data.stores.forEach(function (st) {
       var c = el("div", "card");
       var head = el("div", "row"); head.style.justifyContent = "space-between";
@@ -307,18 +734,188 @@
       c.appendChild(line);
       var b = el("button", "ghost", "View orders"); b.style.marginTop = "10px"; b.onclick = function () { openStore(st.slug); };
       c.appendChild(b);
+      // st.slug is server-validated to the slug pattern — safe in a path segment
+      var vs = el("a", "ghost-btn", "View store"); vs.href = "/s/" + st.slug + "/";
+      vs.style.marginTop = "10px"; vs.style.marginLeft = "8px";
+      c.appendChild(vs);
       // M13 embed snippet: a copy-paste buy-button tag. Built via textContent only
       // (the '<script>' below is inert text in a <pre>, never parsed as markup), and
       // st.slug is server-validated to the slug pattern — no XSS surface.
       var eb = el("button", "ghost", "Embed button"); eb.style.marginTop = "10px"; eb.style.marginLeft = "8px";
+      eb.setAttribute("aria-expanded", "false");
       var snippet = '<script src="https://tilla.gudman.xyz/embed.js" data-tilla-store="' + st.slug + '" async><\/script>';
       var pre = el("pre", "muted"); pre.textContent = snippet; pre.style.display = "none";
       pre.style.marginTop = "8px"; pre.style.whiteSpace = "pre-wrap"; pre.style.wordBreak = "break-all";
-      eb.onclick = function () { pre.style.display = pre.style.display === "none" ? "" : "none"; };
+      eb.onclick = function () {
+        var open = pre.style.display === "none";
+        pre.style.display = open ? "" : "none";
+        eb.setAttribute("aria-expanded", open ? "true" : "false");
+      };
       c.appendChild(eb);
       c.appendChild(pre);
       box.appendChild(c);
     });
+  }
+
+  // ---- self-serve create-store (screen -> pay 1 USDT on-chain -> generate; every
+  //      string rendered via textContent only) ----
+  var CS = null; // the pending creation: { id, payTo, micro }
+
+  function cmsg(text, isErr) {
+    var m = byId("createMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+  function csShow(step) {
+    byId("csStep1").classList.toggle("hide", step !== 1);
+    byId("csStep2").classList.toggle("hide", step !== 2);
+    byId("csStep3").classList.toggle("hide", step !== 3);
+  }
+  function csErr(e) {
+    if (e.status === 422) return "That description didn't pass our safety check — try describing it differently.";
+    if (e.status === 409) return "That payment was already used.";
+    if (e.status === 400) return "We couldn't verify that payment — please try again.";
+    if (e.status === 503 || e.status === 502) return "Store creation is briefly unavailable — try again shortly.";
+    return e.message;
+  }
+  function csReset() {
+    CS = null;
+    byId("csDesc").value = "";
+    byId("csTheme").value = "";
+    clear(byId("csStep2"));
+    clear(byId("csStep3"));
+    cmsg("");
+    csShow(1);
+  }
+
+  async function createStore() {
+    var desc = byId("csDesc").value.trim();
+    if (!desc) { cmsg("Describe your store first.", true); return; }
+    var body = { description: desc };
+    var theme = byId("csTheme").value;
+    if (theme) body.theme = theme;
+    var btn = byId("csCreate");
+    btn.disabled = true; btn.textContent = "Checking your description…";
+    var d;
+    try {
+      d = await api("/api/merchant/create-store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    } catch (e) {
+      btn.disabled = false; btn.textContent = "Create my store — 1 USDT";
+      cmsg(csErr(e), true);
+      return;
+    }
+    btn.disabled = false; btn.textContent = "Create my store — 1 USDT";
+    cmsg("");
+    CS = { id: d.id, payTo: d.pay_to, micro: BigInt(d.amount_micro) };
+    var box = byId("csStep2"); clear(box);
+    var head = el("div", "row head");
+    head.appendChild(el("strong", null, "Pay 1 USDT to create your store"));
+    head.appendChild(el("span", "muted mono", d.amount_usdt + " USDT0 · X Layer"));
+    box.appendChild(head);
+    box.appendChild(el("div", "muted small", "Approve a single transfer of " + d.amount_usdt + " USDT0 from your wallet — your store is generated as soon as it verifies on-chain."));
+    var row = el("div", "row");
+    var pay = el("button", "primary", "Pay with wallet");
+    pay.onclick = function () { csPay(pay); };
+    row.appendChild(pay);
+    var back = el("button", "ghost", "Start over");
+    back.onclick = csReset;
+    row.appendChild(back);
+    box.appendChild(row);
+    var st = el("div", "muted"); st.id = "csPayStatus"; st.style.marginTop = "10px";
+    st.setAttribute("aria-live", "polite");
+    box.appendChild(st);
+    csShow(2);
+  }
+
+  async function csPay(btn) {
+    if (!CS) return;
+    var provider = pickProvider();
+    if (!provider) { cmsg("No wallet detected — install OKX Wallet or open this page in your wallet's browser.", true); return; }
+    cmsg("");
+    btn.disabled = true;
+    var st = byId("csPayStatus");
+    st.textContent = "Waiting for your wallet…";
+    var account;
+    try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
+    catch (e) { st.textContent = ""; cmsg(isReject(e) ? "Connection declined." : "Could not connect wallet.", true); btn.disabled = false; return; }
+    if (!account) { st.textContent = ""; btn.disabled = false; return; }
+    if (!(await csEnsureChain(provider, st))) { btn.disabled = false; return; }
+    var txHash;
+    try {
+      var data = buildTransferData(CS.payTo, CS.micro);
+      txHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: account, to: USDT0, value: "0x0", data: data }] });
+    } catch (e) {
+      st.textContent = "";
+      cmsg(isReject(e) ? "Transaction canceled — nothing was charged. Pay when you're ready." : "Wallet error — check you hold USDT0 on X Layer.", true);
+      btn.disabled = false; return;
+    }
+    st.textContent = "Payment sent — verifying on X Layer and building your store…";
+    var d;
+    try {
+      d = await api("/api/merchant/create-store/" + CS.id + "/pay", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx_hash: txHash }) });
+    } catch (e) {
+      st.textContent = "";
+      cmsg(csErr(e), true);
+      btn.disabled = false;
+      return;
+    }
+    csResult(d);
+  }
+
+  async function csEnsureChain(provider, st) {
+    try {
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+      return true;
+    } catch (e) {
+      if (isReject(e)) { st.textContent = ""; cmsg("Network switch declined — the fee is paid on X Layer.", true); return false; }
+      try {
+        await provider.request({ method: "wallet_addEthereumChain", params: [CHAIN_PARAMS] });
+        await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+        return true;
+      } catch (e2) {
+        st.textContent = "";
+        cmsg(isReject(e2) ? "Network switch declined — the fee is paid on X Layer." : "Could not switch to X Layer — switch networks in your wallet and retry.", true);
+        return false;
+      }
+    }
+  }
+
+  function csResult(d) {
+    CS = null;
+    var box = byId("csStep3"); clear(box);
+    if (d.status === "live" && d.url) {
+      box.appendChild(el("div", "ok", "Your store is live."));
+      var row = el("div", "row"); row.style.marginTop = "10px";
+      var a = el("a", "ghost-btn", "Visit your store →"); a.href = d.url;
+      row.appendChild(a);
+      var again = el("button", "ghost", "Create another");
+      again.onclick = csReset;
+      row.appendChild(again);
+      box.appendChild(row);
+      box.appendChild(el("div", "muted small", "Manage it below — it now shows in your stores list."));
+      byId("csDesc").value = "";
+      loadStores();
+      loadSummary();
+    } else if (d.status === "paid") {
+      box.appendChild(el("div", null, "Payment received — finishing your store…"));
+      box.appendChild(el("div", "muted small", "Generation is briefly unavailable. Your payment is safe — retry in a moment at no extra charge."));
+      var rb = el("button", "primary", "Retry"); rb.style.marginTop = "10px";
+      rb.onclick = async function () {
+        rb.disabled = true;
+        var r;
+        try { r = await api("/api/merchant/create-store/" + d.id + "/retry", { method: "POST" }); }
+        catch (e) { rb.disabled = false; cmsg(csErr(e), true); return; }
+        cmsg("");
+        csResult(r);
+      };
+      box.appendChild(rb);
+    } else {
+      box.appendChild(el("div", "err", "We couldn't build a store from that description — the generated content didn't pass our safety check."));
+      var sb = el("button", "ghost", "Start over"); sb.style.marginTop = "10px";
+      sb.onclick = csReset;
+      box.appendChild(sb);
+    }
+    csShow(3);
   }
 
   // ---- one store's orders ----
@@ -326,10 +923,11 @@
     LAST_STORE = slug;
     var data;
     try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/orders?limit=100"); } catch (e) { flash(e.message, true); return; }
+    setHash("#store/" + slug);
     byId("storeTitle").textContent = slug + " — " + data.total + " orders";
     var box = byId("storeOrders"); clear(box);
     var t = el("table"), thead = el("thead"), tr = el("tr");
-    ["Order","Status","Channel","Expected","Paid","Refunded","When"].forEach(function (h) { tr.appendChild(el("th", null, h)); });
+    ["Order","Status","Channel","Expected","Paid","Refunded","When","Actions"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
     thead.appendChild(tr); t.appendChild(thead);
     var tb = el("tbody");
     data.orders.forEach(function (o) {
@@ -341,10 +939,294 @@
       row.appendChild(el("td", null, o.paid_usdt));
       row.appendChild(el("td", null, o.refunded_usdt));
       row.appendChild(el("td", "muted", (o.created_at || "").slice(0, 19).replace("T", " ")));
+      var td = el("td"); var ob = el("button", "ghost", "Open");
+      ob.onclick = function (ev) { ev.stopPropagation(); openOrder(o.order_id); };
+      td.appendChild(ob); row.appendChild(td);
       tb.appendChild(row);
     });
     t.appendChild(tb); box.appendChild(t);
+    pmsg("");
+    dmsg("");
     show("viewStore");
+    await loadProducts(slug);
+    await loadDeliverables(slug);
+    await loadAgentView(slug);
+  }
+
+  // ---- agent's-eye view (Phase 1.8): the same outputs a buyer-agent consumes,
+  // rendered from the /agent-view bundle so it can never drift from reality ----
+  async function loadAgentView(slug) {
+    var box = byId("agentView"); clear(box);
+    var data;
+    try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/agent-view"); }
+    catch (e) { box.appendChild(el("div", "muted", "Could not load the agent view.")); return; }
+    var d = data.discovery || {};
+    var rep = el("div", "row");
+    if (d.listed === false) {
+      rep.appendChild(el("span", "muted", d.reason === "hidden"
+        ? "Hidden — not currently listed in agent discovery."
+        : "Not live yet — not listed in agent discovery."));
+    } else {
+      rep.appendChild(el("strong", null, "Discovery rank: "));
+      rep.appendChild(el("span", "mono", "tier " + d.trust_tier + " · " + d.sold_count
+        + " sold · success " + (d.success_rate == null ? "n/a" : d.success_rate)
+        + " · " + d.pending_eval_count + " pending · " + d.disputed_count + " disputed"));
+    }
+    box.appendChild(rep);
+    var eps = data.machine_endpoints || {};
+    box.appendChild(el("div", "muted mono small",
+      "feed " + eps.feed + "   mcp " + eps.mcp + "   buy " + eps.buy));
+    (data.feed_products || []).forEach(function (p) {
+      box.appendChild(el("div", null,
+        p.title + " — " + p.price.amount + " " + p.price.currency
+        + " · ETA " + p.sla_minutes + " min"));
+    });
+    var tools = (data.mcp_tools || []).map(function (t) { return t.name; }).join(", ");
+    box.appendChild(el("div", "muted small", "MCP tools: " + tools));
+  }
+
+  // ---- products (catalog CRUD; every API string rendered via textContent only) ----
+  function pmsg(text, isErr) {
+    var m = byId("productMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+  function productErr(e, ctx) {
+    if (e.status === 409) return ctx === "toggle" ? "Can't deactivate your last active product." : "Store isn't live yet — products can be added once it is.";
+    if (e.status === 422) return "Name didn't pass screening — try a different one.";
+    if (e.status === 503) return "Name screening is temporarily unavailable — try again in a minute.";
+    if (e.status === 404) return "That product wasn't found — it may have changed in another tab.";
+    return e.message;
+  }
+  function productPath(slug, pid) { return "/api/merchant/stores/" + encodeURIComponent(slug) + "/products/" + pid; }
+  function money(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return String(v);
+    var s = n.toFixed(6).replace(/0+$/, "");
+    var dp = s.split(".")[1] || "";
+    return dp.length >= 2 ? s : n.toFixed(2);
+  }
+
+  async function loadProducts(slug) {
+    var box = byId("products");
+    var data;
+    try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/products"); }
+    catch (e) { clear(box); box.appendChild(el("div", "card muted", "Could not load products.")); return; }
+    clear(box);
+    var items = data.products || [];
+    if (!items.length) { box.appendChild(el("div", "card muted", "No products yet.")); return; }
+    var card = el("div", "card");
+    items.forEach(function (p) { card.appendChild(productItem(slug, p)); });
+    box.appendChild(card);
+  }
+
+  function productItem(slug, p) {
+    var item = el("div", "pitem");
+    var row = el("div", "prow");
+    row.appendChild(el("strong", null, p.name));
+    row.appendChild(el("span", "mono", money(p.price_usdt) + " USDT0"));
+    row.appendChild(el("span", p.active ? "pill on" : "pill off", p.active ? "Active" : "Inactive"));
+
+    var ed = el("div", "pedit hide");
+    var nLbl = el("label", null, "Name"); nLbl.htmlFor = "pe-name-" + p.id; ed.appendChild(nLbl);
+    var ni = el("input"); ni.id = "pe-name-" + p.id; ni.maxLength = 120; ni.value = p.name; ed.appendChild(ni);
+    var prLbl = el("label", null, "Price (USDT0)"); prLbl.htmlFor = "pe-price-" + p.id; ed.appendChild(prLbl);
+    var pi = el("input"); pi.id = "pe-price-" + p.id; pi.type = "number"; pi.min = "0.01"; pi.max = "10000"; pi.step = "0.01";
+    pi.value = String(p.price_usdt); ed.appendChild(pi);
+    var edRow = el("div", "row"); edRow.style.marginTop = "12px";
+    var save = el("button", "primary", "Save");
+    save.onclick = async function () {
+      var nm = ni.value.trim();
+      var pr = parseFloat(pi.value);
+      if (!nm) { pmsg("Name can't be empty.", true); return; }
+      if (isNaN(pr) || pr < 0.01 || pr > 10000) { pmsg("Price must be between 0.01 and 10000 USDT0.", true); return; }
+      var body = {};
+      if (nm !== p.name) body.name = nm;
+      if (pr !== p.price_usdt) body.price_usdt = pr;
+      if (!Object.keys(body).length) { ed.classList.add("hide"); return; }
+      save.disabled = true;
+      try {
+        await api(productPath(slug, p.id), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        await loadProducts(slug);
+        await loadDeliverables(slug);
+        pmsg("Saved — " + nm + " updated.");
+      } catch (e) { save.disabled = false; pmsg(productErr(e, "edit"), true); }
+    };
+    var cancel = el("button", "ghost", "Cancel");
+    cancel.onclick = function () { ed.classList.add("hide"); ni.value = p.name; pi.value = String(p.price_usdt); };
+    edRow.appendChild(save); edRow.appendChild(cancel); ed.appendChild(edRow);
+
+    var eb = el("button", "ghost", "Edit");
+    eb.onclick = function () { ed.classList.toggle("hide"); };
+    row.appendChild(eb);
+    var tog = el("button", "ghost", p.active ? "Deactivate" : "Activate");
+    tog.onclick = async function () {
+      tog.disabled = true;
+      try {
+        await api(productPath(slug, p.id), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: !p.active }) });
+        await loadProducts(slug);
+        await loadDeliverables(slug);
+        pmsg(p.active ? "Product deactivated." : "Product activated.");
+      } catch (e) { tog.disabled = false; pmsg(productErr(e, "toggle"), true); }
+    };
+    row.appendChild(tog);
+
+    item.appendChild(row);
+    item.appendChild(ed);
+    return item;
+  }
+
+  async function addProduct() {
+    if (!LAST_STORE) return;
+    var nm = byId("pName").value.trim();
+    var pr = parseFloat(byId("pPrice").value);
+    if (!nm) { pmsg("Give the product a name first.", true); return; }
+    if (isNaN(pr) || pr < 0.01 || pr > 10000) { pmsg("Price must be between 0.01 and 10000 USDT0.", true); return; }
+    var body = { name: nm, price_usdt: pr };
+    var blurb = byId("pBlurb").value.trim(); if (blurb) body.blurb = blurb;
+    var cta = byId("pCta").value.trim(); if (cta) body.cta_text = cta;
+    var btn = byId("pAdd"); btn.disabled = true;
+    try {
+      await api("/api/merchant/stores/" + encodeURIComponent(LAST_STORE) + "/products", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      byId("pName").value = ""; byId("pPrice").value = ""; byId("pBlurb").value = ""; byId("pCta").value = "";
+      await loadProducts(LAST_STORE);
+      await loadDeliverables(LAST_STORE);
+      pmsg("Added " + nm + " to the catalog.");
+    } catch (e) { pmsg(productErr(e, "add"), true); }
+    btn.disabled = false;
+  }
+
+  // ---- deliverables (what a buyer receives; the API returns METADATA only —
+  //      the secret payload and file bytes never reach this page; every string
+  //      rendered via textContent only) ----
+  function dmsg(text, isErr) {
+    var m = byId("delivMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+  function delivErr(e) {
+    if (e.status === 413) return "That file is too big — the upload cap is 25 MB.";
+    if (e.status === 503) return "Gated delivery isn't configured on this server yet.";
+    if (e.status === 422) return "Not accepted — " + e.message;
+    return e.message;
+  }
+
+  async function loadDeliverables(slug) {
+    var box = byId("deliverables");
+    var dd, pd;
+    try {
+      var res = await Promise.all([
+        api("/api/merchant/stores/" + encodeURIComponent(slug) + "/deliverables"),
+        api("/api/merchant/stores/" + encodeURIComponent(slug) + "/products")
+      ]);
+      dd = res[0]; pd = res[1];
+    } catch (e) {
+      clear(box);
+      box.appendChild(el("div", "card muted", "Could not load deliverables."));
+      return;
+    }
+    var products = pd.products || [];
+    var actives = products.filter(function (p) { return p.active; });
+    var names = {};
+    products.forEach(function (p) { names[p.id] = p.name; });
+
+    // scope dropdown: store default + one option per active product
+    var sel = byId("dScope");
+    var prev = sel.value;
+    clear(sel);
+    var od = el("option"); od.value = ""; od.textContent = "Store default (products without their own)"; sel.appendChild(od);
+    actives.forEach(function (p) {
+      var o = el("option"); o.value = String(p.id); o.textContent = p.name; sel.appendChild(o);
+    });
+    if (prev && actives.some(function (p) { return String(p.id) === prev; })) sel.value = prev;
+
+    var items = dd.deliverables || [];
+    clear(box);
+    if (!items.length) {
+      box.appendChild(el("div", "card muted", "No deliverables yet — buyers get the plain delivery message. Set one below."));
+    } else {
+      var card = el("div", "card");
+      items.forEach(function (d) {
+        var item = el("div", "pitem");
+        var row = el("div", "prow");
+        var scope = d.product_id == null ? "Store default" : (names[d.product_id] || ("product #" + d.product_id));
+        row.appendChild(el("strong", null, scope));
+        row.appendChild(el("span", "pill", d.kind));
+        if (d.kind === "file") {
+          row.appendChild(el("span", "mono", d.file_name || ""));
+          if (d.max_downloads != null) row.appendChild(el("span", "muted mono", d.max_downloads + " downloads max"));
+        }
+        if (d.kind === "license" && d.max_activations != null) {
+          row.appendChild(el("span", "muted mono", d.max_activations + " activations max"));
+        }
+        item.appendChild(row);
+        card.appendChild(item);
+      });
+      box.appendChild(card);
+    }
+
+    // coverage: active products with no specific deliverable fall back to the default
+    var covered = {};
+    items.forEach(function (d) { if (d.product_id != null) covered[d.product_id] = true; });
+    var fallback = actives.filter(function (p) { return !covered[p.id]; });
+    var hasDefault = items.some(function (d) { return d.product_id == null; });
+    if (fallback.length) {
+      var line = el("div", "muted small");
+      line.textContent = (hasDefault
+        ? "Covered by the store default: "
+        : "No store default — these products fall back to the plain delivery message: ")
+        + fallback.map(function (p) { return p.name; }).join(", ");
+      box.appendChild(line);
+    }
+  }
+
+  function syncDeliverableKind() {
+    var k = byId("dKind").value;
+    byId("dFileFields").classList.toggle("hide", k !== "file");
+    byId("dTextFields").classList.toggle("hide", k !== "text");
+    byId("dLicenseFields").classList.toggle("hide", k !== "license");
+  }
+
+  async function setDeliverable() {
+    if (!LAST_STORE) return;
+    var kind = byId("dKind").value;
+    var sel = byId("dScope");
+    var pid = sel.value; // "" = store default
+    var scopeName = pid ? sel.options[sel.selectedIndex].textContent : "the store default";
+    var opts;
+    if (kind === "file") {
+      var f = byId("dFile").files[0];
+      if (!f) { dmsg("Choose a file first.", true); return; }
+      var mdl = byId("dMaxDl").value.trim();
+      if (mdl && !/^[1-9]\d*$/.test(mdl)) { dmsg("Max downloads must be a positive whole number.", true); return; }
+      var fd = new FormData();
+      fd.append("file", f);
+      if (pid) fd.append("product_id", pid);
+      if (mdl) fd.append("max_downloads", mdl);
+      opts = { method: "POST", body: fd };
+    } else if (kind === "text") {
+      var payload = byId("dPayload").value;
+      if (!payload.trim()) { dmsg("Enter the secret text buyers should receive.", true); return; }
+      var body = { kind: "text", payload: payload };
+      if (pid) body.product_id = parseInt(pid, 10);
+      opts = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+    } else {
+      var mact = byId("dMaxAct").value.trim();
+      if (mact && !/^[1-9]\d*$/.test(mact)) { dmsg("Max activations must be a positive whole number.", true); return; }
+      var lic = { kind: "license" };
+      if (mact) lic.max_activations = parseInt(mact, 10);
+      if (pid) lic.product_id = parseInt(pid, 10);
+      opts = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(lic) };
+    }
+    var btn = byId("dSet"); btn.disabled = true;
+    try {
+      await api("/api/stores/" + encodeURIComponent(LAST_STORE) + "/deliverable", opts);
+      byId("dFile").value = ""; byId("dPayload").value = "";
+      byId("dMaxDl").value = ""; byId("dMaxAct").value = "";
+      await loadDeliverables(LAST_STORE);
+      dmsg("Set the " + kind + " deliverable for " + scopeName + " — buyers who already paid keep the previous version.");
+    } catch (e) { dmsg(delivErr(e), true); }
+    btn.disabled = false;
   }
 
   // ---- one order ----
@@ -352,6 +1234,7 @@
     LAST_ORDER = orderId;
     var o;
     try { o = await api("/api/merchant/orders/" + encodeURIComponent(orderId)); } catch (e) { flash(e.message, true); return; }
+    setHash("#order/" + orderId);
     var box = byId("orderDetail"); clear(box);
 
     var head = el("div", "card");
@@ -398,13 +1281,13 @@
     var rf = el("div", "card");
     rf.appendChild(el("strong", null, "Issue a refund"));
     rf.appendChild(el("div", "muted", "Send USDT0 back to the buyer from your own wallet on X Layer, then paste the transaction hash. Tilla verifies it on-chain."));
-    var kindLbl = el("label", null, "Kind"); rf.appendChild(kindLbl);
-    var sel = el("select");
+    var kindLbl = el("label", null, "Kind"); kindLbl.htmlFor = "rfKind"; rf.appendChild(kindLbl);
+    var sel = el("select"); sel.id = "rfKind";
     var of = el("option"); of.value = "full"; of.textContent = "Full (refunds paid amount, revokes delivery)"; sel.appendChild(of);
     var oo = el("option"); oo.value = "overage"; oo.textContent = "Overage only (returns surplus, keeps delivery)"; sel.appendChild(oo);
     rf.appendChild(sel);
-    rf.appendChild(el("label", null, "Refund tx hash"));
-    var txin = el("input"); txin.placeholder = "0x…"; rf.appendChild(txin);
+    var txLbl = el("label", null, "Refund tx hash"); txLbl.htmlFor = "rfTx"; rf.appendChild(txLbl);
+    var txin = el("input"); txin.id = "rfTx"; txin.placeholder = "0x…"; rf.appendChild(txin);
     var submit = el("button", "primary", "Verify & record refund"); submit.style.marginTop = "12px";
     var out = el("div"); out.style.marginTop = "10px";
     submit.onclick = async function () {
@@ -473,9 +1356,14 @@
 
   // ---- wiring ----
   byId("signBtn").onclick = signIn;
+  byId("signBtn2").onclick = signIn;
   byId("signOut").onclick = signOut;
+  byId("csCreate").onclick = createStore;
   byId("backToMain").onclick = function () { show("viewMain"); };
   byId("backFromOrder").onclick = function () { if (LAST_STORE) openStore(LAST_STORE); else show("viewMain"); };
+  byId("pAdd").onclick = addProduct;
+  byId("dKind").onchange = syncDeliverableKind;
+  byId("dSet").onclick = setDeliverable;
   byId("whSave").onclick = saveWebhook;
   byId("whDelete").onclick = deleteWebhook;
   byId("csvOrders").onclick = function () { downloadCsv("/api/merchant/export/orders.csv", "orders.csv"); };

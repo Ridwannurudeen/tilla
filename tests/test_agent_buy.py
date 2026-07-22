@@ -470,3 +470,49 @@ def test_build_store_payment_option_resolves_live_and_sentinel(make_store):
     assert asyncio.run(opt.price(live)).amount == "2500000"
     assert asyncio.run(opt.pay_to(ghost)) == SENTINEL  # dead store → sentinel
     assert asyncio.run(opt.price(ghost)).amount == "1"
+
+
+# ---------------------------------------------- per-product x402 buy (phase-2 B)
+def test_resolve_price_and_pay_to_per_product(make_store):
+    from sqlalchemy import select
+
+    from app.models import Product
+
+    sid = make_store(slug="ppr", price_micro=9_000_000)  # primary "Thing" @ 9
+    with SessionLocal() as s:
+        s.add(Product(store_id=sid, name="Deluxe", price_micro=20_000_000, active=True))
+        s.commit()
+        ids = s.scalars(
+            select(Product.id).where(Product.store_id == sid).order_by(Product.id)
+        ).all()
+    # bare /buy -> primary; /buy/<primary> -> primary; /buy/<deluxe> -> deluxe price
+    assert agentic.resolve_price("/s/ppr/buy").amount == "9000000"
+    assert agentic.resolve_price(f"/s/ppr/buy/{ids[0]}").amount == "9000000"
+    assert agentic.resolve_price(f"/s/ppr/buy/{ids[1]}").amount == "20000000"
+    # payTo is the store's wallet regardless of which product
+    assert agentic.resolve_pay_to(
+        f"/s/ppr/buy/{ids[1]}", SENTINEL
+    ) == agentic.resolve_pay_to("/s/ppr/buy", SENTINEL)
+    # an id that isn't an active product of THIS store -> sentinel price (fail-safe
+    # challenge; the handler then 404s before settle, so zero funds move)
+    assert agentic.resolve_price("/s/ppr/buy/10000000").amount == "1"
+
+
+def test_per_product_buy_route_pattern_matches():
+    verb, path, rx = x402HTTPServerBase._parse_route_pattern(
+        "POST /s/:slug/buy/:product_id"
+    )
+    assert verb == "POST"
+    assert rx.match("/s/foo-1/buy/42")
+    assert not rx.match("/s/foo/buy/42/extra")  # no cross-slash
+
+
+def test_per_product_buy_endpoint_402_without_payment(make_store):
+    from sqlalchemy import select
+
+    from app.models import Product
+
+    sid = make_store(slug="ppb")
+    with SessionLocal() as s:
+        pid = s.scalar(select(Product.id).where(Product.store_id == sid))
+    assert client.post(f"/s/ppb/buy/{pid}").status_code == 402

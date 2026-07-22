@@ -229,3 +229,177 @@ def test_rerender_stores_skips_contentless_store(tmp_path, monkeypatch):
 
     assert engine.rerender_stores() == {"rendered": 0, "skipped": 1}
     assert not (tmp_path / "old" / "index.html").exists()
+
+
+def test_write_og_png_skips_when_rsvg_absent(tmp_path, monkeypatch):
+    # No rasterizer on this host (dev/Windows): og.png generation is a silent
+    # no-op — never a raise that could break the paid create-store path.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "_RSVG_BIN", None)
+    svg = tmp_path / "og.svg"
+    svg.write_text("<svg/>", encoding="utf-8")
+    engine._write_og_png(svg, tmp_path / "og.png")
+    assert not (tmp_path / "og.png").exists()
+
+
+def test_write_og_png_invokes_rsvg_with_1200x630(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    calls = []
+    monkeypatch.setattr(engine, "_RSVG_BIN", "/usr/bin/rsvg-convert")
+    monkeypatch.setattr(engine.subprocess, "run", lambda *a, **k: calls.append((a, k)))
+    svg, png = tmp_path / "og.svg", tmp_path / "og.png"
+    engine._write_og_png(svg, png)
+    (argv,), kwargs = calls[0]
+    assert argv[0] == "/usr/bin/rsvg-convert"
+    assert "1200" in argv and "630" in argv
+    assert str(svg) in argv and str(png) in argv
+    assert kwargs["check"] is True and kwargs["timeout"] == 15
+
+
+def test_write_og_png_failopen_on_rsvg_error(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "_RSVG_BIN", "/usr/bin/rsvg-convert")
+
+    def boom(*a, **k):
+        raise engine.subprocess.CalledProcessError(1, "rsvg-convert")
+
+    monkeypatch.setattr(engine.subprocess, "run", boom)
+    # Must NOT raise — a rasterization failure is swallowed and logged.
+    engine._write_og_png(tmp_path / "og.svg", tmp_path / "og.png")
+
+
+def test_write_store_pages_writes_svg_and_index_without_rsvg(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "_RSVG_BIN", None)
+    d = tmp_path / "aperture"
+    d.mkdir()
+    engine._write_store_pages(
+        d,
+        {"store_name": "A", "price_usdt": 9, "emoji": "x"},
+        "0xabc",
+        "aperture",
+        "original.html",
+    )
+    assert (d / "index.html").exists()
+    assert (d / "og.svg").exists()
+    assert not (d / "og.png").exists()
+
+
+def test_generated_content_multiproduct_mirrors_primary():
+    from app.engine import GeneratedContent
+
+    g = GeneratedContent.model_validate(
+        {
+            "store_name": "Cafe",
+            "products": [
+                {
+                    "name": "Guji",
+                    "blurb": "floral",
+                    "price_usdt": 18,
+                    "cta_text": "Buy",
+                },
+                {"name": "Yirg", "blurb": "citrus", "price_usdt": 16},
+            ],
+        }
+    ).model_dump()
+    assert [p["name"] for p in g["products"]] == ["Guji", "Yirg"]
+    # the legacy scalar fields mirror the primary (first) product
+    assert g["product_name"] == "Guji" and g["price_usdt"] == 18
+
+
+def test_generated_content_oldstyle_synthesizes_one_product():
+    from app.engine import GeneratedContent
+
+    g = GeneratedContent.model_validate(
+        {
+            "store_name": "S",
+            "product_name": "Widget",
+            "product_blurb": "b",
+            "price_usdt": 9,
+            "cta_text": "Get",
+        }
+    ).model_dump()
+    assert len(g["products"]) == 1
+    assert g["products"][0]["name"] == "Widget" and g["products"][0]["price_usdt"] == 9
+
+
+@respx.mock
+def test_create_store_creates_a_product_row_per_catalog_item(tmp_path, monkeypatch):
+    import app.engine as engine
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Cafe",
+            "products": [
+                {
+                    "name": "Guji",
+                    "blurb": "floral",
+                    "price_usdt": 18,
+                    "cta_text": "Buy",
+                },
+                {
+                    "name": "Yirg",
+                    "blurb": "citrus",
+                    "price_usdt": 16,
+                    "cta_text": "Buy",
+                },
+            ],
+        },
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("i sell coffee")
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == result["slug"]))
+        rows = s.scalars(
+            select(Product).where(Product.store_id == store.id).order_by(Product.id)
+        ).all()
+    assert [(r.name, r.price_micro) for r in rows] == [
+        ("Guji", 18_000_000),
+        ("Yirg", 16_000_000),
+    ]
+
+
+@respx.mock
+def test_create_store_populates_content_product_ids(tmp_path, monkeypatch):
+    import app.engine as engine
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Cafe",
+            "products": [
+                {"name": "Guji", "price_usdt": 18, "cta_text": "Buy"},
+                {"name": "Yirg", "price_usdt": 16, "cta_text": "Buy"},
+            ],
+        },
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("coffee")
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == result["slug"]))
+        rows = s.scalars(
+            select(Product).where(Product.store_id == store.id).order_by(Product.id)
+        ).all()
+        # content carries the stable product ids -> id-based buy buttons
+        assert [it["id"] for it in store.content["products"]] == [r.id for r in rows]
+    html = (tmp_path / result["slug"] / "index.html").read_text(encoding="utf-8")
+    assert f'data-pid="{rows[0].id}"' in html and f'data-pid="{rows[1].id}"' in html

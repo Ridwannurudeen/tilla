@@ -13,6 +13,8 @@ discovery paths + the well-known agent card past the static ``/s/`` alias):
 - ``GET /s/{slug}/feed.json`` / ``llms.txt`` — machine-readable catalog.
 - ``GET /.well-known/agent-card.json`` — A2A card for Tilla as a whole.
 - ``GET /discovery/resources`` + ``/discovery/search`` — Tilla-wide store index.
+- ``POST /mcp`` — the Tilla-wide root MCP: browse/search stores + list a store's
+  products, so one agent runtime is the concierge across every store.
 
 Every JSON surface is a ``JSONResponse`` (json-encoded, no HTML context) and every
 text surface is ``text/plain``; all carry ``X-Content-Type-Options: nosniff``.
@@ -32,7 +34,7 @@ from decimal import Decimal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -75,6 +77,14 @@ ASSET = PAYMENT_ASSET  # USDT0 on X Layer
 SERVICE = "tilla"
 AGENT_ID = 6961  # Tilla's ERC-8004 agent id (OKX ASP #6961)
 TILLA_VERSION = "0.1.0"
+# Delivery-time promise surfaced to agent buyers (the ACP 'SLA' analog). Digital
+# goods deliver on payment confirmation and store generation completes within the
+# request, so 10 minutes is a conservative honest upper bound covering both.
+DELIVERY_SLA_MINUTES = 10
+# Phase 1.6: a delivered sale is provisional for this window — the buyer may confirm
+# or dispute it; if they do neither, it auto-confirms (ACP 'skip' mode) and counts
+# toward success_rate. Short, because digital delivery is validated fast.
+EVAL_WINDOW_DAYS = 3
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
 # Short cache + nosniff on every machine surface. Stored content is Warden-screened
@@ -88,7 +98,7 @@ _AGENT_HEADERS = {
 # The one path the agent-guard middleware + resolvers key off. ':slug' in the x402
 # route pattern compiles to the same [^/]+ (no cross-slash match); the optional
 # trailing slash is tolerated here though FastAPI's route never forwards one.
-_BUY_PATH_RE = re.compile(r"^/s/([a-z0-9][a-z0-9-]{0,39})/buy/?$")
+_BUY_PATH_RE = re.compile(r"^/s/([a-z0-9][a-z0-9-]{0,39})/buy(?:/([0-9]{1,18}))?/?$")
 
 # The reaper voids agent orders stuck in the provisional 'settling' status (a
 # crash or lost settle between the deliver-commit and the settle-confirm: the goods
@@ -131,6 +141,31 @@ def _active_product(session: Session, store_id: int) -> Product | None:
         select(Product)
         .where(Product.store_id == store_id, Product.active.is_(True))
         .order_by(Product.id)
+    )
+
+
+def _product_id_from_path(path: str) -> int | None:
+    """The product id in a ``/s/<slug>/buy/<id>`` path, or None for a bare
+    ``/buy`` (primary product)."""
+    m = _BUY_PATH_RE.match(path)
+    return int(m.group(2)) if m and m.group(2) else None
+
+
+def _product_for_path(session: Session, store: Store, path: str) -> Product | None:
+    """The product a ``/buy`` path targets: the ``/buy/<id>`` product — validated
+    to be an ACTIVE product of THIS store — or the primary product for a bare
+    ``/buy``. Returns None if the path names an id that isn't an active product of
+    the store (so the resolvers fall back to the sentinel and the handler 404s
+    BEFORE settle, exactly like an unknown store)."""
+    pid = _product_id_from_path(path)
+    if pid is None:
+        return _active_product(session, store.id)
+    return session.scalar(
+        select(Product).where(
+            Product.id == pid,
+            Product.store_id == store.id,
+            Product.active.is_(True),
+        )
     )
 
 
@@ -330,7 +365,7 @@ def resolve_price(
             store = _live_store(session, slug)
             if store is None:
                 return _sentinel_price()
-            product = _active_product(session, store.id)
+            product = _product_for_path(session, store, path)
             if product is None:
                 return _sentinel_price()
             price_micro = product.price_micro
@@ -494,15 +529,19 @@ def fulfill_agent_order(
     return order, _agent_buy_body(session, order, store, product)
 
 
-@router.post("/s/{slug}/buy")
-@limiter.limit("60/minute")
-def agent_buy(
+def _do_agent_buy(
     request: Request,
-    slug: str = Path(..., pattern=config.SLUG_PATTERN),
-    session: Session = Depends(get_session),
-    ref: str | None = None,
-    agent_id: str | None = None,
-):
+    session: Session,
+    slug: str,
+    ref: str | None,
+    agent_id: str | None,
+) -> JSONResponse:
+    """Shared body for POST /s/{slug}/buy and /s/{slug}/buy/{product_id}. The
+    product is resolved from the request PATH (bare /buy = primary; /buy/{id} =
+    that product), the SAME resolution ``resolve_price`` used to build the 402
+    challenge — so the price the agent paid always equals what is charged here.
+    ``agent_id`` (M16 B2B) is the optional caller-presented agent identity, priced
+    off the SETTLED payer, never a client-asserted field."""
     # FAIL CLOSED: no verified payment (middleware absent — OKX_API_KEY unset — or
     # payment not provided) → 402. Goods are never served free.
     payload = getattr(request.state, "payment_payload", None)
@@ -511,8 +550,7 @@ def agent_buy(
     # M13 affiliate attribution: the ?ref= query param survives the 402->paid-retry
     # roundtrip. Validate BEFORE settlement so a malformed ref makes this handler
     # return >=400 (middleware skips settle, zero funds move) rather than settling a
-    # sale that can never be attributed. The query string is path-independent, so the
-    # path-keyed x402 middleware is untouched.
+    # sale that can never be attributed.
     try:
         referrer_addr = affiliates.normalize_ref(ref)
     except affiliates.RefRejected as exc:
@@ -521,13 +559,16 @@ def agent_buy(
     # a sentinel challenge got paid), return >=400 so the middleware SKIPS
     # settlement — the signed authorization is never executed, zero funds move.
     store = _require_live_store(session, slug)
-    product = _active_product(session, store.id)
+    product = _product_for_path(session, store, request.url.path)
     if product is None:
-        raise HTTPException(409, "store has no active product")
+        # >=400 BEFORE settle -> middleware skips settle, zero funds move. A bare
+        # /buy with no active product is 409; a /buy/{id} that names something that
+        # isn't an active product of THIS store is 404 (no wrong charge, no IDOR).
+        if _product_id_from_path(request.url.path) is None:
+            raise HTTPException(409, "store has no active product")
+        raise HTTPException(404, "product not found")
     # Pay-time HARD GATE: an aggr_deferred payment against a non-batch product is
-    # refused BEFORE settlement. A >=400 here makes the payment middleware skip
-    # settle, so the signed authorization is never executed and zero funds move —
-    # the same funds-safe pattern as the dead-store re-check above.
+    # refused BEFORE settlement (same funds-safe >=400-skips-settle pattern).
     if (
         _payment_scheme(request) == PAYMENT_SCHEME_AGGR_DEFERRED
         and (product.pricing_model or "one_time") != "batch"
@@ -568,6 +609,31 @@ def agent_buy(
     return JSONResponse(body)
 
 
+@router.post("/s/{slug}/buy")
+@limiter.limit("60/minute")
+def agent_buy(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+    ref: str | None = None,
+    agent_id: str | None = None,
+):
+    return _do_agent_buy(request, session, slug, ref, agent_id)
+
+
+@router.post("/s/{slug}/buy/{product_id}")
+@limiter.limit("60/minute")
+def agent_buy_product(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    product_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+    ref: str | None = None,
+    agent_id: str | None = None,
+):
+    return _do_agent_buy(request, session, slug, ref, agent_id)
+
+
 @router.get("/s/{slug}/buy")
 def agent_buy_get(
     request: Request,
@@ -579,6 +645,22 @@ def agent_buy_get(
     BEFORE settle: a >=400 response makes the payment middleware skip settlement, so
     zero funds can move on the GET method and no Order row is ever created. Buying is
     POST-only."""
+    return JSONResponse(
+        {"error": "method not allowed; use POST to buy"},
+        status_code=405,
+        headers={"Allow": "POST", **_AGENT_HEADERS},
+    )
+
+
+@router.get("/s/{slug}/buy/{product_id}")
+def agent_buy_product_get(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    product_id: int = Path(..., ge=1),
+):
+    """Per-product GET twin of ``agent_buy_get``: a PAID GET is refused 405 BEFORE
+    settle so zero funds can move on the GET method; an UNPAID GET returns the 402
+    challenge for the specific product via the paywall."""
     return JSONResponse(
         {"error": "method not allowed; use POST to buy"},
         status_code=405,
@@ -1057,6 +1139,7 @@ def _tool_list_products(session: Session, store: Store) -> dict:
                 "price_micro": p.price_micro,
                 "currency": CURRENCY,
                 "network": NETWORK,
+                "sla_minutes": _effective_sla(p),
             }
             for p in products
         ]
@@ -1093,10 +1176,11 @@ def _tool_get_product(
         "price_micro": product.price_micro,
         "currency": CURRENCY,
         "network": NETWORK,
+        "sla_minutes": _effective_sla(product),
         "deliverable_kind": deliverable.kind if deliverable else "text",
         "pricing": _pricing_block(product),
         "x402": {
-            "endpoint": f"/s/{slug}/buy",
+            "endpoint": f"/s/{slug}/buy/{product.id}",
             "network": NETWORK,
             "asset": ASSET,
             "schemes": enabled_schemes(product),
@@ -1279,8 +1363,193 @@ async def mcp_get(
 
 
 # ============================================================================
+# Root MCP: a Tilla-wide JSON-RPC server so any agent runtime is the concierge —
+# browse/search across every live store and route to the right one. Buying then
+# happens on the per-store endpoints each result advertises (its `mcp` / `buy`).
+# NOTE (deploy): a new root path needs an nginx proxy location, like /ready —
+# see deploy/nginx-m15.snippet. Until then it is reachable in-app / via tests.
+# ============================================================================
+class _BrowseArgs(BaseModel):
+    sort: str = "sold"
+    limit: int = 20
+    offset: int = 0
+
+
+class _SearchStoresArgs(BaseModel):
+    query: str
+    limit: int = 20
+
+
+class _StoreSlugArgs(BaseModel):
+    slug: str
+
+
+def _root_mcp_tools() -> list[dict]:
+    return [
+        {
+            "name": "browse_stores",
+            "description": (
+                "List live Tilla stores ranked by performance. Each result carries "
+                "its page URL, per-store MCP + x402 buy endpoints, and reputation "
+                "(sold_count, success_rate, unique_buyer_count, last_sale_at)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sort": {"type": "string", "enum": list(DISCOVERY_SORTS)},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "search_stores",
+            "description": "Keyword-search live stores by slug or description.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "list_products",
+            "description": (
+                "List one store's active products by slug; then buy via that "
+                "store's mcp/buy endpoint from browse_stores."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def _root_mcp_tools_call(session: Session, req_id, params) -> dict:
+    if not isinstance(params, dict):
+        return _rpc_error(req_id, -32602, "params must be an object")
+    name = params.get("name")
+    raw_args = params.get("arguments") or {}
+    if not isinstance(raw_args, dict):
+        return _rpc_error(req_id, -32602, "arguments must be an object")
+    try:
+        if name == "browse_stores":
+            a = _BrowseArgs.model_validate(raw_args)
+            sort = a.sort if a.sort in DISCOVERY_SORTS else "sold"
+            rows = _discovery_rows(
+                session,
+                [],
+                max(1, min(a.limit, 50)),
+                max(0, min(a.offset, 100_000)),
+                sort,
+            )
+            result = {"resources": rows, "sort": sort}
+        elif name == "search_stores":
+            a = _SearchStoresArgs.model_validate(raw_args)
+            q = a.query.strip()
+            if len(q) < 2 or len(q) > 100:
+                raise _ToolError("query must be 2 to 100 characters")
+            result = {
+                "resources": _search_discovery(session, q, max(1, min(a.limit, 50)))
+            }
+        elif name == "list_products":
+            a = _StoreSlugArgs.model_validate(raw_args)
+            store = session.scalar(select(Store).where(Store.slug == a.slug))
+            if store is None or store.status != "live":
+                raise _ToolError("store not found")
+            result = _tool_list_products(session, store)
+        else:
+            return _rpc_error(req_id, -32602, f"unknown tool: {name}")
+    except ValidationError as exc:
+        return _rpc_error(
+            req_id, -32602, "invalid tool arguments", data=json.loads(exc.json())
+        )
+    except _ToolError as exc:
+        return _rpc_tool_error(req_id, str(exc))
+    return _rpc_result(
+        req_id,
+        {
+            "content": [{"type": "text", "text": json.dumps(result)}],
+            "structuredContent": result,
+        },
+    )
+
+
+def _handle_root_mcp(payload):
+    """Sync JSON-RPC dispatch for the Tilla-wide root MCP (no slug)."""
+    with SessionLocal() as session:
+        if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+            req_id = payload.get("id") if isinstance(payload, dict) else None
+            return _rpc_error(req_id, -32600, "invalid JSON-RPC request")
+        method = payload.get("method")
+        req_id = payload.get("id")
+        params = payload.get("params") or {}
+        if method == "notifications/initialized":
+            return _MCP_NO_CONTENT
+        if method == "initialize":
+            proto = (
+                params.get("protocolVersion") if isinstance(params, dict) else None
+            ) or MCP_PROTOCOL_VERSION
+            return _rpc_result(
+                req_id,
+                {
+                    "protocolVersion": proto,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "tilla", "version": TILLA_VERSION},
+                },
+            )
+        if method == "ping":
+            return _rpc_result(req_id, {})
+        if method == "tools/list":
+            return _rpc_result(req_id, {"tools": _root_mcp_tools()})
+        if method == "tools/call":
+            return _root_mcp_tools_call(session, req_id, params)
+        return _rpc_error(req_id, -32601, "method not found")
+
+
+@router.post("/mcp")
+@limiter.limit("30/minute")
+async def root_mcp_post(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            _rpc_error(None, -32700, "parse error"), headers=_AGENT_HEADERS
+        )
+    result = await asyncio.to_thread(_handle_root_mcp, payload)
+    if result is _MCP_NO_CONTENT:
+        return Response(status_code=202)
+    return JSONResponse(result, headers=_AGENT_HEADERS)
+
+
+@router.get("/mcp")
+async def root_mcp_get(request: Request):
+    return JSONResponse(
+        {"error": "method not allowed; use POST"},
+        status_code=405,
+        headers={"Allow": "POST", **_AGENT_HEADERS},
+    )
+
+
+# ============================================================================
 # Feeds: feed.json (ACP product-feed shape) + llms.txt
 # ============================================================================
+def _effective_sla(product: Product) -> int:
+    """The delivery-time promise (minutes) a buyer agent should expect: the
+    merchant's per-product override, else the platform default. Always an int, so
+    every purchasable action carries an ETA an agent can rank on."""
+    return (
+        product.sla_minutes if product.sla_minutes is not None else DELIVERY_SLA_MINUTES
+    )
+
+
 def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> dict:
     return {
         "id": str(product.id),
@@ -1289,9 +1558,10 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
         "link": store_url,
         "price": {"amount": _usdt_str(product.price_micro), "currency": CURRENCY},
         "availability": "in_stock",
+        "sla_minutes": _effective_sla(product),
         "pricing": _pricing_block(product),
         "x402": {
-            "endpoint": f"/s/{slug}/buy",
+            "endpoint": f"/s/{slug}/buy/{product.id}",
             "network": NETWORK,
             "asset": ASSET,
             "schemes": enabled_schemes(product),
@@ -1405,6 +1675,11 @@ def llms_txt(
 @limiter.limit("60/minute")
 def agent_card(request: Request):
     base = config.PUBLIC_BASE_URL.rstrip("/")
+    # Lazy import avoids the agentic<-main circular import at module load. Advertising
+    # create-store's exact input contract lets an agent hiring Tilla self-serve without
+    # trial and error (the ACP 'requirement schema' idea, applied to our own service).
+    from app.main import CreateStoreBody
+
     body = {
         "name": "Tilla",
         "description": (
@@ -1419,12 +1694,32 @@ def agent_card(request: Request):
                 "name": "Create a storefront",
                 "description": "Spin up a live one-product crypto store.",
                 "x402": {"endpoint": "/create-store", "price": "1 USDT"},
+                "input_schema": CreateStoreBody.model_json_schema(),
+                "sample_request": {
+                    "description": "single-origin coffee beans, roasted to order",
+                    "theme": "original",
+                },
+                "sla_minutes": DELIVERY_SLA_MINUTES,
             },
             {
                 "id": "buy",
                 "name": "Buy from a store",
                 "description": "Purchase a store's product; payTo is the merchant.",
                 "x402": {"endpoint": "/s/{slug}/buy"},
+                "input_schema": {
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {
+                        "slug": {"type": "string", "description": "store slug"},
+                        "product_id": {
+                            "type": "integer",
+                            "description": (
+                                "product to buy; omit for the primary product"
+                            ),
+                        },
+                    },
+                },
+                "sla_minutes": DELIVERY_SLA_MINUTES,
             },
         ],
         "payment": {
@@ -1438,6 +1733,7 @@ def agent_card(request: Request):
         "discovery": {
             "resources": "/discovery/resources",
             "search": "/discovery/search",
+            "mcp": "/mcp",
         },
     }
     return JSONResponse(body, headers=_AGENT_HEADERS)
@@ -1446,7 +1742,46 @@ def agent_card(request: Request):
 # ============================================================================
 # Discovery: Tilla-wide index of live stores (no merchant wallets leaked)
 # ============================================================================
-def _discovery_row(store: Store, pmin, pmax, sold) -> dict:
+# Graduation-style trust ladder (Phase 1.5). Thresholds sit below Virtuals' 10-sale
+# graduation, matched to Tilla's volume. It is computed ONLY from terminal,
+# un-fakeable outcomes: delivered count = earned volume; success_rate (delivered vs
+# refunded) = quality. A refund-heavy store is demoted to 'watch' regardless of
+# volume — the auto-demote. Checkout expiries are deliberately NOT an input: an
+# expired checkout is buyer abandonment, not store fault (the same reason they are
+# excluded from success_rate), so they can never unfairly demote a store.
+TRUST_TIERS = ("new", "watch", "emerging", "established", "trusted")
+
+
+def _trust_tier(sold: int, success_rate: float | None) -> str:
+    if sold == 0:
+        return "new"
+    # sold >= 1 => at least one delivery => success_rate is a real float here.
+    if success_rate is not None and success_rate < 0.5:
+        return "watch"
+    if sold >= 8 and success_rate is not None and success_rate >= 0.95:
+        return "trusted"
+    if sold >= 3 and success_rate is not None and success_rate >= 0.9:
+        return "established"
+    return "emerging"
+
+
+def _discovery_row(
+    store: Store, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending
+) -> dict:
+    # Reputation signals an agent buyer can rank on, computed from terminal orders:
+    # sold_count = delivered count; success_rate = good / (good + rejected + refunded)
+    # where good = delivered minus buyer-rejected minus still-in-window (Phase 1.6);
+    # unique_buyer_count = distinct payer addresses; last_sale_at = most recent delivery;
+    # pending_eval_count = fresh sales inside the dispute window (not yet counted);
+    # disputed_count = buyer-rejected deliveries; trust_tier = the graduation ladder above.
+    # Abandoned/expired checkouts are the buyer's doing, not the store's, so excluded.
+    sold = sold or 0
+    refunded = refunded or 0
+    rejected = rejected or 0
+    pending = pending or 0
+    good = sold - rejected - pending
+    settled = good + rejected + refunded
+    success_rate = round(good / settled, 4) if settled else None
     return {
         "slug": store.slug,
         "name": _store_name(store),
@@ -1460,18 +1795,50 @@ def _discovery_row(store: Store, pmin, pmax, sold) -> dict:
         "price_max_micro": pmax,
         "currency": CURRENCY,
         "network": NETWORK,
-        "sold_count": sold or 0,
+        "sold_count": sold,
+        "success_rate": success_rate,
+        "unique_buyer_count": buyers or 0,
+        "last_sale_at": (last_sale.isoformat() + "Z") if last_sale else None,
+        "pending_eval_count": pending,
+        "disputed_count": rejected,
+        "trust_tier": _trust_tier(good, success_rate),
         "created_at": store.created_at.isoformat() + "Z",
     }
 
 
-def _discovery_rows(session: Session, where_clauses, limit: int, offset: int):
-    sold_sq = (
+# Discovery sort keys an agent buyer can pass. 'sold' is the default and preserves
+# the prior order (most-sold first); an unknown value falls back to it.
+DISCOVERY_SORTS = ("sold", "success", "buyers", "recent", "new")
+
+
+def _discovery_rows(
+    session: Session, where_clauses, limit: int, offset: int, sort: str = "sold"
+):
+    delivered = Order.status.in_(checkout.TERMINAL_DELIVERED)
+    # Phase 1.6: a delivery counts toward the rate only once it is settled-evaluated —
+    # rejected is a failure; still 'pending' AND inside the dispute window (or with an
+    # unknown delivery time) is not yet counted. 'none'/'confirmed'/window-elapsed all
+    # fall through to good. cutoff = now - window, so the auto-confirm is a read-time
+    # comparison (no poller).
+    cutoff = checkout._now() - timedelta(days=EVAL_WINDOW_DAYS)
+    rejected_case = delivered & (Order.eval_status == "rejected")
+    pending_case = (
+        delivered
+        & (Order.eval_status == "pending")
+        & or_(Order.paid_at.is_(None), Order.paid_at >= cutoff)
+    )
+    metrics_sq = (
         select(
             Order.store_id.label("sid"),
-            func.count(Order.id).label("sold"),
+            func.count(case((delivered, Order.id))).label("sold"),
+            func.count(func.distinct(case((delivered, Order.from_addr)))).label(
+                "buyers"
+            ),
+            func.max(case((delivered, Order.paid_at))).label("last_sale"),
+            func.count(case((Order.status == "refunded", Order.id))).label("refunded"),
+            func.count(case((rejected_case, Order.id))).label("rejected"),
+            func.count(case((pending_case, Order.id))).label("pending"),
         )
-        .where(Order.status.in_(checkout.TERMINAL_DELIVERED))
         .group_by(Order.store_id)
         .subquery()
     )
@@ -1485,22 +1852,55 @@ def _discovery_rows(session: Session, where_clauses, limit: int, offset: int):
         .group_by(Product.store_id)
         .subquery()
     )
-    stmt = (
-        select(Store, price_sq.c.pmin, price_sq.c.pmax, sold_sq.c.sold)
-        .outerjoin(price_sq, price_sq.c.sid == Store.id)
-        .outerjoin(sold_sq, sold_sq.c.sid == Store.id)
-        .where(Store.status == "live", *where_clauses)
-        .order_by(
-            func.coalesce(sold_sq.c.sold, 0).desc(),
-            Store.created_at.desc(),
+    sold_c = func.coalesce(metrics_sq.c.sold, 0)
+    rejected_c = func.coalesce(metrics_sq.c.rejected, 0)
+    pending_c = func.coalesce(metrics_sq.c.pending, 0)
+    refunded_c = func.coalesce(metrics_sq.c.refunded, 0)
+    # good = delivered, not rejected, not still-in-window; settled excludes in-window
+    # pending, so a store's rate reflects only buyer-validated (or window-elapsed) sales.
+    good_c = sold_c - rejected_c - pending_c
+    settled_c = good_c + rejected_c + refunded_c
+    # Untried stores (nothing settled) sort last on 'success' via a -1 sentinel.
+    success_c = case((settled_c > 0, good_c * 1.0 / settled_c), else_=-1.0)
+    sorts = {
+        "sold": [sold_c.desc(), Store.created_at.desc(), Store.id.desc()],
+        "success": [success_c.desc(), sold_c.desc(), Store.id.desc()],
+        "buyers": [
+            func.coalesce(metrics_sq.c.buyers, 0).desc(),
+            sold_c.desc(),
             Store.id.desc(),
+        ],
+        "recent": [metrics_sq.c.last_sale.desc(), Store.id.desc()],
+        "new": [Store.created_at.desc(), Store.id.desc()],
+    }
+    order_by = sorts.get(sort) or sorts["sold"]
+    stmt = (
+        select(
+            Store,
+            price_sq.c.pmin,
+            price_sq.c.pmax,
+            metrics_sq.c.sold,
+            metrics_sq.c.buyers,
+            metrics_sq.c.last_sale,
+            metrics_sq.c.refunded,
+            metrics_sq.c.rejected,
+            metrics_sq.c.pending,
         )
+        .outerjoin(price_sq, price_sq.c.sid == Store.id)
+        .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
+        # Phase 1.7: hidden (sandbox) stores stay out of bulk discovery.
+        .where(Store.status == "live", Store.visibility == "public", *where_clauses)
+        .order_by(*order_by)
         .limit(limit)
         .offset(offset)
     )
     return [
-        _discovery_row(s, pmin, pmax, sold)
-        for s, pmin, pmax, sold in session.execute(stmt).all()
+        _discovery_row(
+            s, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending
+        )
+        for s, pmin, pmax, sold, buyers, last_sale, refunded, rejected, pending in (
+            session.execute(stmt).all()
+        )
     ]
 
 
@@ -1511,20 +1911,24 @@ def discovery_resources(
     limit: int = 20,
     offset: int = 0,
     include: str = "",
+    sort: str = "sold",
     session: Session = Depends(get_session),
 ):
     limit = max(1, min(limit, 50))
     offset = max(0, min(offset, 100_000))
+    sort = sort if sort in DISCOVERY_SORTS else "sold"
     total = session.scalar(
         select(func.count()).select_from(Store).where(Store.status == "live")
     )
-    resources = _discovery_rows(session, [], limit, offset)
+    resources = _discovery_rows(session, [], limit, offset, sort)
     body: dict = {
         "service": SERVICE,
         "agent_card": "/.well-known/agent-card.json",
         "total": total,
         "limit": limit,
         "offset": offset,
+        "sort": sort,
+        "sorts": list(DISCOVERY_SORTS),
         "resources": resources,
     }
     # M16.4: opt-in federated peer listings. Each row is labeled
@@ -1535,6 +1939,19 @@ def discovery_resources(
     if include == "federated":
         body["federated"] = federation.federated_rows(session, limit)
     return JSONResponse(body, headers=_AGENT_HEADERS)
+
+
+def _search_discovery(session: Session, q: str, limit: int) -> list[dict]:
+    """Keyword search over live stores (slug + merchant description). LIKE
+    metacharacters are escaped so a '%'/'_' in the query is a literal, not a
+    wildcard. Shared by /discovery/search and the root MCP search_stores tool."""
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like = f"%{esc}%"
+    clause = or_(
+        Store.slug.like(like, escape="\\"),
+        Store.description.like(like, escape="\\"),
+    )
+    return _discovery_rows(session, [clause], limit, 0)
 
 
 @router.get("/discovery/search")
@@ -1548,16 +1965,7 @@ def discovery_search(
     q = q.strip()
     if len(q) < 2 or len(q) > 100:
         raise HTTPException(422, "q must be 2 to 100 characters")
-    limit = max(1, min(limit, 50))
-    # Escape LIKE metacharacters so a '%'/'_' in the query is a literal, not a
-    # wildcard (ESCAPE clause), then match slug or merchant description.
-    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    like = f"%{esc}%"
-    clause = or_(
-        Store.slug.like(like, escape="\\"),
-        Store.description.like(like, escape="\\"),
-    )
-    resources = _discovery_rows(session, [clause], limit, 0)
+    resources = _search_discovery(session, q, max(1, min(limit, 50)))
     return JSONResponse(
         {
             "service": SERVICE,

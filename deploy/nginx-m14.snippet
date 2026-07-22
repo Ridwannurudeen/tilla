@@ -1,0 +1,51 @@
+# M14 nginx routing — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# Two changes, both already applied on the live VPS (backups in
+# /opt/tilla/nginx-backups/: tilla.conf.pre-404wire, tilla.conf.pre-ready). This
+# file records them so a rebuilt server reproduces them.
+#
+# ---------------------------------------------------------------------------
+# 1) Branded 404 for bad URLs (the www/404.html page).
+#
+# The www static block used an SPA-style catch-all fallback
+# (`try_files $uri $uri/ /index.html`) that served the landing HTML — HTTP 200 —
+# for EVERY unmatched path (delisted stores, typos, mistyped page names). Switch
+# it to a real 404 and point 404s at the branded page:
+#
+#   - Add at the server{} level (once):
+#         error_page 404 /404.html;
+#   - Change the final static location from:
+#         location / { root /opt/tilla/www; index index.html; try_files $uri $uri/ /index.html; }
+#     to:
+#         location / { root /opt/tilla/www; index index.html; try_files $uri $uri/ =404; }
+#
+# nginx does NOT intercept upstream (proxied) 404s unless proxy_intercept_errors
+# is on — which it is not — so /api/*, x402 and agent JSON 404s stay JSON. The
+# /s/ block already ends in `=404`, so delisted stores now render /404.html too.
+#
+# ---------------------------------------------------------------------------
+# 2) Proxy /ready (was never proxied — the old SPA fallback masked it as 200-HTML).
+#
+# /ready is a real app readiness route (DB + heartbeat checks). It was falling
+# through to the static block; once change (1) makes that block 404, an unproxied
+# /ready returns 404. Proxy it exactly like /health. Add beside the /health line:
+#
+#     location = /ready { proxy_pass http://127.0.0.1:8040/ready; }
+#
+# (The watchdog polls http://127.0.0.1:8040/ready DIRECTLY and was never affected;
+# this is for external monitoring + the deploy.sh $BASE/ready smoke.)
+#
+# ---------------------------------------------------------------------------
+# PRE-FLIGHT + APPLY: back up first, edit, `nginx -t`, then `systemctl reload nginx`.
+# NOTE: sites-enabled also loads stale tilla.gudman.xyz.conf.bak-* files (nginx's
+# `include *` glob), which cause harmless "conflicting server name" warnings —
+# nginx uses the first-sorted `.conf` (no suffix); confirm the effective block
+# with `nginx -T | grep -n -A1 'root /opt/tilla/www'`. reload has a brief
+# worker-swap window; re-test after a beat.
+#
+# VERIFY (edge, through nginx):
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/s/nope/     # 404 (branded)
+#   curl -s https://tilla.gudman.xyz/s/nope/ | grep -c 'not on the ledger'        # 1
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/ready        # 200
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/api/nope     # 404 + application/json
+#   curl -s -o /dev/null -w '%{http_code}\n' https://tilla.gudman.xyz/             # 200 (landing)

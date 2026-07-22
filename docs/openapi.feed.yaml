@@ -41,6 +41,11 @@ properties:
         link:
           type: string
           format: uri
+        # Phase 1.3 SLA: the delivery-time promise (minutes) the buyer agent should
+        # expect — a per-product ETA it can rank providers on.
+        sla_minutes:
+          type: integer
+          minimum: 1
         price:
           type: object
           additionalProperties: false
@@ -79,7 +84,7 @@ properties:
           properties:
             endpoint:
               type: string
-              pattern: "^/s/[a-z0-9][a-z0-9-]{0,39}/buy$"
+              pattern: "^/s/[a-z0-9][a-z0-9-]{0,39}/buy(/[0-9]+)?$"
             network:
               type: string
               const: "eip155:196"

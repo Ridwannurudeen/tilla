@@ -341,14 +341,21 @@ def ready():
 @app.get("/sitemap.xml")
 @limiter.limit("60/minute")
 def sitemap(request: Request, session: Session = Depends(get_session)):
-    """XML sitemap of every LIVE store URL (pending/blocked stores are excluded —
-    their pages aren't served). Slugs are a restricted charset, but the <loc>
-    text is XML-escaped regardless."""
+    """XML sitemap of every LIVE, PUBLIC store URL (pending/blocked stores are excluded
+    — their pages aren't served; Phase 1.7 hidden/sandbox stores are excluded too, so
+    they stay unindexed). Slugs are a restricted charset, but the <loc> text is
+    XML-escaped regardless."""
     base = config.PUBLIC_BASE_URL.rstrip("/")
     slugs = session.scalars(
-        select(Store.slug).where(Store.status == "live").order_by(Store.slug)
+        select(Store.slug)
+        .where(Store.status == "live", Store.visibility == "public")
+        .order_by(Store.slug)
     ).all()
-    urls = "".join(
+    # Hub pages first (nginx-served statics the crawler can't discover from the
+    # store URLs alone), then every live store.
+    hub = ("/", "/marketplace.html", "/receipt-demo.html", "/library.html")
+    urls = "".join(f"<url><loc>{escape(base)}{path}</loc></url>" for path in hub)
+    urls += "".join(
         f"<url><loc>{escape(base)}/s/{escape(slug)}/</loc></url>" for slug in slugs
     )
     xml = (
@@ -736,6 +743,12 @@ class CheckoutCreateBody(BaseModel):
     # wallet; themes forward `?ref=` here. Validated + lowercased, zero-address
     # rejected. Absent/empty -> no attribution, byte-identical to the pre-M13 flow.
     ref: str | None = None
+    # Multi-product: the buyer's chosen product. product_id is the stable DB id
+    # (preferred — a deactivate/reorder can't shift it); product_index is the
+    # legacy render-order fallback still sent by pages cached before the id switch.
+    # Both absent -> the primary product, byte-identical to the single-product flow.
+    product_id: int | None = None
+    product_index: int | None = None
 
     @field_validator("ref")
     @classmethod
@@ -762,11 +775,30 @@ def create_checkout(
         raise HTTPException(409, "store is not yet live (pending content screening)")
     if store.status != "live":
         raise HTTPException(404, "store not found")
-    product = session.scalar(
+    products = session.scalars(
         select(Product)
         .where(Product.store_id == store.id, Product.active.is_(True))
         .order_by(Product.id)
-    )
+    ).all()
+    if not products:
+        raise HTTPException(409, "store has no active product")
+    # Select the buyer's chosen product: prefer the stable product_id (validated to
+    # be an ACTIVE product of THIS store — a foreign or inactive id fails closed
+    # 404, never charges the wrong product / no IDOR), else the legacy render-order
+    # index, else the primary product.
+    pid = body.product_id if body is not None else None
+    idx = body.product_index if body is not None else None
+    if pid is not None:
+        product = next((p for p in products if p.id == pid), None)
+        if product is None:
+            raise HTTPException(404, "product not found")
+    elif idx is not None:
+        if 0 <= idx < len(products):
+            product = products[idx]
+        else:
+            raise HTTPException(400, "product_index out of range")
+    else:
+        product = products[0]
     referrer_addr = body.ref if body is not None else None
     try:
         order = checkout.create_order(session, store, product, referrer_addr)
@@ -777,6 +809,10 @@ def create_checkout(
     return {
         "id": order.id,
         "pay_to": store.pay_to,
+        "product_name": product.name,
+        # Phase 1.3 SLA: the delivery-time promise (minutes) shown to the buyer as
+        # an ETA, and consumed by embed/custom checkout frontends.
+        "sla_minutes": agentic._effective_sla(product),
         "amount": order.expected_micro / 1e6,
         # Exact base-unit amount so the browser builds ERC-20 calldata with BigInt
         # only (amount*1e6 in JS can be off by one micro, which the exact-match
@@ -876,12 +912,43 @@ def _authorize_order_email(request: Request, session: Session, order: Order) -> 
     return False
 
 
-def _deactivate_deliverables(session: Session, store_id: int) -> None:
-    session.execute(
-        update(Deliverable)
-        .where(Deliverable.store_id == store_id, Deliverable.active.is_(True))
-        .values(active=False)
+def _deactivate_deliverables(
+    session: Session, store_id: int, product_id: int | None = None
+) -> None:
+    """Flip active deliverables inactive within one scope: the store-level default
+    (product_id NULL) when product_id is None, else just that product's — so
+    setting a per-product deliverable never disturbs the store default or other
+    products' deliverables (and vice versa)."""
+    stmt = update(Deliverable).where(
+        Deliverable.store_id == store_id, Deliverable.active.is_(True)
     )
+    if product_id is None:
+        stmt = stmt.where(Deliverable.product_id.is_(None))
+    else:
+        stmt = stmt.where(Deliverable.product_id == product_id)
+    session.execute(stmt.values(active=False))
+
+
+def _deliverable_product_id(session: Session, store: Store, raw: object) -> int | None:
+    """None (store-level default) when absent/empty; otherwise the int, validated
+    to be an ACTIVE product of THIS store (422 otherwise, so a merchant can't bind
+    a deliverable to a foreign or non-existent product)."""
+    if raw in (None, ""):
+        return None
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "product_id must be an integer") from None
+    product = session.scalar(
+        select(Product).where(
+            Product.id == pid,
+            Product.store_id == store.id,
+            Product.active.is_(True),
+        )
+    )
+    if product is None:
+        raise HTTPException(422, "product_id is not an active product of this store")
+    return pid
 
 
 def _positive_int(value, default: int) -> int:
@@ -1116,9 +1183,11 @@ async def create_deliverable(
             stored = await delivery.store_upload(upload)
         except delivery.UploadTooLarge:
             raise HTTPException(413, "file exceeds the size cap") from None
-        _deactivate_deliverables(session, store.id)
+        product_id = _deliverable_product_id(session, store, form.get("product_id"))
+        _deactivate_deliverables(session, store.id, product_id)
         deliverable = Deliverable(
             store_id=store.id,
+            product_id=product_id,
             kind="file",
             file_sha256=stored["sha256"],
             file_name=delivery.sanitize_filename(upload.filename),
@@ -1139,6 +1208,7 @@ async def create_deliverable(
             raise HTTPException(422, "invalid JSON body") from None
         if not isinstance(body, dict):
             raise HTTPException(422, "JSON body must be an object")
+        product_id = _deliverable_product_id(session, store, body.get("product_id"))
         kind = body.get("kind")
         if kind == "text":
             payload = body.get("payload")
@@ -1146,14 +1216,19 @@ async def create_deliverable(
                 raise HTTPException(
                     422, "text deliverable requires a non-empty payload"
                 )
-            _deactivate_deliverables(session, store.id)
-            deliverable = Deliverable(
-                store_id=store.id, kind="text", payload=payload, active=True
-            )
-        elif kind == "license":
-            _deactivate_deliverables(session, store.id)
+            _deactivate_deliverables(session, store.id, product_id)
             deliverable = Deliverable(
                 store_id=store.id,
+                product_id=product_id,
+                kind="text",
+                payload=payload,
+                active=True,
+            )
+        elif kind == "license":
+            _deactivate_deliverables(session, store.id, product_id)
+            deliverable = Deliverable(
+                store_id=store.id,
+                product_id=product_id,
                 kind="license",
                 max_activations=_positive_int(
                     body.get("max_activations"), config.LICENSE_ACTIVATIONS_DEFAULT
@@ -1173,7 +1248,12 @@ async def create_deliverable(
         data={"kind": deliverable.kind, "deliverable_id": deliverable.id},
     )
     session.commit()
-    resp = {"id": deliverable.id, "kind": deliverable.kind, "active": True}
+    resp = {
+        "id": deliverable.id,
+        "product_id": deliverable.product_id,
+        "kind": deliverable.kind,
+        "active": True,
+    }
     if deliverable.kind == "file":
         resp.update(
             file_name=deliverable.file_name,
@@ -1296,6 +1376,8 @@ def library(request: Request, session: Session = Depends(get_session)):
             "product": product.name if product else None,
             "amount": order.expected_micro / 1e6,
             "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+            # Phase 1.6: lets the buyer UI offer confirm/dispute while still 'pending'.
+            "eval_status": order.eval_status,
             "kind": delivery_row.kind if delivery_row else "text",
             # The authenticated wallet owner may see the full Delivery payload —
             # this is the ONLY post-gating path to an entitlement-backed text
@@ -1305,6 +1387,51 @@ def library(request: Request, session: Session = Depends(get_session)):
         _augment_gated(session, order, item)
         purchases.append(item)
     return {"wallet": wallet, "purchases": purchases}
+
+
+class EvaluateBody(BaseModel):
+    order_id: str = Field(min_length=1, max_length=32)
+    verdict: Literal["confirm", "reject"]
+
+
+@app.post("/api/library/evaluate")
+@limiter.limit("30/minute")
+def library_evaluate(
+    request: Request, body: EvaluateBody, session: Session = Depends(get_session)
+):
+    """The paying buyer confirms or disputes a delivered order (Phase 1.6). Gated by
+    the same wallet-signature session as /api/library, and only for an order whose
+    on-chain payer IS the authenticated wallet. Reputation-only: it never moves funds
+    (a dispute is not a refund) — it feeds success_rate. Idempotent: a settled
+    evaluation is not re-opened; an unknown/foreign order is an opaque 404."""
+    if not config.SIGNING_KEY:
+        raise HTTPException(503, "sign-in not configured")
+    try:
+        wallet = delivery.load_session_token(_bearer(request))
+    except SignatureExpired:
+        raise HTTPException(401, "session expired") from None
+    except BadSignature:
+        raise HTTPException(401, "invalid session") from None
+    order = session.get(Order, body.order_id)
+    if (
+        order is None
+        or order.from_addr is None
+        or order.from_addr.lower() != wallet
+        or order.status not in checkout.TERMINAL_DELIVERED
+    ):
+        raise HTTPException(404, "order not found")
+    if order.eval_status not in ("none", "pending"):
+        raise HTTPException(409, "order already evaluated")
+    order.eval_status = "confirmed" if body.verdict == "confirm" else "rejected"
+    log_event(
+        session,
+        "api",
+        f"order.eval_{order.eval_status}",
+        store_id=order.store_id,
+        order_id=order.id,
+    )
+    session.commit()
+    return {"order_id": order.id, "eval_status": order.eval_status}
 
 
 class WaitlistBody(BaseModel):
@@ -1625,6 +1752,12 @@ if os.getenv("OKX_API_KEY"):
         # (listing-review robustness); a PAID GET reaches agentic.agent_buy_get and
         # is refused 405 BEFORE settle, so zero funds can move on the GET method.
         "GET /s/:slug/buy": _store_route,
+        # Per-product buy: same dynamic resolvers (resolve_price/resolve_pay_to read
+        # the product id from the path), so an agent can x402-buy ANY product, not
+        # just the primary. POST + GET registered for the same reasons as the bare
+        # buy route above.
+        "POST /s/:slug/buy/:product_id": _store_route,
+        "GET /s/:slug/buy/:product_id": _store_route,
     }
     app.add_middleware(PaymentMiddlewareASGI, routes=_paid, server=_srv)
     # Registered AFTER the payment middleware so it is OUTERMOST (runs first): it

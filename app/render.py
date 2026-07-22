@@ -41,9 +41,31 @@ def _safe_hex(value: object, fallback: str) -> str:
     return text if _HEX_COLOR.fullmatch(text) else fallback
 
 
+def _relative_luminance(hex_color: str) -> float:
+    """WCAG relative luminance of an already-validated hex color
+    (https://www.w3.org/TR/WCAG21/#dfn-relative-luminance). Short #RGB/#RGBA
+    forms are expanded; alpha digits are ignored."""
+    digits = hex_color[1:]
+    if len(digits) in (3, 4):
+        digits = "".join(d * 2 for d in digits)
+    srgb = [int(digits[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in srgb]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _on_primary(primary: str) -> str:
+    """Pure "#000" or "#fff" — whichever has the higher WCAG contrast ratio
+    against the validated primary color."""
+    lum = _relative_luminance(primary)
+    contrast_black = (lum + 0.05) / 0.05
+    contrast_white = 1.05 / (lum + 0.05)
+    return "#000" if contrast_black >= contrast_white else "#fff"
+
+
 def _palette_ctx(content: Mapping) -> dict:
     """The four validated palette hex values (safe fallback on anything not a
-    strict hex color), shared by the store themes and the OG image."""
+    strict hex color), shared by the store themes and the OG image, plus the
+    derived C_ON_PRIMARY (pure #000/#fff by WCAG contrast against C_PRIMARY)."""
     palette = content.get("palette") or {}
     if not isinstance(palette, Mapping):
         palette = {}
@@ -52,6 +74,52 @@ def _palette_ctx(content: Mapping) -> dict:
         "C_ACCENT": _safe_hex(palette.get("accent"), DEFAULT_PALETTE["accent"]),
         "C_BG": _safe_hex(palette.get("bg"), DEFAULT_PALETTE["bg"]),
         "C_TEXT": _safe_hex(palette.get("text"), DEFAULT_PALETTE["text"]),
+        "C_ON_PRIMARY": _on_primary(
+            _safe_hex(palette.get("primary"), DEFAULT_PALETTE["primary"])
+        ),
+    }
+
+
+# Design DNA axis whitelists (docs/DESIGN-DNA.md): each enum value the LLM may
+# pick maps onto a server-owned token value. Anything outside a whitelist falls
+# back to the default, so a bogus value never reaches a style context — the
+# same fail-closed contract as _safe_hex. The defaults (balanced / regular /
+# roomy / stacked / medium) reproduce the pre-DNA look exactly.
+_DNA_SCALE = {
+    "compact": "1.18",
+    "balanced": "1.25",
+    "dramatic": "1.34",
+    "monumental": "1.5",
+}
+_DNA_WEIGHT = {"light": "300", "regular": "450", "heavy": "700"}
+_DNA_SPACE = {"tight": "0.82", "roomy": "1", "airy": "1.35"}
+_DNA_HERO = {"stacked": "stacked", "split": "split", "offset": "offset"}
+_DNA_TEXTURE = {"sparse": "sparse", "medium": "medium", "dense": "dense"}
+
+
+def _safe_enum(value: object, mapping: Mapping, fallback: str) -> str:
+    """Map a whitelisted Design DNA enum value to its token value, falling back
+    on anything else (wrong type included) — the enum analogue of _safe_hex."""
+    return mapping[value] if isinstance(value, str) and value in mapping else fallback
+
+
+def _dna_ctx(content: Mapping) -> dict:
+    """The five validated Design DNA tokens (docs/DESIGN-DNA.md). A store whose
+    content has no design_dna — or a partial/invalid one — gets the defaults on
+    every missing/bogus axis, so pre-DNA stores render with the current look."""
+    dna = content.get("design_dna") or {}
+    if not isinstance(dna, Mapping):
+        dna = {}
+    return {
+        "DNA_SCALE": _safe_enum(dna.get("scale"), _DNA_SCALE, _DNA_SCALE["balanced"]),
+        "DNA_WEIGHT": _safe_enum(
+            dna.get("weight"), _DNA_WEIGHT, _DNA_WEIGHT["regular"]
+        ),
+        "DNA_SPACE": _safe_enum(dna.get("rhythm"), _DNA_SPACE, _DNA_SPACE["roomy"]),
+        "DNA_HERO": _safe_enum(dna.get("hero"), _DNA_HERO, _DNA_HERO["stacked"]),
+        "DNA_TEXTURE": _safe_enum(
+            dna.get("texture"), _DNA_TEXTURE, _DNA_TEXTURE["medium"]
+        ),
     }
 
 
@@ -62,7 +130,7 @@ def _seo_ctx(content: Mapping, slug: str) -> dict:
     the <script type="application/ld+json"> block."""
     base = PUBLIC_BASE_URL.rstrip("/")
     canonical = f"{base}/s/{slug}/"
-    og_image = f"{base}/s/{slug}/og.svg"
+    og_image = f"{base}/s/{slug}/og.png"
     store_name = str(content.get("store_name", "My Store"))
     description = str(content.get("hero_subcopy") or content.get("tagline") or "")
     product_name = str(content.get("product_name", "")) or store_name
@@ -89,6 +157,53 @@ def _seo_ctx(content: Mapping, slug: str) -> dict:
     }
 
 
+def _products_ctx(content: Mapping) -> dict:
+    """The store's product catalog as display-safe dicts for the theme's product
+    loop. Old single-product content (only the scalar product_* fields, no
+    `products` list) coerces to a one-item catalog, so pre-multi-product stores
+    render unchanged. Each item carries its 0-based ``index``, which the buy button
+    hands to checkout to select the Nth active product (by id) — the catalog is
+    rendered in the same order the Product rows were created."""
+    raw = content.get("products")
+    if not isinstance(raw, list) or not raw:
+        raw = [
+            {
+                "name": content.get("product_name", ""),
+                "blurb": content.get("product_blurb", ""),
+                "price_usdt": content.get("price_usdt", 0),
+                "cta_text": content.get("cta_text", "Buy now"),
+            }
+        ]
+    products = [
+        {
+            "index": i,
+            # The stable DB product id (populated by create_store/resync); the buy
+            # button prefers it so a deactivate/reorder can't shift what's bought.
+            # Empty when content predates it (pre-backfill) — the button falls back
+            # to the index, which checkout still accepts.
+            "id": str(item["id"]) if isinstance(item.get("id"), int) else "",
+            "name": str(item.get("name", "")),
+            "blurb": str(item.get("blurb", "")),
+            "price": str(item.get("price_usdt", 0)),
+            "cta": str(item.get("cta_text", "Buy now")),
+        }
+        for i, item in enumerate(raw)
+        if isinstance(item, Mapping)
+    ]
+    if not products:  # every item malformed — fall back to the scalar primary
+        products = [
+            {
+                "index": 0,
+                "id": "",
+                "name": str(content.get("product_name", "")),
+                "blurb": str(content.get("product_blurb", "")),
+                "price": str(content.get("price_usdt", 0)),
+                "cta": str(content.get("cta_text", "Buy now")),
+            }
+        ]
+    return {"PRODUCTS": products}
+
+
 def _store_ctx(content: Mapping, addr: str, slug: str) -> dict:
     """The full 15-token store-theme context (+ additive palette/SEO). Shared by
     :func:`render` and the M15.2 install-time :func:`render_source` check so a
@@ -112,6 +227,8 @@ def _store_ctx(content: Mapping, addr: str, slug: str) -> dict:
         "CHAIN_ID": payment.CANONICAL_CHAIN.chain_id,
         "BRIDGE_URL": config.BRIDGE_URL,
         **_palette_ctx(content),
+        **_dna_ctx(content),
+        **_products_ctx(content),
         **_seo_ctx(content, slug),
     }
 
@@ -144,8 +261,17 @@ def render_og(content: Mapping, slug: str) -> str:
     """Render the per-store Open Graph card (SVG, 1200x630). Served statically at
     /s/<slug>/og.svg and referenced from og:image / twitter:image. Autoescaped
     like the themes, so untrusted copy stays inert inside the SVG text nodes."""
+    store_name = str(content.get("store_name", "My Store"))
+    # Monogram for the OG card: rsvg-convert (the og.png rasterizer) has no
+    # colour-emoji font, so an arbitrary merchant emoji can rasterise to tofu.
+    # The first alphanumeric letter of the brand always renders (DejaVu), so the
+    # card's identity mark is never broken.
+    store_initial = (next((c for c in store_name if c.isalnum()), "").upper() or "◆")[
+        :1
+    ]
     ctx = {
-        "STORE_NAME": str(content.get("store_name", "My Store")),
+        "STORE_NAME": store_name,
+        "STORE_INITIAL": store_initial,
         "TAGLINE": str(content.get("tagline", "")),
         "PRODUCT_NAME": str(content.get("product_name", "")),
         "PRICE": str(content.get("price_usdt", 0)),

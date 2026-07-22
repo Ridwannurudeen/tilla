@@ -32,6 +32,12 @@ properties:
           type: string
         description:
           type: string
+        input_schema:
+          type: object
+        sample_request:
+          type: object
+        sla_minutes:
+          type: integer
         x402:
           type: object
           additionalProperties: true
@@ -74,4 +80,6 @@ properties:
       resources:
         type: string
       search:
+        type: string
+      mcp:
         type: string

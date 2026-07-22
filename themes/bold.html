@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{STORE_NAME}} — {{TAGLINE}}</title>
 <link rel="canonical" href="{{CANONICAL_URL}}">
@@ -17,102 +18,407 @@
 <meta name="twitter:description" content="{{META_DESCRIPTION}}">
 <meta name="twitter:image" content="{{OG_IMAGE}}">
 <script type="application/ld+json">{{ PRODUCT_JSONLD | tojson }}</script>
+{% include "_fonts.html" %}
 <style>
   :root{ --primary:{{C_PRIMARY}}; --accent:{{C_ACCENT}}; --bg:{{C_BG}}; --text:{{C_TEXT}}; }
+  :root{
+    --on-primary:{{C_ON_PRIMARY}};
+    --dna-scale:{{DNA_SCALE}}; --dna-space:{{DNA_SPACE}}; --dna-weight:{{DNA_WEIGHT}};
+    --dna-r:calc(var(--dna-scale)*0.8);       /* type ratio: 1 at the default 1.25 step */
+    --dna-h1:calc(var(--dna-r)*var(--dna-r)); /* masthead pushes harder than the rest */
+    --dna-w:calc(var(--dna-weight) + 250);    /* display weight: regular (450) -> today's 700 */
+    --xlayer:#BCFF2F; --on-xlayer:#000; --xlayer-tint:#e6ffb0;
+    --surface:color-mix(in oklab,var(--bg) 92%,var(--text));
+    --pressed:color-mix(in oklab,var(--bg) 84%,var(--text));
+    --hairline:color-mix(in srgb,var(--text) 16%,transparent);
+    --tint:color-mix(in srgb,var(--primary) 8%,var(--bg));
+  }
+  @property --tint{ syntax:'<color>'; inherits:true; initial-value:transparent; }
+
   *{ box-sizing:border-box; margin:0; padding:0; }
-  body{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-        background:var(--bg); color:var(--text); line-height:1.5; -webkit-font-smoothing:antialiased;
-        overflow-x:hidden; }
+  body{
+    font-family:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.5;
+    -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
   a{ color:inherit; }
-  .wrap{ max-width:980px; margin:0 auto; padding:0 24px; position:relative; z-index:1; }
+  ::selection{ background:var(--primary); color:var(--on-primary); }
+  button:focus-visible, a:focus-visible{ outline:3px solid var(--text); outline-offset:3px; }
+  .mono{
+    font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums;
+  }
+  .wrap{ position:relative; z-index:1; max-width:1040px; margin:0 auto;
+    padding-left:clamp(18px,4vw,40px); padding-right:clamp(18px,4vw,40px); }
 
-  /* animated bold backdrop */
-  .bolt{ position:fixed; inset:0; z-index:0; pointer-events:none; overflow:hidden; }
-  .bolt::before{ content:""; position:absolute; width:140%; height:140%; left:-20%; top:-60%;
-    background:conic-gradient(from 180deg at 50% 50%, var(--primary), var(--accent), var(--primary));
-    opacity:.35; filter:blur(70px); animation:spin 26s linear infinite; }
-  .bolt::after{ content:""; position:absolute; inset:0;
-    background:linear-gradient(180deg, transparent 0%, var(--bg) 78%); }
-  @keyframes spin{ to{ transform:rotate(360deg); } }
-  @media (prefers-reduced-motion:reduce){ .bolt::before{ animation:none; } }
+  .skip{ position:fixed; left:16px; top:-60px; z-index:100; padding:10px 16px;
+    background:var(--text); color:var(--bg); font-weight:700; font-size:14px;
+    border-radius:3px; text-decoration:none; transition:top .15s ease; }
+  .skip:focus{ top:12px; }
 
-  header{ display:flex; align-items:center; justify-content:space-between; padding:28px 0; }
-  .brand{ display:flex; align-items:center; gap:13px; font-weight:900; font-size:21px; letter-spacing:-.02em;
-    text-transform:uppercase; }
-  .logo{ width:48px; height:48px; display:grid; place-items:center; font-size:26px; border-radius:14px;
-    background:linear-gradient(135deg, var(--primary), var(--accent));
-    box-shadow:0 0 0 2px color-mix(in srgb,var(--text) 10%,transparent), 0 10px 34px color-mix(in srgb,var(--primary) 55%,transparent); }
-  .pill{ font-size:11.5px; font-weight:800; padding:8px 15px; border-radius:999px; text-transform:uppercase; letter-spacing:.06em;
-    background:linear-gradient(135deg, color-mix(in srgb,var(--primary) 30%,transparent), color-mix(in srgb,var(--accent) 30%,transparent));
-    border:1px solid color-mix(in srgb,var(--accent) 45%,transparent); color:var(--text); }
+  /* ---------- top bar: thick rule, block mark, chain chip ---------- */
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+    padding:14px clamp(16px,3vw,32px);
+    border-bottom:3px solid var(--text); background:var(--bg);
+  }
+  .brand{ display:flex; align-items:center; gap:12px; min-width:0;
+    font-weight:700; font-size:18px; letter-spacing:.02em; text-transform:uppercase; }
+  .brand .mark{ flex:none; width:40px; height:40px; display:grid; place-items:center;
+    font-size:20px; line-height:1; border:2px solid var(--text); background:var(--surface); }
+  .brand .brand-name{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chip{
+    flex:none; display:inline-flex; align-items:center; gap:8px; padding:8px 12px;
+    border:2px solid var(--text);
+    font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
+    white-space:nowrap;
+  }
+  .chip .dot{ width:8px; height:8px; background:var(--xlayer);
+    box-shadow:0 0 0 1px rgba(0,0,0,.28); }
+  .chip .dot{ animation:live 2.4s ease-in-out infinite; }
+  @keyframes live{ 50%{ opacity:.45; } }
 
-  .hero{ text-align:center; padding:78px 0 24px; }
-  .hero .kicker{ display:inline-block; font-size:12.5px; font-weight:800; letter-spacing:.14em; text-transform:uppercase;
-    color:var(--accent); margin-bottom:18px; }
-  .hero h1{ font-size:clamp(40px,8vw,78px); font-weight:900; letter-spacing:-.045em; line-height:.98;
-    background:linear-gradient(120deg, var(--text) 20%, var(--accent) 55%, var(--primary) 90%);
-    -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .hero p{ margin:22px auto 0; max-width:580px; font-size:19px; font-weight:500; color:color-mix(in srgb,var(--text) 68%,transparent); }
+  /* ---------- masthead: the headline IS the layout ---------- */
+  .mast{ position:relative; overflow:hidden; border-bottom:3px solid var(--text);
+    padding:calc(clamp(56px,9vh,110px)*var(--dna-space)) 0 calc(clamp(56px,9vh,104px)*var(--dna-space)); }
+  .tiles{ position:absolute; top:0; right:0; z-index:0; pointer-events:none; }
+  .tiles i{ position:absolute; display:block; }
+  .tiles .ta{ width:170px; height:170px; top:0; right:0; background:var(--primary); }
+  .tiles .tb{ width:100px; height:100px; top:0; right:170px; background:var(--accent); }
+  .tiles .tc{ width:110px; height:110px; top:170px; right:0; background:var(--tint);
+    border:2px solid var(--hairline); }
+  .kicker{ display:inline-flex; align-items:center; gap:10px;
+    font-size:12px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 70%,transparent); }
+  .kicker::before{ content:""; flex:none; width:10px; height:10px; background:var(--primary); }
+  .mast h1{
+    margin-top:20px; max-width:12ch;
+    font-size:clamp(2.8rem,11vw,8.5rem); font-weight:700; text-transform:uppercase;
+    font-size:clamp(calc(2.8rem*var(--dna-h1)),calc(11vw*var(--dna-h1)),calc(8.5rem*var(--dna-h1)));
+    font-weight:var(--dna-w);
+    line-height:.92; letter-spacing:-.02em; overflow-wrap:anywhere; text-wrap:balance;
+  }
+  .stamp{ display:inline-block; margin-top:34px; padding:12px 18px;
+    border:3px solid var(--text); transform:rotate(-4deg);
+    font-size:13px; font-weight:700; letter-spacing:.22em; text-transform:uppercase;
+    box-shadow:8px 8px 0 var(--primary); background:var(--bg); }
+  .mast-price{ display:flex; align-items:baseline; flex-wrap:wrap; gap:14px;
+    margin-top:clamp(30px,5vh,52px); }
+  .mast-price .n{ font-size:clamp(2.6rem,7vw,5rem); font-weight:700;
+    font-size:clamp(calc(2.6rem*var(--dna-r)),calc(7vw*var(--dna-r)),calc(5rem*var(--dna-r)));
+    font-weight:var(--dna-w);
+    letter-spacing:-.02em; line-height:1; }
+  .mast-price .u{ font-size:1.1rem; font-weight:700; letter-spacing:.08em;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .mast-sub{ margin-top:20px; max-width:34rem; font-size:1.125rem;
+    color:color-mix(in srgb,var(--text) 72%,transparent); }
 
-  .card{ margin:44px auto 0; max-width:560px; border-radius:26px; padding:6px;
-    background:linear-gradient(135deg, var(--primary), var(--accent));
-    box-shadow:0 30px 90px -20px color-mix(in srgb,var(--primary) 60%,transparent); }
-  .card-inner{ border-radius:22px; padding:34px; background:color-mix(in srgb,var(--bg) 92%, black); }
-  .card h2{ font-size:26px; font-weight:900; letter-spacing:-.02em; }
-  .card .blurb{ margin-top:11px; color:color-mix(in srgb,var(--text) 72%,transparent); font-size:16px; }
-  .price{ margin-top:26px; display:flex; align-items:baseline; gap:10px; }
-  .price .n{ font-size:48px; font-weight:900; letter-spacing:-.03em;
-    background:linear-gradient(120deg,var(--text),var(--accent)); -webkit-background-clip:text; background-clip:text; color:transparent; }
-  .price .u{ font-size:15px; font-weight:800; color:var(--accent); letter-spacing:.04em; }
-  .buy{ margin-top:26px; width:100%; border:0; cursor:pointer; padding:19px; border-radius:16px; font-size:17px; font-weight:900;
-    letter-spacing:.01em; text-transform:uppercase; color:#fff;
-    background:linear-gradient(135deg,var(--primary),var(--accent));
-    box-shadow:0 16px 40px color-mix(in srgb,var(--primary) 55%,transparent); transition:transform .12s, box-shadow .12s; }
-  .buy:hover{ transform:translateY(-3px) scale(1.01); box-shadow:0 22px 50px color-mix(in srgb,var(--primary) 65%,transparent); }
-  .buy:active{ transform:translateY(0); }
-  .xlayer{ margin-top:16px; text-align:center; font-size:12.5px; font-weight:600; color:color-mix(in srgb,var(--text) 55%,transparent); }
-  .checkout{ display:none; margin-top:22px; padding:20px; border-radius:16px; background:color-mix(in srgb,var(--bg) 60%,#000);
-    border:1px dashed color-mix(in srgb,var(--accent) 45%,transparent); font-size:14px; }
-  .checkout.on{ display:block; }
-  .row{ display:flex; justify-content:space-between; gap:10px; margin:6px 0; }
-  .addr{ font-family:ui-monospace,Consolas,monospace; font-size:12px; word-break:break-all; color:var(--accent); font-weight:700; }
-  .status{ margin-top:10px; font-weight:700; color:color-mix(in srgb,var(--text) 70%,transparent); }
-  footer{ text-align:center; padding:60px 0 44px; font-size:13px; font-weight:600; color:color-mix(in srgb,var(--text) 45%,transparent); }
-  footer b{ color:var(--accent); }
+  /* ---------- proof / ledger band: dot-leader facts, lime = chain ---------- */
+  .ledger{ background:var(--surface); border-bottom:3px solid var(--text); }
+  .ledger .wrap{ padding-top:calc(clamp(44px,7vh,72px)*var(--dna-space));
+    padding-bottom:calc(clamp(44px,7vh,72px)*var(--dna-space)); }
+  .ledger-title{ display:inline-flex; align-items:center; gap:10px;
+    font-size:11px; font-weight:700; letter-spacing:.2em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .ledger-title::before{ content:""; flex:none; width:10px; height:10px; background:var(--xlayer); }
+  .ledger h2{ margin-top:14px; font-size:clamp(1.5rem,3.4vw,2.3rem); font-weight:700;
+    font-size:clamp(calc(1.5rem*var(--dna-r)),calc(3.4vw*var(--dna-r)),calc(2.3rem*var(--dna-r)));
+    font-weight:var(--dna-w);
+    text-transform:uppercase; letter-spacing:-.01em; line-height:1.1; max-width:24ch; }
+  .facts{ margin-top:26px; font-size:14px; }
+  .fact{ display:flex; align-items:baseline; gap:14px; padding:16px 0;
+    border-bottom:2px solid color-mix(in srgb,var(--text) 24%,transparent); }
+  .fact:first-child{ border-top:2px solid color-mix(in srgb,var(--text) 24%,transparent); }
+  .fact dt{ flex:none; font-size:11px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 58%,transparent); }
+  .fact .lead{ flex:1; min-width:24px;
+    border-bottom:2px dotted color-mix(in srgb,var(--text) 36%,transparent);
+    transform:translateY(-4px); }
+  .fact dd{ font-weight:700; text-align:right; letter-spacing:.01em; }
+  .vchip{ display:inline-block; padding:5px 10px;
+    background:var(--xlayer); color:var(--on-xlayer); font-weight:700; letter-spacing:.06em; }
 
-  @media (max-width:480px){
-    .brand{ font-size:17px; } .logo{ width:40px; height:40px; font-size:22px; }
-    .pill{ display:none; }
-    .card-inner{ padding:24px; }
+  /* ---------- product + buy block: palette-dominant, hard offset shadow ---------- */
+  .shop{ padding:calc(clamp(60px,10vh,120px)*var(--dna-space)) 0; }
+  .card{ position:relative; max-width:720px; margin:0 auto;
+    border:3px solid var(--text); background:var(--tint);
+    box-shadow:10px 10px 0 var(--primary);
+    padding:clamp(26px,4vw,48px); }
+  .card .blocks{ position:absolute; top:18px; right:18px; display:flex; gap:6px; }
+  .card .blocks span{ width:12px; height:12px; }
+  .card .blocks span:nth-child(1){ background:var(--primary); }
+  .card .blocks span:nth-child(2){ background:var(--accent); }
+  .card .blocks span:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
+  /* ---------- Product Plate: brutalist product block. The emoji is the focal
+     subject; behind it a slug-seeded field of BIG solid palette blocks (same
+     FNV-1a -> mulberry32 identity as the flagship mosaic). Zero radius. ---------- */
+  .plate{ position:relative; overflow:hidden; margin:8px 0 clamp(26px,4vw,42px);
+    height:clamp(200px,32vw,300px);
+    border:3px solid var(--text); background:var(--bg);
+    box-shadow:10px 10px 0 var(--accent); }
+  .plate canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .plate-mark{ position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-50%) rotate(-3deg);
+    display:flex; align-items:center; justify-content:center;
+    min-width:clamp(110px,20vw,168px); min-height:clamp(110px,20vw,168px);
+    max-width:86%; padding:10px 16px; overflow:hidden; white-space:nowrap;
+    font-size:clamp(52px,9vw,84px); line-height:1;
+    border:3px solid var(--text); background:var(--bg);
+    box-shadow:8px 8px 0 var(--primary); }
+  .card h2{ font-size:clamp(1.8rem,4.5vw,3.2rem); font-weight:700; text-transform:uppercase;
+    font-size:clamp(calc(1.8rem*var(--dna-r)),calc(4.5vw*var(--dna-r)),calc(3.2rem*var(--dna-r)));
+    font-weight:var(--dna-w);
+    line-height:1.02; letter-spacing:-.02em; color:var(--primary);
+    max-width:16ch; text-wrap:balance; }
+  .card .blurb{ margin-top:14px; font-size:1.05rem; max-width:32rem;
+    color:color-mix(in srgb,var(--text) 76%,transparent); }
+  .price-row{ display:flex; align-items:baseline; gap:12px; margin-top:26px;
+    padding-top:22px; border-top:2px solid color-mix(in srgb,var(--text) 24%,transparent); }
+  .price-row .p{ font-size:clamp(2.4rem,6vw,4.2rem); font-weight:700;
+    font-size:clamp(calc(2.4rem*var(--dna-r)),calc(6vw*var(--dna-r)),calc(4.2rem*var(--dna-r)));
+    font-weight:var(--dna-w);
+    letter-spacing:-.02em; line-height:1; }
+  .price-row .u{ font-size:1rem; font-weight:700; letter-spacing:.06em; color:var(--accent); }
+  /* ---------- catalog: brutalist product blocks. One product = the classic
+     single card (the block chrome collapses via :only-child, so the 1-item
+     render matches the pre-catalog look); 2+ = a stack of hard-bordered
+     blocks, each with the offset --primary shadow and a mono index. ---------- */
+  .catalog{ display:grid; grid-template-columns:1fr; gap:clamp(22px,3.5vw,36px); }
+  .catalog .item{ position:relative; border:3px solid var(--text); background:var(--bg);
+    box-shadow:8px 8px 0 var(--primary); padding:clamp(20px,3vw,34px); }
+  .catalog .item:only-child{ border:0; background:none; box-shadow:none; padding:0; }
+  .item-no{ position:absolute; top:14px; right:16px; font-size:12px; font-weight:700;
+    letter-spacing:.18em; color:color-mix(in srgb,var(--text) 55%,transparent); }
+  .catalog .item:only-child .item-no{ display:none; }
+  .catalog .item:not(:only-child) h2{
+    font-size:clamp(calc(1.4rem*var(--dna-r)),calc(3.2vw*var(--dna-r)),calc(2.2rem*var(--dna-r))); }
+  .catalog .item:not(:only-child) .price-row{ margin-top:18px; padding-top:16px; }
+  .catalog .item:not(:only-child) .price-row .p{
+    font-size:clamp(calc(1.9rem*var(--dna-r)),calc(4.4vw*var(--dna-r)),calc(3rem*var(--dna-r))); }
+  .catalog .item:not(:only-child) .buy{ margin-top:18px; padding:15px 26px; font-size:15px; }
+  .buy{
+    display:block; width:100%; margin-top:24px; border:0; cursor:pointer;
+    padding:18px 30px; border-radius:999px; font:inherit; font-size:17px; font-weight:700;
+    text-transform:uppercase; letter-spacing:.04em;
+    color:var(--on-primary); background:var(--primary);
+    box-shadow:6px 6px 0 var(--accent);
+    transition:transform .15s ease, opacity .15s ease;
+  }
+  .buy:hover{ transform:translate(-2px,-2px); }
+  .buy:active{ transform:translate(0,0); }
+  .buy:disabled{ opacity:.5; cursor:default; transform:none; }
+  .buy-note{ margin-top:14px; text-align:center; font-size:10.5px; font-weight:700;
+    letter-spacing:.14em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 56%,transparent); }
+
+  /* ---------- stark mono footer ---------- */
+  footer{ border-top:3px solid var(--text); }
+  footer .wrap{ display:flex; align-items:center; justify-content:space-between; gap:14px;
+    flex-wrap:wrap; padding-top:30px; padding-bottom:38px;
+    font-size:10.5px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 52%,transparent); }
+  footer b{ font-weight:700; color:color-mix(in srgb,var(--text) 80%,transparent); }
+  footer nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
+  footer nav a{ padding:8px 0; text-decoration:none; }
+  footer nav a:hover{ color:var(--text); }
+
+  /* ---------- Design DNA: hero variants (same elements, rearranged) ---------- */
+  /* stacked = the base layout above, untouched (the no-DNA default). */
+  body[data-hero="split"] .mast .wrap{
+    display:grid; grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);
+    column-gap:clamp(24px,4vw,56px); align-items:end;
+  }
+  body[data-hero="split"] .kicker{ grid-column:1/-1; }
+  body[data-hero="split"] .mast h1{
+    grid-column:1; grid-row:2/span 3; max-width:none;
+    font-size:clamp(calc(2.2rem*var(--dna-h1)),calc(7.5vw*var(--dna-h1)),calc(6.5rem*var(--dna-h1)));
+  }
+  body[data-hero="split"] .stamp{ grid-column:2; justify-self:start; }
+  body[data-hero="split"] .mast-price{ grid-column:2; }
+  body[data-hero="split"] .mast-sub{ grid-column:2; }
+  body[data-hero="offset"] .tiles{ right:auto; left:0; transform-origin:top left; }
+  body[data-hero="offset"] .kicker{ margin-left:clamp(0px,7vw,90px); }
+  body[data-hero="offset"] .mast h1{ margin-left:clamp(0px,14vw,180px); max-width:14ch; }
+  body[data-hero="offset"] .stamp{ margin-left:clamp(20px,30vw,380px); transform:rotate(3deg); }
+  body[data-hero="offset"] .mast-price{ justify-content:flex-end; }
+  body[data-hero="offset"] .mast-sub{ margin-left:auto; text-align:right; }
+
+  /* ---------- Design DNA: block-cluster texture (sparse / medium / dense) ---------- */
+  /* medium = the three base tiles above, untouched; extras exist only for dense. */
+  .tiles .td, .tiles .te, .tiles .tf, .tiles .tg{ display:none; }
+  body[data-texture="sparse"] .tiles .ta{ width:240px; height:240px; }
+  body[data-texture="sparse"] .tiles .tb{ width:130px; height:130px; top:240px; right:0; }
+  body[data-texture="sparse"] .tiles .tc{ display:none; }
+  body[data-texture="dense"] .tiles .ta{ width:120px; height:120px; }
+  body[data-texture="dense"] .tiles .tb{ width:80px; height:80px; right:120px; }
+  body[data-texture="dense"] .tiles .tc{ width:70px; height:70px; top:120px; }
+  body[data-texture="dense"] .tiles .td{ display:block; width:60px; height:60px;
+    top:0; right:200px; background:var(--tint); border:2px solid var(--hairline); }
+  body[data-texture="dense"] .tiles .te{ display:block; width:90px; height:90px;
+    top:120px; right:70px; background:var(--accent); }
+  body[data-texture="dense"] .tiles .tf{ display:block; width:56px; height:56px;
+    top:210px; right:0; background:var(--primary); }
+  body[data-texture="dense"] .tiles .tg{ display:block; width:44px; height:44px;
+    top:216px; right:130px; background:color-mix(in srgb,var(--text) 24%,transparent); }
+
+  @media (max-width:860px){
+    .tiles{ transform:scale(.6); transform-origin:top right; }
+    body[data-hero="split"] .mast .wrap{ display:block; }
+  }
+  @media (max-width:560px){
+    .brand{ font-size:15px; }
+    .brand .mark{ width:34px; height:34px; font-size:17px; }
+    .chip{ padding:6px 9px; letter-spacing:.08em; }
+  }
+  @media (prefers-reduced-motion: reduce){
+    .chip .dot{ animation:none; }
+    .buy{ transition:none; }
+    .buy:hover, .buy:active{ transform:none; }
   }
 </style>
 </head>
-<body>
-<div class="bolt"></div>
-<div class="wrap">
-  <header>
-    <div class="brand"><span class="logo">{{EMOJI}}</span> {{STORE_NAME}}</div>
-    <span class="pill">Pay with crypto · X Layer</span>
-  </header>
+<body data-hero="{{DNA_HERO}}" data-texture="{{DNA_TEXTURE}}">
+<a class="skip" href="#buy">Skip to products</a>
+<header class="topbar">
+  <div class="brand"><span class="mark" aria-hidden="true">{{EMOJI}}</span> <span class="brand-name">{{STORE_NAME}}</span></div>
+  <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · 196</span>
+</header>
 
-  <section class="hero">
-    <span class="kicker">{{TAGLINE}}</span>
-    <h1>{{HERO_HEADLINE}}</h1>
-    <p>{{HERO_SUBCOPY}}</p>
-  </section>
-
-  <section class="card">
-    <div class="card-inner">
-      <h2>{{PRODUCT_NAME}}</h2>
-      <div class="blurb">{{PRODUCT_BLURB}}</div>
-      <div class="price"><span class="n">{{PRICE}}</span><span class="u">USDT</span></div>
-      <button class="buy" id="buyBtn" onclick="startCheckout()">{{CTA_TEXT}} →</button>
-      <div class="xlayer">Instant settlement in USDT on OKX X Layer · non-custodial</div>
-      {% include "_checkout.html" %}
+<main>
+  <section class="mast">
+    <div class="tiles" aria-hidden="true"><i class="ta"></i><i class="tb"></i><i class="tc"></i><i class="td"></i><i class="te"></i><i class="tf"></i><i class="tg"></i></div>
+    <div class="wrap">
+      {% if TAGLINE %}<p class="kicker mono">{{TAGLINE}}</p>{% endif %}
+      <h1>{{HERO_HEADLINE}}</h1>
+      <div class="stamp mono">Humans &amp; AI welcome</div>
+      <div class="mast-price">
+        <span class="n mono">{{PRICE}}</span><span class="u mono">USDT0</span>
+      </div>
+      <p class="mast-sub">{{HERO_SUBCOPY}}</p>
     </div>
   </section>
 
-  <footer>Powered by <b>Tilla</b> · your storefront on the agent economy · settled on X Layer</footer>
-</div>
+  <section class="ledger">
+    <div class="wrap">
+      <p class="ledger-title mono">Proof · on-chain</p>
+      <h2>Every sale settles on-chain. Nothing here can be faked.</h2>
+      <dl class="facts mono">
+        <div class="fact"><dt>Settlement</dt><i class="lead" aria-hidden="true"></i><dd>USDT0 · X Layer · chainId 196</dd></div>
+        <div class="fact"><dt>Agent checkout</dt><i class="lead" aria-hidden="true"></i><dd>Automated (x402)</dd></div>
+        <div class="fact"><dt>Status</dt><i class="lead" aria-hidden="true"></i><dd><span class="vchip">✓ Verified on-chain</span></dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="shop" id="buy">
+    <div class="wrap">
+      <div class="card">
+        <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="plate" aria-hidden="true"><canvas id="plateField"></canvas><span class="plate-mark">{{EMOJI}}</span></div>
+        <div class="catalog">
+        {% for p in PRODUCTS %}
+          <article class="item">
+            <span class="item-no mono" aria-hidden="true">{{ "%02d"|format(loop.index) }}</span>
+            <h2>{{ p.name }}</h2>
+            <p class="blurb">{{ p.blurb }}</p>
+            <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
+            <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
+          </article>
+        {% endfor %}
+        </div>
+        <p class="buy-note mono">Paid straight to the seller — Tilla never holds your money</p>
+        {% include "_checkout.html" %}
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap mono">
+    <nav aria-label="Tilla">
+      <a href="/">Powered by <b>Tilla</b></a>
+      <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
+    </nav>
+    <span>Settled on X Layer · chainId 196</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  /* ---- Product Plate field: deterministic BIG-block backdrop, seeded by SLUG
+     with the same FNV-1a -> mulberry32 pair as the flagship mosaic, so a
+     store's plate and mosaic share one generative identity. The slug only
+     ever flows through the hash — never into markup. ---- */
+  function fnv(str) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), a | 1);
+      t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 0x100000000;
+    };
+  }
+  /* Design DNA texture -> block density: fewer, bigger blocks when sparse;
+     a tighter, louder grid when dense. "medium" is the default look. */
+  var TEXTURES = {
+    sparse: { cols: 3, fill: 0.3 },
+    medium: { cols: 5, fill: 0.42 },
+    dense: { cols: 7, fill: 0.58 }
+  };
+  var textureName = document.body.getAttribute("data-texture");
+  var texture = Object.prototype.hasOwnProperty.call(TEXTURES, textureName)
+    ? TEXTURES[textureName] : TEXTURES.medium;
+  var slug = (typeof SLUG === "string" && SLUG) ? SLUG : "tilla";
+  var plate = document.getElementById("plateField");
+  function drawPlate() {
+    if (!plate) return;
+    var rect = plate.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    plate.width = Math.round(rect.width * dpr);
+    plate.height = Math.round(rect.height * dpr);
+    var ctx = plate.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+    var css = getComputedStyle(document.documentElement);
+    function readColor(name, fb) {
+      var v = css.getPropertyValue(name).trim() || fb;
+      ctx.fillStyle = "#010203"; ctx.fillStyle = v;
+      return (ctx.fillStyle === "#010203" && v !== "#010203") ? fb : v;
+    }
+    var primary = readColor("--primary", "#6C5CE7");
+    var accent = readColor("--accent", "#00D1B2");
+    var tint = readColor("--tint", primary);
+    var colors = [primary, accent, tint];
+    var cell = rect.width / texture.cols;
+    var cols = texture.cols, rows = Math.ceil(rect.height / cell);
+    var rand = mulberry32(fnv(slug));
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var roll = rand(), pick = rand(), tone = rand(), big = rand();
+        if (roll >= texture.fill) continue;
+        ctx.globalAlpha = tone < 0.3 ? 0.55 : 1;
+        ctx.fillStyle = colors[Math.floor(pick * 3) % 3];
+        var span = big < 0.12 ? 2 : 1;
+        ctx.fillRect(x * cell, y * cell, cell * span, cell * span);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  var plateTimer;
+  window.addEventListener("resize", function () {
+    clearTimeout(plateTimer);
+    plateTimer = setTimeout(drawPlate, 160);
+  });
+  drawPlate();
+})();
+</script>
 </body>
 </html>

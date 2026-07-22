@@ -1,24 +1,57 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="{{STORE_NAME}}">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="{{C_BG}}"/>
-      <stop offset="1" stop-color="{{C_PRIMARY}}"/>
-    </linearGradient>
-    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="{{C_PRIMARY}}"/>
-      <stop offset="1" stop-color="{{C_ACCENT}}"/>
-    </linearGradient>
-  </defs>
-  <rect width="1200" height="630" fill="url(#bg)"/>
-  <rect width="1200" height="630" fill="{{C_BG}}" opacity="0.35"/>
-  <circle cx="1060" cy="120" r="280" fill="url(#accent)" opacity="0.22"/>
-  <rect x="90" y="88" width="72" height="72" rx="18" fill="url(#accent)"/>
-  <text x="126" y="140" font-size="40" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Roboto, sans-serif">{{EMOJI}}</text>
-  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="{{C_TEXT}}">
-    <text x="90" y="330" font-size="92" font-weight="800" letter-spacing="-3">{{STORE_NAME}}</text>
-    <text x="92" y="400" font-size="40" fill="{{C_ACCENT}}" font-weight="600">{{TAGLINE}}</text>
-    <text x="90" y="520" font-size="46" font-weight="700">{{PRODUCT_NAME}}</text>
-    <text x="90" y="582" font-size="36" fill="{{C_ACCENT}}" font-weight="700">{{PRICE}} USDT</text>
-    <text x="1110" y="585" font-size="26" text-anchor="end" fill="{{C_TEXT}}" opacity="0.7">Powered by Tilla · X Layer</text>
+  <!-- Proof-of-Purchase share card. Rasterized by og:image consumers with no
+       external resources: generic font stacks only, no scripts, no refs.
+       Rail discipline: ground/ink monochrome; palette only on the block-print
+       marks (monogram tile + mosaic) + price accent; lime #BCFF2F only on the
+       chain chip. -->
+
+  <!-- ground -->
+  <rect width="1200" height="630" fill="{{C_BG}}"/>
+  <!-- monochrome ink frame -->
+  <rect x="30" y="30" width="1140" height="570" fill="none" stroke="{{C_TEXT}}" stroke-opacity="0.18" stroke-width="2"/>
+
+  <!-- monogram: brand initial on a block-print tile with an offset accent
+       impression (misregistered second pass). Palette = merchandise mark;
+       C_ON_PRIMARY keeps the letter legible on any primary. -->
+  <g>
+    <rect x="84" y="84" width="76" height="76" fill="{{C_ACCENT}}" fill-opacity="0.45"/>
+    <rect x="76" y="76" width="76" height="76" fill="{{C_PRIMARY}}"/>
+    <text x="114" y="131" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="46" font-weight="800" text-anchor="middle" fill="{{C_ON_PRIMARY}}">{{STORE_INITIAL}}</text>
+  </g>
+
+  <!-- chain chip: the ONLY lime on the card, always black ink on it -->
+  <rect x="724" y="86" width="400" height="56" rx="100" fill="#BCFF2F"/>
+  <rect x="752" y="109" width="10" height="10" fill="#000"/>
+  <text x="776" y="121" font-family="ui-monospace, 'Cascadia Mono', Consolas, monospace" font-size="20" font-weight="700" letter-spacing="2" fill="#000">SETTLES ON X LAYER · 196</text>
+
+  <!-- store identity: monochrome ink -->
+  <text x="76" y="305" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="88" font-weight="800" letter-spacing="-2" fill="{{C_TEXT}}">{{STORE_NAME}}</text>
+  <text x="78" y="352" font-family="ui-monospace, 'Cascadia Mono', Consolas, monospace" font-size="22" letter-spacing="3" fill="{{C_TEXT}}" fill-opacity="0.62">{{TAGLINE}}</text>
+
+  <!-- block print: static 3x4 square cluster, palette only, varied opacity -->
+  <g>
+    <rect x="1022" y="190" width="46" height="46" fill="{{C_PRIMARY}}" fill-opacity="0.85"/>
+    <rect x="1078" y="190" width="46" height="46" fill="{{C_ACCENT}}" fill-opacity="0.35"/>
+    <rect x="966" y="246" width="46" height="46" fill="{{C_ACCENT}}" fill-opacity="0.55"/>
+    <rect x="1022" y="246" width="46" height="46" fill="{{C_PRIMARY}}" fill-opacity="0.25"/>
+    <rect x="1078" y="246" width="46" height="46" fill="{{C_PRIMARY}}" fill-opacity="0.95"/>
+    <rect x="966" y="302" width="46" height="46" fill="{{C_PRIMARY}}" fill-opacity="0.65"/>
+    <rect x="1078" y="302" width="46" height="46" fill="{{C_ACCENT}}" fill-opacity="0.75"/>
+    <rect x="966" y="358" width="46" height="46" fill="{{C_ACCENT}}" fill-opacity="0.2"/>
+    <rect x="1022" y="358" width="46" height="46" fill="{{C_PRIMARY}}" fill-opacity="0.45"/>
+    <rect x="1078" y="358" width="46" height="46" fill="{{C_PRIMARY}}" fill-opacity="0.15"/>
+  </g>
+
+  <!-- mono is money: product + oversized price (the one palette accent in type) -->
+  <g font-family="ui-monospace, 'Cascadia Mono', Consolas, monospace">
+    <text x="76" y="432" font-size="30" fill="{{C_TEXT}}" fill-opacity="0.85">{{PRODUCT_NAME}}</text>
+    <text x="76" y="530"><tspan font-size="96" font-weight="700" fill="{{C_PRIMARY}}">{{PRICE}}</tspan><tspan dx="14" font-size="30" fill="{{C_TEXT}}" fill-opacity="0.62">USDT</tspan></text>
+  </g>
+
+  <!-- receipt line: dotted tear rule + settlement facts, quiet mono ink -->
+  <line x1="76" y1="556" x2="1124" y2="556" stroke="{{C_TEXT}}" stroke-opacity="0.3" stroke-dasharray="2 6"/>
+  <g font-family="ui-monospace, 'Cascadia Mono', Consolas, monospace" font-size="18" letter-spacing="1" fill="{{C_TEXT}}" fill-opacity="0.55">
+    <text x="76" y="588">TOTAL {{PRICE}} USDT · USDT0 ON X LAYER</text>
+    <text x="1124" y="588" text-anchor="end">POWERED BY TILLA</text>
   </g>
 </svg>

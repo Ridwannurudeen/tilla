@@ -15,6 +15,7 @@ import contextlib
 import csv
 import hashlib
 import io
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -29,10 +30,23 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import HTMLResponse, StreamingResponse
 
-from app import affiliates, chain, checkout, config, delivery, refunds, render, webhooks
+from app import (
+    affiliates,
+    chain,
+    checkout,
+    config,
+    delivery,
+    engine,
+    refunds,
+    render,
+    self_serve,
+    webhooks,
+)
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
+from app.screening import ScreeningBlocked, screen
 from app.models import (
+    Deliverable,
     EmailSubscriber,
     EventLog,
     Merchant,
@@ -247,6 +261,7 @@ def merchant_stores(request: Request, session: Session = Depends(get_session)):
             {
                 "slug": s.slug,
                 "status": s.status,
+                "visibility": s.visibility,
                 "theme": s.theme,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
                 "order_counts": st["counts"],
@@ -256,6 +271,78 @@ def merchant_stores(request: Request, session: Session = Depends(get_session)):
             }
         )
     return {"merchant": merchant.wallet_address, "stores": out}
+
+
+class VisibilityBody(BaseModel):
+    visibility: Literal["public", "hidden"]
+
+
+@router.post("/api/merchant/stores/{slug}/visibility")
+@limiter.limit("30/minute")
+def merchant_store_visibility(
+    request: Request,
+    body: VisibilityBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Owner toggle for a store's Phase 1.7 discovery visibility. 'hidden' keeps a live
+    store out of discovery / the aggregate feed / the sitemap (still reachable by direct
+    link, for setup and agent preview); 'public' restores it. A hidden store also
+    auto-graduates to public on its first delivered sale. Owning-merchant only (404)."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    store.visibility = body.visibility
+    session.commit()
+    return {"slug": store.slug, "visibility": store.visibility}
+
+
+@router.get("/api/merchant/stores/{slug}/agent-view")
+@limiter.limit("30/minute")
+def merchant_store_agent_view(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Phase 1.8: show the owner their store EXACTLY as a buyer-agent consumes it — the
+    machine endpoints, the feed products (with SLA + x402), the MCP tools, and how it
+    currently appears in agent discovery (reputation + trust tier, or not-listed when
+    hidden/not-live). Owner-gated (404 otherwise); reuses the same agentic outputs the
+    public agent surfaces emit, so the preview can never drift from what agents see."""
+    from app import agentic
+
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    base = config.PUBLIC_BASE_URL.rstrip("/")
+    store_url = f"{base}/s/{store.slug}/"
+    products = session.scalars(
+        select(Product)
+        .where(Product.store_id == store.id, Product.active.is_(True))
+        .order_by(Product.id)
+    ).all()
+    rows = agentic._discovery_rows(session, [Store.slug == store.slug], 1, 0)
+    return {
+        "slug": store.slug,
+        "machine_endpoints": {
+            "feed": f"/s/{store.slug}/feed.json",
+            "mcp": f"/s/{store.slug}/mcp",
+            "buy": f"/s/{store.slug}/buy",
+            "llms_txt": f"/s/{store.slug}/llms.txt",
+            "agent_card": "/.well-known/agent-card.json",
+        },
+        "feed_products": [
+            agentic._feed_product(store, store.slug, p, store_url) for p in products
+        ],
+        "mcp_tools": [
+            {"name": t["name"], "description": t["description"]}
+            for t in agentic._mcp_tools()
+        ],
+        "discovery": rows[0]
+        if rows
+        else {
+            "listed": False,
+            "reason": "hidden" if store.visibility != "public" else "not_live",
+        },
+    }
 
 
 @router.get("/api/merchant/summary")
@@ -1026,6 +1113,307 @@ def delete_webhook(request: Request, session: Session = Depends(get_session)):
     log_event(session, "merchant", "webhook.removed", data={"merchant_id": merchant.id})
     session.commit()
     return {"url": None}
+
+
+# ---------------------------------------------------- merchant product catalog
+class ProductAddBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    price_usdt: float = Field(ge=0.01, le=10000)
+    blurb: str = Field(default="", max_length=400)
+    cta_text: str = Field(default="Buy now", max_length=40)
+
+
+class ProductPatchBody(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    price_usdt: float | None = Field(default=None, ge=0.01, le=10000)
+    blurb: str | None = Field(default=None, max_length=400)
+    cta_text: str | None = Field(default=None, max_length=40)
+    active: bool | None = None
+
+
+def _screen_name(name: str) -> None:
+    """Fail-closed name screening for a merchant-supplied product name: BLOCK->422,
+    screening unavailable->503 (never a silent pass)."""
+    try:
+        outcome = screen(name)
+    except ScreeningBlocked as exc:
+        raise HTTPException(422, "product name did not pass safety screening") from exc
+    if outcome.status != "allow":
+        raise HTTPException(503, "content screening temporarily unavailable")
+
+
+@router.get("/api/merchant/stores/{slug}/products")
+@limiter.limit("30/minute")
+def merchant_list_products(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    rows = session.scalars(
+        select(Product).where(Product.store_id == store.id).order_by(Product.id)
+    ).all()
+    return {
+        "products": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "price_usdt": p.price_micro / 1e6,
+                "active": p.active,
+            }
+            for p in rows
+        ]
+    }
+
+
+@router.post("/api/merchant/stores/{slug}/products")
+@limiter.limit("20/minute")
+def merchant_add_product(
+    request: Request,
+    body: ProductAddBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    if store.status != "live":
+        raise HTTPException(409, "store is not live")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "name cannot be empty")
+    _screen_name(name)
+    product = Product(
+        store_id=store.id,
+        name=name,
+        price_micro=int(round(body.price_usdt * 1e6)),
+        active=True,
+    )
+    session.add(product)
+    session.flush()
+    engine.resync_catalog(
+        session,
+        store,
+        extras_override={product.id: (body.blurb.strip(), body.cta_text)},
+    )
+    log_event(
+        session,
+        "merchant",
+        "product.added",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "product_id": product.id},
+    )
+    session.commit()
+    return {
+        "id": product.id,
+        "name": name,
+        "price_usdt": body.price_usdt,
+        "active": True,
+    }
+
+
+@router.patch("/api/merchant/stores/{slug}/products/{pid}")
+@limiter.limit("20/minute")
+def merchant_edit_product(
+    request: Request,
+    body: ProductPatchBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    pid: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    product = session.scalar(
+        select(Product).where(Product.id == pid, Product.store_id == store.id)
+    )
+    if product is None:
+        raise HTTPException(404, "product not found")
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(422, "name cannot be empty")
+        _screen_name(name)
+        product.name = name
+    if body.price_usdt is not None:
+        product.price_micro = int(round(body.price_usdt * 1e6))
+    if body.active is not None and body.active != product.active:
+        if not body.active:
+            # never leave a live store with zero active products — checkout would
+            # 409 and the storefront would render an empty catalog.
+            active_count = session.scalar(
+                select(func.count())
+                .select_from(Product)
+                .where(Product.store_id == store.id, Product.active.is_(True))
+            )
+            if active_count <= 1:
+                raise HTTPException(409, "cannot deactivate the last active product")
+        product.active = body.active
+    # blurb/cta live only in content; override just the provided field, keeping the
+    # other from the current catalog entry.
+    extras_override = None
+    if body.blurb is not None or body.cta_text is not None:
+        cur = next(
+            (
+                it
+                for it in (store.content or {}).get("products", [])
+                if isinstance(it, dict) and it.get("id") == product.id
+            ),
+            {},
+        )
+        blurb = body.blurb if body.blurb is not None else str(cur.get("blurb", ""))
+        cta = (
+            body.cta_text
+            if body.cta_text is not None
+            else str(cur.get("cta_text", "Buy now"))
+        )
+        extras_override = {product.id: (blurb.strip(), cta or "Buy now")}
+    engine.resync_catalog(session, store, extras_override=extras_override)
+    log_event(
+        session,
+        "merchant",
+        "product.edited",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "product_id": product.id},
+    )
+    session.commit()
+    return {
+        "id": product.id,
+        "name": product.name,
+        "price_usdt": product.price_micro / 1e6,
+        "active": product.active,
+    }
+
+
+@router.get("/api/merchant/stores/{slug}/deliverables")
+@limiter.limit("30/minute")
+def merchant_list_deliverables(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """The store's active deliverables as METADATA only — never the text secret
+    (`payload`) or file bytes. product_id NULL is the store-level default; a set
+    product_id is that product's deliverable. Lets the dashboard show what a buyer
+    receives per product and which products still fall back to the default."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    rows = session.scalars(
+        select(Deliverable)
+        .where(Deliverable.store_id == store.id, Deliverable.active.is_(True))
+        .order_by(Deliverable.id)
+    ).all()
+    return {
+        "deliverables": [
+            {
+                "id": d.id,
+                "product_id": d.product_id,
+                "kind": d.kind,
+                "file_name": d.file_name,
+                "max_downloads": d.max_downloads,
+                "max_activations": d.max_activations,
+            }
+            for d in rows
+        ]
+    }
+
+
+# ------------------------------------------------------ self-serve create-store
+class SelfServeCreateBody(BaseModel):
+    description: str = Field(min_length=1, max_length=config.MAX_DESCRIPTION_LEN)
+    theme: str | None = None
+
+    @field_validator("theme")
+    @classmethod
+    def _validate_theme(cls, v):
+        if v is None or v == "":
+            return None
+        if v not in ("original", "bold", "editorial"):
+            raise ValueError("theme must be one of: original, bold, editorial")
+        return v
+
+
+class SelfServePayBody(BaseModel):
+    tx_hash: str = Field(min_length=66, max_length=66)
+
+
+def _creation_result(creation) -> dict:
+    return {
+        "id": creation.id,
+        "status": creation.status,
+        "slug": creation.slug,
+        "url": f"/s/{creation.slug}/" if creation.slug else None,
+        "amount_micro": creation.expected_micro,
+        "amount_usdt": usdt(creation.expected_micro),
+        "pay_to": creation.pay_to,
+    }
+
+
+@router.post("/api/merchant/create-store")
+@limiter.limit("6/minute")
+def merchant_create_store(
+    request: Request,
+    body: SelfServeCreateBody,
+    session: Session = Depends(get_session),
+):
+    """Screen the description and open a paid create-store intent for the signed-in
+    merchant (their wallet becomes the store's receive address). Fail fast if
+    generation is unconfigured, so no payment is offered against a dead generator."""
+    if not os.environ.get("TILLA_LLM_KEY"):
+        raise HTTPException(503, "store generation unavailable")
+    merchant = _require_merchant(request, session)
+    try:
+        creation = self_serve.create_intent(
+            session, merchant.wallet_address, body.description.strip(), body.theme
+        )
+    except self_serve.CreationError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    session.commit()
+    return _creation_result(creation)
+
+
+@router.post("/api/merchant/create-store/{creation_id}/pay")
+@limiter.limit("6/minute")
+def merchant_create_store_pay(
+    request: Request,
+    body: SelfServePayBody,
+    creation_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    """Verify the merchant's on-chain 1-USDT payment and generate the store. Owner-
+    scoped (a foreign id is 404). A reused payment is 409, a bad tx is 400."""
+    merchant = _require_merchant(request, session)
+    creation = self_serve.get_creation(session, creation_id, merchant.wallet_address)
+    if creation is None:
+        raise HTTPException(404, "creation not found")
+    try:
+        self_serve.pay_and_create(session, creation, body.tx_hash)
+    except self_serve.CreationError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    except (httpx.HTTPError, chain.ChainError) as exc:
+        raise HTTPException(502, "chain verification unavailable") from exc
+    session.commit()
+    return _creation_result(creation)
+
+
+@router.post("/api/merchant/create-store/{creation_id}/retry")
+@limiter.limit("6/minute")
+def merchant_create_store_retry(
+    request: Request,
+    creation_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    """Retry generation for a paid-but-ungenerated creation (after a model outage).
+    No re-charge — the payment already verified."""
+    merchant = _require_merchant(request, session)
+    creation = self_serve.get_creation(session, creation_id, merchant.wallet_address)
+    if creation is None:
+        raise HTTPException(404, "creation not found")
+    try:
+        self_serve.retry(session, creation)
+    except self_serve.CreationError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    session.commit()
+    return _creation_result(creation)
 
 
 @router.get("/dashboard")

@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tilla — page not found</title>
+<meta name="description" content="404 — this page is not on the ledger.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#0B0B12">
+<style>
+  /* Tilla system, fixed dark theme. System font fallbacks only — no inlined fonts on the 404. */
+  :root{ --primary:#6C5CE7; --accent:#00D1B2; --bg:#0B0B12; --text:#F5F5FA; }
+  :root{
+    --on-primary:#fff;
+    --xlayer:#BCFF2F; --on-xlayer:#000;
+    --surface:color-mix(in oklab,var(--bg) 92%,var(--text));
+    --hairline:color-mix(in srgb,var(--text) 16%,transparent);
+    --tint:color-mix(in srgb,var(--primary) 8%,var(--bg));
+  }
+
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ height:100%; }
+  body{
+    font-family:-apple-system,'Segoe UI',Roboto,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+    display:flex; flex-direction:column;
+  }
+  a{ color:inherit; }
+  ::selection{ background:var(--primary); color:var(--on-primary); }
+  a:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  .mono{ font-family:ui-monospace,'Cascadia Code',Consolas,monospace;
+    font-variant-numeric:tabular-nums; }
+  .wrap{ max-width:660px; margin:0 auto; width:100%;
+    padding-left:clamp(18px,4vw,40px); padding-right:clamp(18px,4vw,40px); }
+
+  /* ---------- top rail ---------- */
+  .rail{
+    position:fixed; top:0; left:0; right:0; z-index:50;
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+    height:64px; padding:0 clamp(16px,3vw,32px);
+    border-bottom:1px solid var(--hairline);
+    background:var(--bg);
+  }
+  .brand{ display:inline-flex; align-items:center; gap:12px; text-decoration:none;
+    font-weight:700; font-size:16px; letter-spacing:.06em; }
+  .brand .mark{ flex:none; display:grid; grid-template-columns:repeat(2,9px);
+    grid-template-rows:repeat(2,9px); gap:3px; }
+  .brand .mark span:nth-child(1){ background:var(--primary); }
+  .brand .mark span:nth-child(2){ background:var(--accent); }
+  .brand .mark span:nth-child(3){ background:color-mix(in srgb,var(--text) 28%,transparent); }
+  .chip{
+    display:inline-flex; align-items:center; gap:7px; padding:6px 10px;
+    border:1px solid var(--hairline); border-radius:3px;
+    font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 78%,transparent); white-space:nowrap;
+  }
+  .chip .dot{ width:7px; height:7px; border-radius:50%; background:var(--xlayer);
+    box-shadow:0 0 0 1px rgba(0,0,0,.28), 0 0 8px color-mix(in srgb,var(--xlayer) 55%,transparent); }
+  .rail-nav{ display:flex; gap:clamp(10px,2vw,22px); }
+  .rail-right{ display:flex; align-items:center; gap:14px; flex:none; }
+  .rail-link{ display:inline-flex; align-items:center; gap:6px; text-decoration:none;
+    padding:14px 4px;
+    font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 70%,transparent); white-space:nowrap;
+    transition:color .15s ease; }
+  .rail-link:hover{ color:var(--text); }
+  .rail-link .arr{ display:inline-block; transition:transform .15s ease; }
+  .rail-link:hover .arr{ transform:translateX(3px); }
+  [aria-current="page"]{ color:var(--text);
+    border-bottom:1px solid color-mix(in srgb,var(--text) 40%,transparent); }
+  @media (max-width:640px){
+    .rail{ gap:6px; padding:0 10px; }
+    .chip{ display:none; }
+    .rail-link.aux{ display:none; }
+    .rail-link .arr{ display:none; }
+    .brand{ font-size:14px; gap:8px; }
+    .rail-nav{ gap:6px; }
+    .rail-right{ gap:6px; }
+    .rail-link{ font-size:10px; letter-spacing:0; padding:14px 2px; }
+  }
+
+  /* ---------- the 404 stage ---------- */
+  main{ flex:1; display:flex; align-items:center;
+    background:var(--tint); border-bottom:1px solid var(--hairline);
+    padding:calc(64px + clamp(48px,8vh,88px)) 0 clamp(56px,9vh,100px); }
+  .code{ display:inline-flex; align-items:center; gap:9px; padding:7px 11px;
+    border:1px solid color-mix(in srgb,var(--accent) 55%,transparent); border-radius:3px;
+    font-size:11px; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--accent); }
+  .code::before{ content:""; flex:none; width:8px; height:8px; background:var(--accent); }
+  h1{ margin-top:18px; font-size:clamp(2rem,5.5vw,3.2rem); font-weight:700;
+    line-height:1.05; letter-spacing:-.03em; text-wrap:balance; }
+  .sub{ margin-top:14px; max-width:34rem; font-size:1.05rem;
+    color:color-mix(in srgb,var(--text) 74%,transparent); }
+  .ctas{ margin-top:clamp(26px,4vh,40px); display:flex; flex-wrap:wrap; gap:12px; }
+  .cta{ display:inline-flex; align-items:center; gap:8px; text-decoration:none;
+    padding:14px 24px; border-radius:999px; font-size:14.5px; font-weight:700; line-height:1.25;
+    transition:transform .15s ease, border-color .15s ease; }
+  .cta:hover{ transform:translateY(-1px); }
+  .cta-primary{ background:var(--primary); color:var(--on-primary); }
+  .cta-ghost{ border:1px solid var(--hairline);
+    color:color-mix(in srgb,var(--text) 82%,transparent); }
+  .cta-ghost:hover{ border-color:color-mix(in srgb,var(--text) 40%,transparent); color:var(--text); }
+
+  footer{ padding:26px 0; }
+  footer .wrap{ display:flex; justify-content:space-between; align-items:baseline;
+    flex-wrap:wrap; gap:10px 24px; font-size:12px;
+    color:color-mix(in srgb,var(--text) 56%,transparent); }
+  .foot-nav{ display:flex; flex-wrap:wrap; gap:4px 18px; }
+  .foot-nav a{ text-decoration:none; padding:8px 0;
+    color:color-mix(in srgb,var(--text) 56%,transparent); transition:color .15s ease; }
+  .foot-nav a:hover{ color:var(--text); }
+
+  @media (prefers-reduced-motion: reduce){
+    *, *::before, *::after{ transition:none !important; }
+    .cta:hover{ transform:none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="rail">
+  <a class="brand" href="/"><span class="mark" aria-hidden="true"><span></span><span></span><span></span></span>TILLA</a>
+  <nav class="rail-nav" aria-label="Site">
+    <a class="rail-link mono" href="/marketplace.html">Marketplace</a>
+    <a class="rail-link mono aux" href="/#how">How it works</a>
+    <a class="rail-link mono" href="/library.html">Your purchases</a>
+    <a class="rail-link mono aux" href="/#agents">For agents</a>
+  </nav>
+  <div class="rail-right">
+    <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · chainId 196</span>
+    <a class="rail-link mono" href="/dashboard">Open dashboard <span class="arr" aria-hidden="true">→</span></a>
+  </div>
+</header>
+
+<main id="main">
+  <div class="wrap">
+    <p class="code mono">404 — not found</p>
+    <h1>This page is not on the ledger.</h1>
+    <p class="sub">The address may be mistyped, or the store may no longer be live.</p>
+    <div class="ctas">
+      <a class="cta cta-primary" href="/marketplace.html">Browse the marketplace</a>
+      <a class="cta cta-ghost" href="/">Go home</a>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap mono">
+    <nav class="foot-nav" aria-label="Footer">
+      <a href="/marketplace.html">Marketplace</a><a href="/library.html">Your purchases</a><a href="/receipt-demo.html">Receipt preview</a><a href="/dashboard">Dashboard</a><a href="/#agents">For agents</a>
+    </nav>
+    <span>Tilla · Built on OKX X Layer · USDT0 · chainId 196</span>
+  </div>
+</footer>
+
+</body>
+</html>

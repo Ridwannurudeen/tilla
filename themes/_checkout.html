@@ -9,50 +9,88 @@
   {% if BRIDGE_URL %}
   <a class="co-bridge" href="{{ BRIDGE_URL }}" target="_blank" rel="noopener noreferrer nofollow">Bridge funds to {{ CHAIN_NAME }} ↗<span class="co-bridge-3p">third-party service — not operated by Tilla, use at your own risk</span></a>
   {% endif %}
-  <div class="row"><span>Pay to</span></div>
-  <div class="addr" id="coAddr">{{ ADDR }}</div>
+  <div class="row" id="coEtaRow" style="display:none"><span>Delivery</span><b id="coEta">…</b></div>
   <div class="co-count" id="coCountdown"></div>
 
   <button class="co-btn" id="payWalletBtn" style="display:none" onclick="payWithWallet()">Pay with wallet</button>
 
   <div class="co-manual" id="coManual">
     <div class="co-qrwrap"><canvas id="coQR" class="co-qr"></canvas></div>
+    <div class="co-paylabel">Paying by hand? Send to this address:</div>
+    <div class="addr" id="coAddr">{{ ADDR }}</div>
     <div class="co-copyrow">
       <button class="co-copy" id="copyAmountBtn" onclick="copyAmount()">Copy amount</button>
       <button class="co-copy" id="copyAddrBtn" onclick="copyAddr()">Copy address</button>
     </div>
-    <div class="co-warn">Send EXACTLY this amount of USDT0 on X Layer — a different amount will not match your order.</div>
+    <div class="co-warn">Send exactly this amount of USDT0 (USDT issued on X Layer, ≈$1) — a different amount or a different network will not match your order.</div>
+    <details class="co-hint co-help">
+      <summary>First time paying with crypto?</summary>
+      <ol>
+        <li>Install a wallet — <a href="https://www.okx.com/web3" rel="noopener">OKX Wallet</a> works well.</li>
+        <li>Get USDT0 on the X Layer network, plus a small amount of OKB for the network fee.</li>
+        <li>Tap Pay with wallet or scan the QR — the wallet fills the amount and address for you.</li>
+      </ol>
+    </details>
   </div>
 
-  <div class="status" id="coStatus">⏳ Waiting for payment… (auto-verified on-chain)</div>
+  <div class="status" id="coStatus">Waiting for payment — verified automatically on-chain…</div>
   <div class="co-receipt" id="coReceipt" style="display:none"></div>
+  <button class="co-ghost" id="coPrintBtn" style="display:none" onclick="window.print()">Print receipt</button>
 
-  <button class="co-btn" id="claimBtn" style="display:none" onclick="claimPurchase()">Claim your purchase — sign with the wallet you paid from</button>
-  <div class="co-hint" id="coClaimHint" style="display:none">Paid from an exchange and can't sign? Keep your order id and tx hash — the merchant can redeliver.</div>
+  <button class="co-btn" id="claimBtn" style="display:none" onclick="claimPurchase()">Unlock your purchase — confirm with the wallet you paid from (free, no second charge)</button>
+  <div class="co-hint" id="coClaimHint" style="display:none">Paid from an exchange and can't sign? Keep your order id and tx hash — the merchant can redeliver from their dashboard.</div>
   <div class="co-claim" id="coClaim" style="display:none"></div>
-  <div class="status" id="coDelivery" style="display:none;color:var(--accent)"></div>
+  <div class="status" id="coDelivery" style="display:none"></div>
 </div>
 
 <style>
-  #co .co-count{ margin-top:10px; font-size:12.5px; font-weight:700; letter-spacing:.02em;
+  /* Tilla system: monochrome frame, mono-is-money, lime only where value touches
+     the chain. Self-sufficient — requires only --primary/--accent/--bg/--text;
+     every derived token falls back so the panel holds in any theme. */
+  #co{ display:none; margin-top:22px; padding:20px; text-align:left; font-size:14px;
+    border:1px solid var(--hairline,color-mix(in srgb,var(--text) 16%,transparent));
+    border-radius:4px; background:var(--bg); }
+  #co.on{ display:block; }
+  #co .row{ display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+    margin:0; padding:9px 0; border-bottom:1px dotted color-mix(in srgb,var(--text) 26%,transparent); }
+  #co .row span{ font-size:11px; font-weight:600; letter-spacing:.1em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 58%,transparent); }
+  #co .row b, #co .row a{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-weight:600; font-size:13px; font-variant-numeric:tabular-nums;
+    text-align:right; word-break:break-word; }
+  #co .addr{ font-family:'TillaMono',ui-monospace,Consolas,monospace; font-size:12px;
+    word-break:break-all; margin-top:10px; padding:10px 12px; color:var(--text);
+    background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid var(--hairline,color-mix(in srgb,var(--text) 16%,transparent));
+    border-radius:3px; }
+  #co .status{ margin-top:14px; font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:12.5px; font-weight:600; line-height:1.5;
+    color:color-mix(in srgb,var(--text) 76%,transparent); }
+  #co .co-count{ margin-top:12px; font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:12px; font-weight:600; letter-spacing:.04em; font-variant-numeric:tabular-nums;
     color:color-mix(in srgb,var(--text) 60%,transparent); }
-  #co .co-btn{ display:block; width:100%; margin-top:14px; border:0; cursor:pointer; padding:14px;
-    border-radius:12px; font-size:14.5px; font-weight:800; line-height:1.25; color:#fff;
-    background:linear-gradient(135deg,var(--primary),var(--accent));
-    box-shadow:0 10px 28px color-mix(in srgb,var(--primary) 40%,transparent); transition:transform .12s, opacity .12s; }
+  #co .co-btn{ display:block; width:100%; margin-top:16px; border:0; cursor:pointer;
+    padding:14px 20px; border-radius:999px; font:inherit; font-size:14.5px; font-weight:700;
+    line-height:1.25; color:var(--on-primary,#fff); background:var(--primary);
+    transition:transform .15s ease, opacity .15s ease; }
   #co .co-btn:hover{ transform:translateY(-1px); }
-  #co .co-btn:disabled{ opacity:.55; cursor:default; transform:none; }
+  #co .co-btn:disabled{ opacity:.5; cursor:default; transform:none; }
+  #co .co-btn:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
   #co .co-manual{ margin-top:16px; }
   #co .co-qrwrap{ display:flex; justify-content:center; }
   #co .co-qr{ width:200px; height:200px; max-width:100%; image-rendering:pixelated;
-    background:#fff; padding:10px; border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.25); }
+    background:#fff; padding:10px; border-radius:4px;
+    border:1px solid color-mix(in srgb,var(--text) 22%,transparent); }
   #co .co-copyrow{ display:flex; gap:10px; margin-top:14px; }
-  #co .co-copy{ flex:1; cursor:pointer; padding:10px; border-radius:10px; font-size:13px; font-weight:700;
-    color:var(--text); background:color-mix(in srgb,var(--text) 8%,transparent);
-    border:1px solid color-mix(in srgb,var(--text) 20%,transparent); transition:background .12s; }
-  #co .co-copy:hover{ background:color-mix(in srgb,var(--text) 14%,transparent); }
-  #co .co-warn{ margin-top:12px; font-size:12.5px; font-weight:700; line-height:1.4;
-    color:color-mix(in srgb,var(--accent) 85%, var(--text)); }
+  #co .co-copy{ flex:1; cursor:pointer; padding:10px 12px; border-radius:3px; font:inherit;
+    font-family:'TillaMono',ui-monospace,Consolas,monospace; font-size:12px; font-weight:600;
+    color:var(--text); background:transparent;
+    border:1px solid color-mix(in srgb,var(--text) 30%,transparent);
+    transition:background .12s ease, border-color .12s ease; }
+  #co .co-copy:hover{ background:color-mix(in srgb,var(--text) 8%,transparent); }
+  #co .co-copy:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  #co .co-warn{ margin-top:12px; font-size:12px; font-weight:600; line-height:1.5;
+    color:color-mix(in srgb,var(--text) 70%,transparent); }
   #co .co-netwarn{ margin-top:10px; padding:10px 12px; border-radius:10px; font-size:12.5px;
     font-weight:700; line-height:1.45; color:#F59E0B;
     background:color-mix(in srgb,#F59E0B 12%,transparent);
@@ -64,28 +102,110 @@
   #co .co-bridge:hover{ border-color:color-mix(in srgb,var(--text) 30%,transparent); }
   #co .co-bridge-3p{ display:block; margin-top:3px; font-size:11px; font-weight:600;
     color:color-mix(in srgb,var(--text) 55%,transparent); }
-  #co .co-receipt{ margin-top:16px; padding:14px 16px; border-radius:12px;
-    background:color-mix(in srgb,var(--text) 5%,transparent);
-    border:1px solid color-mix(in srgb,var(--text) 14%,transparent); }
-  #co .co-receipt .co-rtitle{ font-size:13px; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
-    margin-bottom:8px; color:color-mix(in srgb,var(--text) 70%,transparent); }
-  #co .co-receipt a{ color:var(--accent); font-weight:700; text-decoration:none; }
-  #co .co-receipt a:hover{ text-decoration:underline; }
-  #co .co-hint{ margin-top:12px; font-size:12.5px; line-height:1.45;
-    color:color-mix(in srgb,var(--text) 60%,transparent); }
+  /* ---- the receipt: prints top-to-bottom when the JS flips #coReceipt from
+     display:none to display:block (CSS animations restart on display change) ---- */
+  #co .co-receipt{ position:relative; margin-top:18px; padding:16px 16px 22px;
+    background:color-mix(in srgb,var(--text) 5%,var(--bg));
+    border:1px solid color-mix(in srgb,var(--text) 22%,transparent); border-bottom:0;
+    border-radius:4px 4px 0 0;
+    animation:print-receipt 1.1s cubic-bezier(.22,.7,.3,1) both; }
+  #co .co-receipt::before{ content:""; position:absolute; left:0; right:0; bottom:0; height:7px;
+    background-image:linear-gradient(-45deg,var(--bg) 5px,transparent 0),
+      linear-gradient(45deg,var(--bg) 5px,transparent 0);
+    background-size:14px 14px; background-repeat:repeat-x; background-position:left bottom; }
+  #co .co-receipt::after{ content:"✓ Verified on-chain · X Layer"; display:inline-block;
+    margin-top:14px; font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:10.5px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
+    padding:5px 9px; border-radius:3px;
+    background:var(--xlayer,#BCFF2F); color:var(--on-xlayer,#000); }
+  #co .co-receipt .co-rtitle{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:11px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+    margin-bottom:4px; color:color-mix(in srgb,var(--text) 60%,transparent); }
+  #co .co-receipt a{ color:var(--text); font-weight:600; text-decoration:underline;
+    text-underline-offset:3px;
+    text-decoration-color:color-mix(in srgb,var(--text) 40%,transparent); }
+  #co .co-receipt a:hover{ text-decoration-color:var(--text); }
+  @keyframes print-receipt{
+    from{ clip-path:inset(0 0 100% 0); opacity:.3; }
+    to{ clip-path:inset(0 0 0 0); opacity:1; }
+  }
+  #co .co-hint{ margin-top:12px; font-size:12px; line-height:1.5;
+    color:color-mix(in srgb,var(--text) 58%,transparent); }
   #co .co-claim{ margin-top:14px; }
-  #co .co-claim .co-clabel{ font-size:12.5px; font-weight:700;
-    color:color-mix(in srgb,var(--text) 70%,transparent); margin-bottom:6px; }
-  #co .co-claim .co-mono{ font-family:ui-monospace,Consolas,monospace; font-size:14px; font-weight:700;
-    word-break:break-all; color:var(--accent); padding:10px 12px; border-radius:10px;
+  #co .co-claim .co-clabel, #co .co-hintrow .co-clabel{ font-size:11px; font-weight:600; letter-spacing:.12em;
+    text-transform:uppercase; margin-bottom:6px;
+    color:color-mix(in srgb,var(--text) 60%,transparent); }
+  #co .co-claim .co-mono, #co .co-hintrow .co-mono{ font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:13.5px; font-weight:600; word-break:break-all; color:var(--text);
+    padding:10px 12px; border-radius:3px;
     background:color-mix(in srgb,var(--text) 6%,transparent);
-    border:1px solid color-mix(in srgb,var(--text) 16%,transparent); }
-  #co .co-claim .co-dl{ display:block; text-align:center; text-decoration:none; padding:14px; border-radius:12px;
-    font-size:14.5px; font-weight:800; color:#fff;
-    background:linear-gradient(135deg,var(--primary),var(--accent));
-    box-shadow:0 10px 28px color-mix(in srgb,var(--primary) 40%,transparent); }
+    border:1px solid color-mix(in srgb,var(--text) 20%,transparent); }
+  #co .co-claim .co-dl{ display:block; text-align:center; text-decoration:none;
+    padding:14px 20px; border-radius:999px; font-size:14.5px; font-weight:700;
+    color:var(--on-primary,#fff); background:var(--primary);
+    transition:transform .15s ease; }
+  #co .co-claim .co-dl:hover{ transform:translateY(-1px); }
   #co .co-claim .co-copy{ margin-top:10px; width:100%; }
-  #co .co-claim .co-deliver{ color:var(--accent); font-weight:700; word-break:break-word; }
+  #co .co-claim .co-deliver, #co #coDelivery{ padding:12px 14px; border-radius:3px;
+    background:var(--xlayer,#BCFF2F); color:var(--on-xlayer,#000);
+    font-size:13.5px; font-weight:700; word-break:break-word; }
+  #co .co-paylabel{ margin-top:16px; font-size:11px; font-weight:600; letter-spacing:.1em;
+    text-transform:uppercase; color:color-mix(in srgb,var(--text) 58%,transparent); }
+  #co .co-help summary{ cursor:pointer; font-weight:600;
+    color:color-mix(in srgb,var(--text) 70%,transparent); }
+  #co .co-help[open] summary{ color:var(--text); }
+  #co .co-help ol{ margin:8px 0 0; padding-left:18px; display:grid; gap:6px; }
+  #co .co-help a{ color:var(--text); font-weight:600; text-decoration:underline;
+    text-underline-offset:3px;
+    text-decoration-color:color-mix(in srgb,var(--text) 40%,transparent); }
+  #co .co-help a:hover{ text-decoration-color:var(--text); }
+  #co .co-hintrows{ margin-top:10px; display:grid; gap:10px; }
+  #co .co-hintrow .co-line{ display:flex; gap:8px; align-items:stretch; margin-top:2px; }
+  #co .co-hintrow .co-mono{ flex:1; }
+  #co .co-hintrow .co-copy{ flex:0 0 auto; }
+  #co .co-ghost{ display:block; width:100%; margin-top:12px; cursor:pointer; padding:10px 12px;
+    border-radius:3px; font:inherit; font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:12px; font-weight:600; color:var(--text); background:transparent;
+    border:1px solid color-mix(in srgb,var(--text) 30%,transparent);
+    transition:background .12s ease, border-color .12s ease; }
+  #co .co-ghost:hover{ background:color-mix(in srgb,var(--text) 8%,transparent); }
+  #co .co-ghost:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  #co .co-receipt .co-more{ display:block; margin-top:12px;
+    font-family:'TillaMono',ui-monospace,Consolas,monospace;
+    font-size:12px; font-weight:600; }
+  #co .co-email{ margin-top:16px; }
+  #co .co-email .co-clabel{ display:block; }
+  #co .co-email input{ width:100%; padding:10px 12px; font:inherit;
+    font-family:'TillaMono',ui-monospace,Consolas,monospace; font-size:13px;
+    color:var(--text); background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 20%,transparent);
+    border-radius:3px; }
+  #co .co-email input:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  #co .co-email input:disabled{ opacity:.5; }
+  #co .co-share{ margin-top:16px; }
+  #co .co-claim .co-hintrow .co-copy{ width:auto; margin-top:0; }
+  @media (prefers-reduced-motion: reduce){
+    #co .co-receipt{ animation:none; }
+    #co .co-btn, #co .co-copy, #co .co-ghost, #co .co-claim .co-dl{ transition:none; }
+    #co .co-btn:hover, #co .co-claim .co-dl:hover{ transform:none; }
+  }
+  @media print{
+    body *{ visibility:hidden; }
+    #co .co-receipt, #co .co-receipt *{ visibility:visible; }
+    #co .co-receipt{ position:absolute; left:0; top:0; width:100%; margin:0;
+      background:#fff !important; color:#000 !important;
+      border:1px solid #000; border-radius:0; animation:none; }
+    #co .co-receipt *{ color:#000 !important; }
+    #co .co-receipt .row{ border-bottom-color:rgba(0,0,0,.35); }
+    #co .co-receipt::before{ display:none; }
+    #co .co-receipt::after{ background:#fff !important; color:#000 !important;
+      border:1px solid #000; }
+    #co .co-receipt a{ color:#000 !important; text-decoration-color:#000; }
+    #co .co-receipt a[href]:after{ content:" (" attr(href) ")"; font-weight:400; }
+    #co .co-receipt .co-more{ display:none; }
+    #co .co-btn, #co .co-copy, #co .co-ghost, #co .co-manual, #co .co-count,
+    #co .status, #co .co-hint, #co .co-claim, nav, header, footer{ display:none !important; }
+  }
 </style>
 
 <script>
@@ -140,15 +260,29 @@
   }
 
   // ---- checkout ----
-  async function startCheckout() {
+  function setBuysDisabled(on) {
+    var btns = document.querySelectorAll(".buy");
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = on;
+  }
+  async function startCheckout(arg) {
+    // arg is the clicked buy button (data-pid = stable product id, data-idx =
+    // render-order fallback). A legacy call form passes a bare index number.
+    var productId = null, productIndex = null;
+    if (arg && typeof arg === "object" && arg.dataset) {
+      if (arg.dataset.pid) productId = parseInt(arg.dataset.pid, 10);
+      else if (arg.dataset.idx) productIndex = parseInt(arg.dataset.idx, 10);
+    } else if (typeof arg === "number" && arg >= 0) {
+      productIndex = arg;
+    }
     byId("co").classList.add("on");
-    var buy = byId("buyBtn"); if (buy) buy.disabled = true;
+    setBuysDisabled(true);
     CO.paid = false; CO.expired = false; CO.txHash = null;
     byId("coReceipt").style.display = "none"; byId("coReceipt").textContent = "";
     byId("coClaim").style.display = "none"; byId("coClaim").textContent = "";
     byId("claimBtn").style.display = "none";
     byId("coClaimHint").style.display = "none";
     byId("coDelivery").style.display = "none";
+    byId("coPrintBtn").style.display = "none";
     byId("coManual").style.display = "";
     var d;
     try {
@@ -156,26 +290,37 @@
       // malformed ref is dropped client-side (best-effort — a bad marketing param
       // never blocks the sale); a valid one is captured first-write-wins server-side.
       var ref = new URLSearchParams(location.search).get("ref");
+      var payload = {};
+      if (ref && /^0x[0-9a-fA-F]{40}$/.test(ref)) payload.ref = ref;
+      // Multi-product: the chosen product. Prefer the stable product_id; fall back
+      // to the render-order index. Absent -> the primary product.
+      if (productId != null && productId >= 0) payload.product_id = productId;
+      else if (productIndex != null && productIndex >= 0) payload.product_index = productIndex;
       var opts = { method: "POST" };
-      if (ref && /^0x[0-9a-fA-F]{40}$/.test(ref)) {
+      if (Object.keys(payload).length) {
         opts.headers = { "content-type": "application/json" };
-        opts.body = JSON.stringify({ ref: ref });
+        opts.body = JSON.stringify(payload);
       }
       var r = await fetch("/api/checkout/" + SLUG, opts);
       d = await r.json();
       if (!r.ok || !d.id) throw new Error("checkout");
     } catch (e) {
       setStatus("Could not start checkout — please retry.");
-      if (buy) buy.disabled = false;
+      setBuysDisabled(false);
       return;
     }
     CO.cid = d.id;
+    CO.productName = d.product_name || "";
     CO.payTo = d.pay_to;
     CO.micro = BigInt(d.amount_micro);
     CO.amountStr = formatAmount(CO.micro);
     CO.expiresAt = Date.parse(d.expires_at);
     byId("coAmount").textContent = CO.amountStr + " USDT0";
     byId("coAddr").textContent = CO.payTo;
+    if (d.sla_minutes) {
+      byId("coEta").textContent = "within " + d.sla_minutes + " min of payment";
+      byId("coEtaRow").style.display = "";
+    }
     renderQR();
     updatePayButton();
     startCountdown();
@@ -223,7 +368,7 @@
       var data = buildTransferData(CO.payTo, CO.micro);
       txHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: account, to: USDT0, value: "0x0", data: data }] });
     } catch (e) {
-      setStatus(isReject(e) ? "Transaction canceled — retry or pay manually below." : "Wallet error — you can pay manually below.");
+      setStatus(isReject(e) ? "Transaction canceled — retry or pay manually below." : "Wallet error — check you hold USDT0 on X Layer, or pay manually below.");
       btn.disabled = false; return;
     }
     onTxSent(txHash);
@@ -295,7 +440,7 @@
     if (CO.pollTimer) clearTimeout(CO.pollTimer);
     setStatus("Order expired — start a new checkout.");
     byId("payWalletBtn").style.display = "none";
-    var buy = byId("buyBtn"); if (buy) buy.disabled = false;
+    setBuysDisabled(false);
   }
 
   // ---- polling ----
@@ -309,9 +454,9 @@
     var s = d.status;
     if (s === "paid") { onPaid(d); return; }
     if (s === "expired") { onExpired(); return; }
-    if (s === "detected") setStatus("Payment detected — waiting for confirmations (3 blocks)…");
+    if (s === "detected") setStatus("Payment detected — final network confirmation, usually under a minute…");
     else if (s === "underpaid") setStatus("Amount received is less than the exact total — send the remainder to the same address.");
-    else setStatus("⏳ Waiting for payment… (auto-verified on-chain)");
+    else setStatus("Waiting for payment — verified automatically on-chain…");
     CO.pollTimer = setTimeout(poll, 4000);
   }
 
@@ -322,11 +467,13 @@
     byId("coCountdown").textContent = "";
     byId("payWalletBtn").style.display = "none";
     byId("coManual").style.display = "none";
-    setStatus("✅ Payment received & verified on X Layer");
+    setStatus("Payment received — verified on X Layer");
     renderReceipt(d);
+    byId("coPrintBtn").style.display = "";
     if (d.claim) {
       CO.kind = d.kind;
       byId("claimBtn").style.display = "";
+      renderClaimHintRows(d);
       byId("coClaimHint").style.display = "block";
     } else {
       var del = byId("coDelivery");
@@ -350,7 +497,7 @@
     var el = byId("coReceipt"); el.textContent = "";
     var title = document.createElement("div"); title.className = "co-rtitle"; title.textContent = "Receipt";
     el.appendChild(title);
-    var store = txt(".brand"), product = txt(".card h2");
+    var store = txt(".brand"), product = CO.productName || txt(".card h2");
     if (store) el.appendChild(receiptRow("Store", store));
     if (product) el.appendChild(receiptRow("Item", product));
     el.appendChild(receiptRow("Order", CO.cid));
@@ -367,7 +514,34 @@
       if (aurl && aurl.indexOf(OKLINK_TX) === 0) el.appendChild(receiptRow("On-chain receipt", shortUid, aurl));
       else el.appendChild(receiptRow("On-chain receipt", shortUid));
     }
+    var more = document.createElement("a");
+    more.className = "co-more"; more.href = "/marketplace.html";
+    more.textContent = "More stores on Tilla →";
+    el.appendChild(more);
     el.style.display = "block";
+  }
+
+  // ---- exchange-payer fallback: copyable order id + tx hash under the claim hint ----
+  function hintCopyRow(label, value) {
+    var row = document.createElement("div"); row.className = "co-hintrow";
+    var lbl = document.createElement("div"); lbl.className = "co-clabel"; lbl.textContent = label; row.appendChild(lbl);
+    var line = document.createElement("div"); line.className = "co-line";
+    var mono = document.createElement("div"); mono.className = "co-mono"; mono.textContent = value; line.appendChild(mono);
+    var cb = document.createElement("button"); cb.className = "co-copy"; cb.textContent = "Copy";
+    cb.onclick = function () { copyText(value, cb); };
+    line.appendChild(cb);
+    row.appendChild(line);
+    return row;
+  }
+  function renderClaimHintRows(d) {
+    var hint = byId("coClaimHint");
+    var old = hint.querySelector(".co-hintrows");
+    if (old) hint.removeChild(old);
+    var wrap = document.createElement("div"); wrap.className = "co-hintrows";
+    wrap.appendChild(hintCopyRow("Order id", CO.cid));
+    var tx = CO.txHash || d.tx_hash;
+    if (tx && TX_RE.test(tx)) wrap.appendChild(hintCopyRow("Tx hash", tx));
+    hint.appendChild(wrap);
   }
 
   // ---- sign-to-claim (reuses M4 auth endpoints) ----
@@ -404,6 +578,8 @@
     var item = null, list = lib.purchases || [];
     for (var i = 0; i < list.length; i++) if (list[i].order_id === CO.cid) { item = list[i]; break; }
     if (!item) { setClaim("This wallet didn't pay for this order — sign with the paying wallet."); btn.disabled = false; return; }
+    CO.sessionToken = token;
+    CO.account = account;
     renderClaim(item);
     btn.style.display = "none";
     byId("coClaimHint").style.display = "none";
@@ -422,7 +598,62 @@
     } else {
       var d = document.createElement("div"); d.className = "co-deliver"; d.textContent = item.delivery || "Delivered — thank you!"; el.appendChild(d);
     }
+    var extraEmail = emailReceiptBlock();
+    if (extraEmail) el.appendChild(extraEmail);
+    var extraShare = shareRowBlock();
+    if (extraShare) el.appendChild(extraShare);
     el.style.display = "block";
+  }
+
+  // ---- post-claim extras: email re-delivery + referral link. Both reuse the
+  // claim session proof (CO.sessionToken / CO.account) — no second signature. ----
+  function emailReceiptBlock() {
+    if (typeof CO.sessionToken !== "string" || !CO.sessionToken) return null;
+    var wrap = document.createElement("div"); wrap.className = "co-email";
+    var lbl = document.createElement("label"); lbl.className = "co-clabel";
+    lbl.htmlFor = "coEmailInput"; lbl.textContent = "Email receipt"; wrap.appendChild(lbl);
+    var input = document.createElement("input"); input.type = "email"; input.id = "coEmailInput";
+    input.autocomplete = "email"; input.placeholder = "you@example.com"; wrap.appendChild(input);
+    var btn = document.createElement("button"); btn.className = "co-ghost";
+    btn.textContent = "Email me the receipt & download link"; wrap.appendChild(btn);
+    var hint = document.createElement("div"); hint.className = "co-hint"; wrap.appendChild(hint);
+    btn.onclick = async function () {
+      var email = input.value.trim();
+      if (!email) { hint.textContent = "Enter an email address first."; input.focus(); return; }
+      btn.disabled = true; input.disabled = true; hint.textContent = "";
+      var r;
+      try {
+        r = await fetch("/api/checkout/" + CO.cid + "/email", {
+          method: "POST",
+          headers: { "content-type": "application/json", "Authorization": "Bearer " + CO.sessionToken },
+          body: JSON.stringify({ email: email })
+        });
+      } catch (e) { hint.textContent = "Couldn't send — try again."; btn.disabled = false; input.disabled = false; return; }
+      if (r.status === 401) { hint.textContent = "Please claim again to verify your wallet."; btn.disabled = false; input.disabled = false; return; }
+      var d = null;
+      try { d = await r.json(); } catch (e) {}
+      if (r.ok && d && d.ok) {
+        wrap.textContent = "";
+        var sent = document.createElement("div"); sent.className = "co-hint";
+        sent.textContent = "Sent — the link re-issues your download any time.";
+        wrap.appendChild(sent);
+        return;
+      }
+      hint.textContent = "Couldn't send — try again.";
+      btn.disabled = false; input.disabled = false;
+    };
+    return wrap;
+  }
+
+  function shareRowBlock() {
+    if (typeof CO.account !== "string" || !CO.account) return null;
+    var wrap = document.createElement("div"); wrap.className = "co-share";
+    var link = location.origin + "/s/" + SLUG + "/?ref=" + CO.account;
+    wrap.appendChild(hintCopyRow("Share this store — earn on referred sales", link));
+    var sub = document.createElement("div"); sub.className = "co-hint";
+    sub.textContent = "When someone buys through your link, you earn a share.";
+    wrap.appendChild(sub);
+    return wrap;
   }
 
   // ---- inline byte-mode QR encoder (EC level M, versions 1-10, auto-version +
