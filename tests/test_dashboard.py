@@ -672,3 +672,48 @@ def test_store_visibility_toggle_owner_only(make_store):
         ).status_code
         == 422
     )
+
+
+def test_store_agent_view_owner_only(make_store):
+    owner, other = Account.create(), Account.create()
+    _owned_store(owner, "agentview", make_store)
+    tok = _merchant_token(owner)
+    r = client.get("/api/merchant/stores/agentview/agent-view", headers=_auth(tok))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["machine_endpoints"]["feed"] == "/s/agentview/feed.json"
+    assert body["machine_endpoints"]["mcp"] == "/s/agentview/mcp"
+    # the feed the owner sees is byte-for-byte what an agent gets (SLA + x402 included)
+    assert body["feed_products"] and body["feed_products"][0]["sla_minutes"] == 10
+    assert {t["name"] for t in body["mcp_tools"]} >= {
+        "list_products",
+        "get_product",
+        "create_checkout",
+    }
+    # a live public store shows in its own discovery preview with reputation fields
+    assert body["discovery"]["trust_tier"] == "new"  # no sales yet
+    assert body["discovery"]["sold_count"] == 0
+    # IDOR: another merchant cannot view it (opaque 404)
+    other_tok = _merchant_token(other)
+    assert (
+        client.get(
+            "/api/merchant/stores/agentview/agent-view", headers=_auth(other_tok)
+        ).status_code
+        == 404
+    )
+
+
+def test_store_agent_view_hidden_reports_not_listed(make_store):
+    owner = Account.create()
+    _owned_store(owner, "hiddenview", make_store)
+    tok = _merchant_token(owner)
+    client.post(
+        "/api/merchant/stores/hiddenview/visibility",
+        json={"visibility": "hidden"},
+        headers=_auth(tok),
+    )
+    body = client.get(
+        "/api/merchant/stores/hiddenview/agent-view", headers=_auth(tok)
+    ).json()
+    # honest: a hidden store tells its owner it is not currently discoverable
+    assert body["discovery"] == {"listed": False, "reason": "hidden"}

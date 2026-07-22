@@ -429,6 +429,10 @@
          buyers who already paid keep the version they bought.</p>
     </div>
 
+    <h3 class="sec-h">Agent's-eye view</h3>
+    <p class="small muted">Exactly what a buyer-agent sees: your machine endpoints, the feed it reads (with delivery ETA), the tools it can call, and how you rank in agent discovery.</p>
+    <div id="agentView" class="card"></div>
+
     <h3 class="sec-h">Orders</h3>
     <div id="storeOrders" class="card scroll" tabindex="0" aria-label="Orders"></div>
   </div>
@@ -946,6 +950,39 @@
     show("viewStore");
     await loadProducts(slug);
     await loadDeliverables(slug);
+    await loadAgentView(slug);
+  }
+
+  // ---- agent's-eye view (Phase 1.8): the same outputs a buyer-agent consumes,
+  // rendered from the /agent-view bundle so it can never drift from reality ----
+  async function loadAgentView(slug) {
+    var box = byId("agentView"); clear(box);
+    var data;
+    try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/agent-view"); }
+    catch (e) { box.appendChild(el("div", "muted", "Could not load the agent view.")); return; }
+    var d = data.discovery || {};
+    var rep = el("div", "row");
+    if (d.listed === false) {
+      rep.appendChild(el("span", "muted", d.reason === "hidden"
+        ? "Hidden — not currently listed in agent discovery."
+        : "Not live yet — not listed in agent discovery."));
+    } else {
+      rep.appendChild(el("strong", null, "Discovery rank: "));
+      rep.appendChild(el("span", "mono", "tier " + d.trust_tier + " · " + d.sold_count
+        + " sold · success " + (d.success_rate == null ? "n/a" : d.success_rate)
+        + " · " + d.pending_eval_count + " pending · " + d.disputed_count + " disputed"));
+    }
+    box.appendChild(rep);
+    var eps = data.machine_endpoints || {};
+    box.appendChild(el("div", "muted mono small",
+      "feed " + eps.feed + "   mcp " + eps.mcp + "   buy " + eps.buy));
+    (data.feed_products || []).forEach(function (p) {
+      box.appendChild(el("div", null,
+        p.title + " — " + p.price.amount + " " + p.price.currency
+        + " · ETA " + p.sla_minutes + " min"));
+    });
+    var tools = (data.mcp_tools || []).map(function (t) { return t.name; }).join(", ");
+    box.appendChild(el("div", "muted small", "MCP tools: " + tools));
   }
 
   // ---- products (catalog CRUD; every API string rendered via textContent only) ----

@@ -296,6 +296,55 @@ def merchant_store_visibility(
     return {"slug": store.slug, "visibility": store.visibility}
 
 
+@router.get("/api/merchant/stores/{slug}/agent-view")
+@limiter.limit("30/minute")
+def merchant_store_agent_view(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Phase 1.8: show the owner their store EXACTLY as a buyer-agent consumes it — the
+    machine endpoints, the feed products (with SLA + x402), the MCP tools, and how it
+    currently appears in agent discovery (reputation + trust tier, or not-listed when
+    hidden/not-live). Owner-gated (404 otherwise); reuses the same agentic outputs the
+    public agent surfaces emit, so the preview can never drift from what agents see."""
+    from app import agentic
+
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    base = config.PUBLIC_BASE_URL.rstrip("/")
+    store_url = f"{base}/s/{store.slug}/"
+    products = session.scalars(
+        select(Product)
+        .where(Product.store_id == store.id, Product.active.is_(True))
+        .order_by(Product.id)
+    ).all()
+    rows = agentic._discovery_rows(session, [Store.slug == store.slug], 1, 0)
+    return {
+        "slug": store.slug,
+        "machine_endpoints": {
+            "feed": f"/s/{store.slug}/feed.json",
+            "mcp": f"/s/{store.slug}/mcp",
+            "buy": f"/s/{store.slug}/buy",
+            "llms_txt": f"/s/{store.slug}/llms.txt",
+            "agent_card": "/.well-known/agent-card.json",
+        },
+        "feed_products": [
+            agentic._feed_product(store, store.slug, p, store_url) for p in products
+        ],
+        "mcp_tools": [
+            {"name": t["name"], "description": t["description"]}
+            for t in agentic._mcp_tools()
+        ],
+        "discovery": rows[0]
+        if rows
+        else {
+            "listed": False,
+            "reason": "hidden" if store.visibility != "public" else "not_live",
+        },
+    }
+
+
 @router.get("/api/merchant/summary")
 @limiter.limit("60/minute")
 def merchant_summary(request: Request, session: Session = Depends(get_session)):
