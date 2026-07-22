@@ -124,7 +124,18 @@ ssh "$VPS" "systemctl restart tilla-api"
 # Smoke: health is up, both live stores still render (nginx serves them
 # statically — unaffected by the restart), and an unpaid create-store is still
 # x402-gated.
-curl -fsS "$BASE/health" >/dev/null
+# The restart (and any watchdog bounce while uvicorn boots + rerender_stores runs)
+# briefly 502s at the edge, so poll /health rather than a single shot that would
+# abort the whole deploy on a transient bad gateway.
+health_ok=0
+for _ in $(seq 1 20); do
+  if curl -fsS "$BASE/health" >/dev/null 2>&1; then health_ok=1; break; fi
+  sleep 2
+done
+if [ "$health_ok" != 1 ]; then
+  echo "smoke failed: /health did not reach 200 within ~40s" >&2
+  exit 1
+fi
 for slug in invoice-flow billable; do
   curl -fsS "$BASE/s/$slug/" >/dev/null
 done
