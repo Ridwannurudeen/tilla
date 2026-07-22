@@ -677,6 +677,43 @@ def get_or_create_merchant(session: Session, wallet_address: str) -> Merchant:
     return merchant
 
 
+class StoreCreation(Base):
+    """A human self-serve store-creation payment intent (the paid dashboard flow).
+    The merchant pays 1 USDT to Tilla's own rail; on a verified on-chain payment
+    the store is generated with their wallet as the receive address. The
+    description is screened BEFORE a payment is offered, so a merchant is never
+    charged for content that would be blocked. UNIQUE(tx_hash) makes one submitted
+    payment fund at most one creation (SQLite treats the many pending NULLs as
+    distinct)."""
+
+    __tablename__ = "store_creations"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','paid','live','failed')",
+            name="ck_store_creations_status",
+        ),
+        UniqueConstraint("tx_hash", name="uq_store_creations_tx_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    merchant_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    theme: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    expected_micro: Mapped[int] = mapped_column(Integer, nullable=False)
+    pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
+    # pending -> paid (payment verified) -> live (store generated); 'paid' with a
+    # NULL slug is the retry window when generation failed after a real payment.
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending")
+    tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    slug: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
 def log_event(
     session: Session,
     source: str,

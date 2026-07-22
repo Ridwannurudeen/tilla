@@ -174,6 +174,7 @@
     font-family:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace;
     font-size:12.5px; }
   textarea{ min-height:110px; resize:vertical; }
+  #csDesc{ min-height:58px; }
   input::placeholder, textarea::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
   label{ display:block; font-size:10.5px; font-weight:600; text-transform:uppercase;
     letter-spacing:.12em; color:var(--muted); margin:12px 0 6px; }
@@ -296,6 +297,33 @@
   <!-- signed-in -->
   <div id="viewMain" class="hide">
     <div id="summary" class="grid"></div>
+
+    <h2 class="sec-h">Create a store</h2>
+    <div class="card">
+      <div id="csStep1">
+        <div class="row head">
+          <strong>Describe it — Tilla builds it, your wallet gets every sale</strong>
+          <span class="muted mono">one-time 1 USDT fee</span>
+        </div>
+        <label for="csDesc">Describe your store in one line</label>
+        <textarea id="csDesc" maxlength="2000" placeholder="single-origin coffee beans, roasted to order"></textarea>
+        <label for="csTheme">Theme</label>
+        <select id="csTheme">
+          <option value="">Auto</option>
+          <option value="original">Original</option>
+          <option value="bold">Bold</option>
+          <option value="editorial">Editorial</option>
+        </select>
+        <div class="row" style="margin-top:12px">
+          <button id="csCreate" class="primary">Create my store — 1 USDT</button>
+        </div>
+        <p class="muted small">You pay a one-time 1 USDT store-creation fee from your wallet.
+           Your wallet also receives every sale — Tilla never holds your money.</p>
+      </div>
+      <div id="csStep2" class="hide"></div>
+      <div id="csStep3" class="hide"></div>
+      <div id="createMsg" class="small hide" aria-live="polite"></div>
+    </div>
 
     <h2 class="sec-h"><span class="dot dot-warn" aria-hidden="true"></span>Underpaid orders needing refund</h2>
     <div id="underpaid" class="card scroll" tabindex="0" aria-label="Underpaid orders"></div>
@@ -432,6 +460,19 @@
     return null;
   }
   function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
+
+  // ---- USDT0 payment rail (create-store fee; mirrors _checkout.html's proven transfer path) ----
+  var USDT0 = "0x779ded0c9e1022225f8e0630b35a9b54be713736";
+  var CHAIN_HEX = "0xc4"; // X Layer chainId 196
+  var CHAIN_PARAMS = {
+    chainId: "0xc4", chainName: "X Layer",
+    nativeCurrency: { name: "OKB", symbol: "OKB", decimals: 18 },
+    rpcUrls: ["https://rpc.xlayer.tech"],
+    blockExplorerUrls: ["https://www.oklink.com/x-layer"]
+  };
+  function buildTransferData(payTo, micro) {
+    return "0xa9059cbb" + payTo.slice(2).toLowerCase().padStart(64, "0") + micro.toString(16).padStart(64, "0");
+  }
 
   // ---- helpers ----
   function byId(id) { return document.getElementById(id); }
@@ -671,7 +712,7 @@
     var data;
     try { data = await api("/api/merchant/stores"); } catch (e) { flash(e.message, true); return; }
     var box = byId("stores"); clear(box);
-    if (!data.stores.length) { box.appendChild(el("div", "card muted sentence", "No stores for this wallet yet. Stores are created by AI agents through Tilla's paid store-builder (1 USDT) — when an agent creates one with this wallet as where payments land, it appears here automatically.")); return; }
+    if (!data.stores.length) { box.appendChild(el("div", "card muted sentence", "No stores yet — create your first one with the Create a store panel above.")); return; }
     data.stores.forEach(function (st) {
       var c = el("div", "card");
       var head = el("div", "row"); head.style.justifyContent = "space-between";
@@ -710,6 +751,167 @@
       c.appendChild(pre);
       box.appendChild(c);
     });
+  }
+
+  // ---- self-serve create-store (screen -> pay 1 USDT on-chain -> generate; every
+  //      string rendered via textContent only) ----
+  var CS = null; // the pending creation: { id, payTo, micro }
+
+  function cmsg(text, isErr) {
+    var m = byId("createMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+  function csShow(step) {
+    byId("csStep1").classList.toggle("hide", step !== 1);
+    byId("csStep2").classList.toggle("hide", step !== 2);
+    byId("csStep3").classList.toggle("hide", step !== 3);
+  }
+  function csErr(e) {
+    if (e.status === 422) return "That description didn't pass our safety check — try describing it differently.";
+    if (e.status === 409) return "That payment was already used.";
+    if (e.status === 400) return "We couldn't verify that payment — please try again.";
+    if (e.status === 503 || e.status === 502) return "Store creation is briefly unavailable — try again shortly.";
+    return e.message;
+  }
+  function csReset() {
+    CS = null;
+    byId("csDesc").value = "";
+    byId("csTheme").value = "";
+    clear(byId("csStep2"));
+    clear(byId("csStep3"));
+    cmsg("");
+    csShow(1);
+  }
+
+  async function createStore() {
+    var desc = byId("csDesc").value.trim();
+    if (!desc) { cmsg("Describe your store first.", true); return; }
+    var body = { description: desc };
+    var theme = byId("csTheme").value;
+    if (theme) body.theme = theme;
+    var btn = byId("csCreate");
+    btn.disabled = true; btn.textContent = "Checking your description…";
+    var d;
+    try {
+      d = await api("/api/merchant/create-store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    } catch (e) {
+      btn.disabled = false; btn.textContent = "Create my store — 1 USDT";
+      cmsg(csErr(e), true);
+      return;
+    }
+    btn.disabled = false; btn.textContent = "Create my store — 1 USDT";
+    cmsg("");
+    CS = { id: d.id, payTo: d.pay_to, micro: BigInt(d.amount_micro) };
+    var box = byId("csStep2"); clear(box);
+    var head = el("div", "row head");
+    head.appendChild(el("strong", null, "Pay 1 USDT to create your store"));
+    head.appendChild(el("span", "muted mono", d.amount_usdt + " USDT0 · X Layer"));
+    box.appendChild(head);
+    box.appendChild(el("div", "muted small", "Approve a single transfer of " + d.amount_usdt + " USDT0 from your wallet — your store is generated as soon as it verifies on-chain."));
+    var row = el("div", "row");
+    var pay = el("button", "primary", "Pay with wallet");
+    pay.onclick = function () { csPay(pay); };
+    row.appendChild(pay);
+    var back = el("button", "ghost", "Start over");
+    back.onclick = csReset;
+    row.appendChild(back);
+    box.appendChild(row);
+    var st = el("div", "muted"); st.id = "csPayStatus"; st.style.marginTop = "10px";
+    st.setAttribute("aria-live", "polite");
+    box.appendChild(st);
+    csShow(2);
+  }
+
+  async function csPay(btn) {
+    if (!CS) return;
+    var provider = pickProvider();
+    if (!provider) { cmsg("No wallet detected — install OKX Wallet or open this page in your wallet's browser.", true); return; }
+    cmsg("");
+    btn.disabled = true;
+    var st = byId("csPayStatus");
+    st.textContent = "Waiting for your wallet…";
+    var account;
+    try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
+    catch (e) { st.textContent = ""; cmsg(isReject(e) ? "Connection declined." : "Could not connect wallet.", true); btn.disabled = false; return; }
+    if (!account) { st.textContent = ""; btn.disabled = false; return; }
+    if (!(await csEnsureChain(provider, st))) { btn.disabled = false; return; }
+    var txHash;
+    try {
+      var data = buildTransferData(CS.payTo, CS.micro);
+      txHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: account, to: USDT0, value: "0x0", data: data }] });
+    } catch (e) {
+      st.textContent = "";
+      cmsg(isReject(e) ? "Transaction canceled — nothing was charged. Pay when you're ready." : "Wallet error — check you hold USDT0 on X Layer.", true);
+      btn.disabled = false; return;
+    }
+    st.textContent = "Payment sent — verifying on X Layer and building your store…";
+    var d;
+    try {
+      d = await api("/api/merchant/create-store/" + CS.id + "/pay", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx_hash: txHash }) });
+    } catch (e) {
+      st.textContent = "";
+      cmsg(csErr(e), true);
+      btn.disabled = false;
+      return;
+    }
+    csResult(d);
+  }
+
+  async function csEnsureChain(provider, st) {
+    try {
+      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+      return true;
+    } catch (e) {
+      if (isReject(e)) { st.textContent = ""; cmsg("Network switch declined — the fee is paid on X Layer.", true); return false; }
+      try {
+        await provider.request({ method: "wallet_addEthereumChain", params: [CHAIN_PARAMS] });
+        await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+        return true;
+      } catch (e2) {
+        st.textContent = "";
+        cmsg(isReject(e2) ? "Network switch declined — the fee is paid on X Layer." : "Could not switch to X Layer — switch networks in your wallet and retry.", true);
+        return false;
+      }
+    }
+  }
+
+  function csResult(d) {
+    CS = null;
+    var box = byId("csStep3"); clear(box);
+    if (d.status === "live" && d.url) {
+      box.appendChild(el("div", "ok", "Your store is live."));
+      var row = el("div", "row"); row.style.marginTop = "10px";
+      var a = el("a", "ghost-btn", "Visit your store →"); a.href = d.url;
+      row.appendChild(a);
+      var again = el("button", "ghost", "Create another");
+      again.onclick = csReset;
+      row.appendChild(again);
+      box.appendChild(row);
+      box.appendChild(el("div", "muted small", "Manage it below — it now shows in your stores list."));
+      byId("csDesc").value = "";
+      loadStores();
+      loadSummary();
+    } else if (d.status === "paid") {
+      box.appendChild(el("div", null, "Payment received — finishing your store…"));
+      box.appendChild(el("div", "muted small", "Generation is briefly unavailable. Your payment is safe — retry in a moment at no extra charge."));
+      var rb = el("button", "primary", "Retry"); rb.style.marginTop = "10px";
+      rb.onclick = async function () {
+        rb.disabled = true;
+        var r;
+        try { r = await api("/api/merchant/create-store/" + d.id + "/retry", { method: "POST" }); }
+        catch (e) { rb.disabled = false; cmsg(csErr(e), true); return; }
+        cmsg("");
+        csResult(r);
+      };
+      box.appendChild(rb);
+    } else {
+      box.appendChild(el("div", "err", "We couldn't build a store from that description — the generated content didn't pass our safety check."));
+      var sb = el("button", "ghost", "Start over"); sb.style.marginTop = "10px";
+      sb.onclick = csReset;
+      box.appendChild(sb);
+    }
+    csShow(3);
   }
 
   // ---- one store's orders ----
@@ -1119,6 +1321,7 @@
   byId("signBtn").onclick = signIn;
   byId("signBtn2").onclick = signIn;
   byId("signOut").onclick = signOut;
+  byId("csCreate").onclick = createStore;
   byId("backToMain").onclick = function () { show("viewMain"); };
   byId("backFromOrder").onclick = function () { if (LAST_STORE) openStore(LAST_STORE); else show("viewMain"); };
   byId("pAdd").onclick = addProduct;

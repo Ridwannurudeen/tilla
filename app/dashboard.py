@@ -15,6 +15,7 @@ import contextlib
 import csv
 import hashlib
 import io
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ from app import (
     engine,
     refunds,
     render,
+    self_serve,
     webhooks,
 )
 from app.db import SessionLocal, get_session
@@ -1240,6 +1242,105 @@ def merchant_list_deliverables(
             for d in rows
         ]
     }
+
+
+# ------------------------------------------------------ self-serve create-store
+class SelfServeCreateBody(BaseModel):
+    description: str = Field(min_length=1, max_length=config.MAX_DESCRIPTION_LEN)
+    theme: str | None = None
+
+    @field_validator("theme")
+    @classmethod
+    def _validate_theme(cls, v):
+        if v is None or v == "":
+            return None
+        if v not in ("original", "bold", "editorial"):
+            raise ValueError("theme must be one of: original, bold, editorial")
+        return v
+
+
+class SelfServePayBody(BaseModel):
+    tx_hash: str = Field(min_length=66, max_length=66)
+
+
+def _creation_result(creation) -> dict:
+    return {
+        "id": creation.id,
+        "status": creation.status,
+        "slug": creation.slug,
+        "url": f"/s/{creation.slug}/" if creation.slug else None,
+        "amount_micro": creation.expected_micro,
+        "amount_usdt": usdt(creation.expected_micro),
+        "pay_to": creation.pay_to,
+    }
+
+
+@router.post("/api/merchant/create-store")
+@limiter.limit("6/minute")
+def merchant_create_store(
+    request: Request,
+    body: SelfServeCreateBody,
+    session: Session = Depends(get_session),
+):
+    """Screen the description and open a paid create-store intent for the signed-in
+    merchant (their wallet becomes the store's receive address). Fail fast if
+    generation is unconfigured, so no payment is offered against a dead generator."""
+    if not os.environ.get("TILLA_LLM_KEY"):
+        raise HTTPException(503, "store generation unavailable")
+    merchant = _require_merchant(request, session)
+    try:
+        creation = self_serve.create_intent(
+            session, merchant.wallet_address, body.description.strip(), body.theme
+        )
+    except self_serve.CreationError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    session.commit()
+    return _creation_result(creation)
+
+
+@router.post("/api/merchant/create-store/{creation_id}/pay")
+@limiter.limit("6/minute")
+def merchant_create_store_pay(
+    request: Request,
+    body: SelfServePayBody,
+    creation_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    """Verify the merchant's on-chain 1-USDT payment and generate the store. Owner-
+    scoped (a foreign id is 404). A reused payment is 409, a bad tx is 400."""
+    merchant = _require_merchant(request, session)
+    creation = self_serve.get_creation(session, creation_id, merchant.wallet_address)
+    if creation is None:
+        raise HTTPException(404, "creation not found")
+    try:
+        self_serve.pay_and_create(session, creation, body.tx_hash)
+    except self_serve.CreationError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    except (httpx.HTTPError, chain.ChainError) as exc:
+        raise HTTPException(502, "chain verification unavailable") from exc
+    session.commit()
+    return _creation_result(creation)
+
+
+@router.post("/api/merchant/create-store/{creation_id}/retry")
+@limiter.limit("6/minute")
+def merchant_create_store_retry(
+    request: Request,
+    creation_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    """Retry generation for a paid-but-ungenerated creation (after a model outage).
+    No re-charge — the payment already verified."""
+    merchant = _require_merchant(request, session)
+    creation = self_serve.get_creation(session, creation_id, merchant.wallet_address)
+    if creation is None:
+        raise HTTPException(404, "creation not found")
+    try:
+        self_serve.retry(session, creation)
+    except self_serve.CreationError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+    session.commit()
+    return _creation_result(creation)
 
 
 @router.get("/dashboard")

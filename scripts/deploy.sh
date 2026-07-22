@@ -33,6 +33,7 @@ FILES=(
   app/subscriptions.py
   app/import_stores.py
   app/dashboard.py
+  app/self_serve.py
   app/webhooks.py
   app/refunds.py
   app/attest.py
@@ -55,6 +56,7 @@ FILES=(
   alembic/versions/0007_marketplace_citizenship.py
   alembic/versions/0008_onchain_receipts.py
   alembic/versions/0009_growth.py
+  alembic/versions/0010_self_serve_create_store.py
   scripts/backup_db.sh
   scripts/backup_offsite.sh
   scripts/restore_drill.sh
