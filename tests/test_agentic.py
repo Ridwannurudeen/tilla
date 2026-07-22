@@ -171,6 +171,94 @@ def test_sla_default_and_per_product_override():
     assert client.post("/api/checkout/slashop").json()["sla_minutes"] == 30
 
 
+def _pid(slug):
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        return s.scalar(select(Product).where(Product.store_id == store.id)).id
+
+
+def test_feed_required_funds_equals_the_real_x402_charge():
+    # requiredFunds MUST be byte-identical to what the x402 buy endpoint demands:
+    # the resolvers the payment middleware calls per request are the single source of
+    # truth. Derive both from them and assert the feed matches — never a hardcode.
+    from app import agentic
+
+    pay_to = "0x" + "b" * 40
+    _seed(slug="rf", pay_to=pay_to, price_micro=7_250_000)
+    pid = _pid("rf")
+    p = client.get("/s/rf/feed.json").json()["products"][0]
+    rf = p["requiredFunds"]
+    path = f"/s/rf/buy/{pid}"
+    charge = agentic.resolve_price(path)  # what the 402 challenge advertises + settles
+    assert rf["amount_micro"] == int(charge.amount) == 7_250_000
+    assert rf["amount"] == "7.25"
+    assert rf["asset"] == charge.asset == config.USDT0
+    assert rf["network"] == "eip155:196"
+    # NON-CUSTODIAL: pay_to is the merchant, exactly what resolve_pay_to returns.
+    assert rf["pay_to"] == agentic.resolve_pay_to(path, "0x" + "0" * 40) == pay_to
+
+
+def test_feed_next_actions_name_reachable_actions():
+    _seed(slug="na", price_micro=3_000_000)
+    pid = _pid("na")
+    p = client.get("/s/na/feed.json").json()["products"][0]
+    actions = {a["type"]: a for a in p["nextActions"]}
+    # the x402 buy action names the exact per-product endpoint the agent POSTs to
+    assert actions["x402_buy"]["endpoint"] == f"/s/na/buy/{pid}"
+    assert actions["x402_buy"]["method"] == "POST"
+    # the MCP action names a reachable JSON-RPC server (initialize returns 200)
+    assert actions["mcp"]["endpoint"] == "/s/na/mcp"
+    assert (
+        _mcp("na", "initialize", {"protocolVersion": "2025-06-18"}).status_code == 200
+    )
+
+
+def test_get_product_offering_envelope_matches_charge():
+    from app import agentic
+
+    pay_to = "0x" + "c" * 40
+    _seed(slug="gpenv", pay_to=pay_to, price_micro=4_000_000)
+    pid = _pid("gpenv")
+    sc = _mcp(
+        "gpenv", "tools/call", {"name": "get_product", "arguments": {"product_id": pid}}
+    ).json()["result"]["structuredContent"]
+    rf = sc["requiredFunds"]
+    charge = agentic.resolve_price(f"/s/gpenv/buy/{pid}")
+    assert rf["amount_micro"] == int(charge.amount) == 4_000_000
+    assert rf["pay_to"] == pay_to  # merchant, non-custodial
+    assert any(a["endpoint"] == f"/s/gpenv/buy/{pid}" for a in sc["nextActions"])
+
+
+def test_agent_card_offering_envelope():
+    card = client.get("/.well-known/agent-card.json").json()
+    skills = {s["id"]: s for s in card["skills"]}
+    # create-store carries a fixed requiredFunds equal to the real /create-store 402
+    # charge (PAYMENT_AMOUNT = 1 USDT); its nextActions POST /create-store.
+    from app.payment import PAYMENT_AMOUNT
+
+    cs = skills["create-store"]
+    assert cs["requiredFunds"]["amount_micro"] == int(PAYMENT_AMOUNT) == 1_000_000
+    assert cs["requiredFunds"]["asset"] == config.USDT0
+    assert any(a["endpoint"] == "/create-store" for a in cs["nextActions"])
+    # the buy skill routes to per-store surfaces for the per-offering requiredFunds
+    buy_actions = {a["type"]: a for a in skills["buy"]["nextActions"]}
+    assert buy_actions["x402_buy"]["endpoint"] == "/s/{slug}/buy"
+
+
+def test_discovery_row_next_actions_route_to_store_surfaces():
+    _seed(slug="disc-na", price_micro=2_000_000)
+    row = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "disc-na"
+    )
+    actions = {a["type"]: a for a in row["nextActions"]}
+    assert actions["feed"]["endpoint"] == "/s/disc-na/feed.json"
+    assert actions["x402_buy"]["endpoint"] == "/s/disc-na/buy"
+    # discovery still never bulk-exports the merchant wallet
+    assert "pay_to" not in row
+
+
 def test_feed_404_for_non_live():
     _seed(slug="pendfeed", status="pending_screening")
     assert client.get("/s/pendfeed/feed.json").status_code == 404
