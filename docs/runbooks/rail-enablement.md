@@ -25,8 +25,8 @@ or marks a settlement. Flag names below are verified against `app/config.py` on 
 | Subscriptions (x402 period) | `TILLA_SUBSCRIPTIONS_ENABLED` | OKX creds + the subscription sidecar running (`TILLA_SIDECAR_URL`) | period settle, payer-bound |
 | Metering / pay-as-you-go (MPP) | `TILLA_MPP_ENABLED` | OKX creds | metered channel/session |
 | Batch (aggr_deferred) | `TILLA_AGGR_DEFERRED` | OKX creds + `TILLA_SWEEP_ENABLED` (the Phase-0 reconciliation poller is already built) | batch accept + settle |
-| EAS attestation receipts | `TILLA_ATTEST` | `TILLA_ATTESTER_KEY` (minted + funded) + attest RPC reachable — **triple-gated** | attestation tx on X Layer (now binds product + content hash) |
-| Paid Warden screening | `TILLA_WARDEN_PAID` | `TILLA_WARDEN_PAYER_KEY` (funded wallet) | paid scan (agents-hiring-agents) |
+| EAS attestation receipts | `TILLA_ATTEST` | `TILLA_ATTESTER_KEY` (reuse an existing wallet — no need to mint a new one; needs a small OKB balance for gas) + attest RPC reachable — **triple-gated** | attestation tx on X Layer (now binds product + content hash) |
+| Paid Warden screening | `TILLA_WARDEN_PAID` | `TILLA_WARDEN_PAYER_KEY` (reuse an existing wallet; a few USDT0) | paid scan (agents-hiring-agents) |
 | ACP-standard checkout | `TILLA_ACP_ENABLED` | `TILLA_ACP_SIGNING_SECRET` | checkout over the ACP standard |
 | Escrow / commission jobs | `TILLA_ESCROW` | — (see custody note) | funded → released commission job |
 | Growth-draft scheduler | `TILLA_GROWTH_SCHED_ENABLED` | (incurs LLM spend; not a payment rail) | first draft→approve→publish |
@@ -60,7 +60,7 @@ automated by an agent**; the `[verify]`/`[probe]` steps are read-only.
 | Subscriptions | `TILLA_SUBSCRIPTIONS_ENABLED=1` | + the subscription sidecar running at `TILLA_SIDECAR_URL` + `OKX_API_KEY` |
 | Metering (MPP) | `TILLA_MPP_ENABLED=1` | + `OKX_API_KEY` |
 | Batch (aggr_deferred) | `TILLA_AGGR_DEFERRED=1` | + `OKX_API_KEY` + `TILLA_SWEEP_ENABLED=1`; **probe `/supported` first** |
-| EAS attestation | `TILLA_ATTEST=1` · `TILLA_ATTESTER_KEY=<minted+funded>` | + attest RPC reachable (triple-gated) |
+| EAS attestation | `TILLA_ATTEST=1` · `TILLA_ATTESTER_KEY=<existing wallet; small OKB for gas>` | + attest RPC reachable (triple-gated) |
 | Paid Warden | `TILLA_WARDEN_PAID=1` · `TILLA_WARDEN_PAYER_KEY=<funded>` | payer wallet needs a few USDT0 |
 | ACP checkout | `TILLA_ACP_ENABLED=1` · `TILLA_ACP_SIGNING_SECRET=<secret>` | — |
 | Escrow | `TILLA_ESCROW=1` | custodial surface — read the custody note below; still no fund-moving code |
