@@ -371,6 +371,23 @@
     <button id="backToMain" class="ghost">&larr; Back</button>
     <h2 id="storeTitle" class="sec-h" tabindex="-1"></h2>
 
+    <h3 class="sec-h">Store copy</h3>
+    <div id="copyMsg" class="small hide" aria-live="polite"></div>
+    <div class="card">
+      <div class="row head">
+        <strong>Plain-language copy</strong>
+        <span class="muted mono">screened before it goes live</span>
+      </div>
+      <p class="muted small">Re-word the tagline and one-liner shown on your storefront. Saving re-renders the page — your products, prices, and theme are untouched.</p>
+      <label for="scTagline">Tagline</label>
+      <input id="scTagline" maxlength="120" placeholder="A short line under your store name" />
+      <label for="scOneLiner">One-liner</label>
+      <textarea id="scOneLiner" maxlength="280" placeholder="One sentence describing what you sell"></textarea>
+      <div class="row" style="margin-top:12px">
+        <button id="scSave" class="primary">Save copy</button>
+      </div>
+    </div>
+
     <h3 class="sec-h">Products</h3>
     <div id="productMsg" class="small hide" aria-live="polite"></div>
     <div id="products"></div>
@@ -948,6 +965,7 @@
     pmsg("");
     dmsg("");
     show("viewStore");
+    await loadStoreCopy(slug);
     await loadProducts(slug);
     await loadDeliverables(slug);
     await loadAgentView(slug);
@@ -1229,6 +1247,45 @@
     btn.disabled = false;
   }
 
+  // ---- store copy (plain-language tagline / one-liner; screened server-side,
+  //      re-renders the storefront; every value set via input.value, never raw markup) ----
+  function scmsg(text, isErr) {
+    var m = byId("copyMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+  function copyErr(e) {
+    if (e.status === 422) return "That copy didn't pass our safety check — try wording it differently.";
+    if (e.status === 503) return "Screening is briefly unavailable — try again in a minute.";
+    if (e.status === 409) return "This store isn't live yet.";
+    return e.message;
+  }
+  async function loadStoreCopy(slug) {
+    byId("scTagline").value = "";
+    byId("scOneLiner").value = "";
+    scmsg("");
+    try {
+      var c = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/description");
+      byId("scTagline").value = c.tagline || "";
+      byId("scOneLiner").value = c.hero_subcopy || "";
+    } catch (e) { /* a store with no copy yet just starts blank */ }
+  }
+  async function saveStoreCopy() {
+    if (!LAST_STORE) return;
+    var tagline = byId("scTagline").value.trim();
+    var oneLiner = byId("scOneLiner").value.trim();
+    if (!tagline && !oneLiner) { scmsg("Enter a tagline or one-liner first.", true); return; }
+    var btn = byId("scSave"); btn.disabled = true;
+    try {
+      await api("/api/merchant/stores/" + encodeURIComponent(LAST_STORE) + "/description", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tagline: tagline, hero_subcopy: oneLiner })
+      });
+      scmsg("Saved — your storefront copy is updated.");
+    } catch (e) { scmsg(copyErr(e), true); }
+    btn.disabled = false;
+  }
+
   // ---- one order ----
   async function openOrder(orderId) {
     LAST_ORDER = orderId;
@@ -1362,6 +1419,7 @@
   byId("backToMain").onclick = function () { show("viewMain"); };
   byId("backFromOrder").onclick = function () { if (LAST_STORE) openStore(LAST_STORE); else show("viewMain"); };
   byId("pAdd").onclick = addProduct;
+  byId("scSave").onclick = saveStoreCopy;
   byId("dKind").onchange = syncDeliverableKind;
   byId("dSet").onclick = setDeliverable;
   byId("whSave").onclick = saveWebhook;

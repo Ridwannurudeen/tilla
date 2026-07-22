@@ -296,6 +296,89 @@ def merchant_store_visibility(
     return {"slug": store.slug, "visibility": store.visibility}
 
 
+class StoreCopyBody(BaseModel):
+    """A plain-language copy edit: the storefront tagline and/or the one-line
+    description (``hero_subcopy``). Both optional so a merchant can update either;
+    the route rejects a fully-empty edit (422)."""
+
+    tagline: str | None = Field(default=None, max_length=120)
+    hero_subcopy: str | None = Field(default=None, max_length=280)
+
+
+def _screen_copy(text: str) -> None:
+    """Fail-closed screening for merchant-edited store copy: BLOCK->422, screening
+    unavailable->503 (never a silent pass) — the same contract as _screen_name."""
+    try:
+        outcome = screen(text)
+    except ScreeningBlocked as exc:
+        raise HTTPException(422, "store copy did not pass safety screening") from exc
+    if outcome.status != "allow":
+        raise HTTPException(503, "content screening temporarily unavailable")
+
+
+@router.get("/api/merchant/stores/{slug}/description")
+@limiter.limit("60/minute")
+def merchant_get_store_copy(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """The store's editable plain-language copy — the tagline and one-line
+    description the owner re-words to re-render the storefront (no LLM
+    regeneration). Owner-gated (404 for a non-owned/unknown slug)."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    content = store.content if isinstance(store.content, dict) else {}
+    return {
+        "slug": store.slug,
+        "tagline": str(content.get("tagline", "")),
+        "hero_subcopy": str(content.get("hero_subcopy", "")),
+    }
+
+
+@router.post("/api/merchant/stores/{slug}/description")
+@limiter.limit("20/minute")
+def merchant_set_store_copy(
+    request: Request,
+    body: StoreCopyBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Owner edit of a store's plain-language copy: the storefront tagline and/or
+    the one-line description. The submitted text is content-screened FAIL-CLOSED
+    (BLOCK->422, screening unavailable->503) BEFORE any write; only an explicit
+    ALLOW updates stores.content and re-renders the static page — the catalog,
+    prices, palette, and theme are untouched (no LLM regeneration). Owner-gated
+    (404 for a non-owned/unknown slug); a not-yet-live store is 409."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    if store.status != "live":
+        raise HTTPException(409, "store is not live")
+    updates: dict[str, str] = {}
+    if body.tagline is not None:
+        updates["tagline"] = body.tagline.strip()
+    if body.hero_subcopy is not None:
+        updates["hero_subcopy"] = body.hero_subcopy.strip()
+    if not any(updates.values()):
+        raise HTTPException(422, "provide a tagline or one-liner to update")
+    _screen_copy("\n".join(v for v in updates.values() if v))
+    engine.update_store_copy(session, store, updates)
+    log_event(
+        session,
+        "merchant",
+        "store.copy_edited",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "fields": sorted(updates)},
+    )
+    session.commit()
+    content = store.content or {}
+    return {
+        "slug": store.slug,
+        "tagline": str(content.get("tagline", "")),
+        "hero_subcopy": str(content.get("hero_subcopy", "")),
+    }
+
+
 @router.get("/api/merchant/stores/{slug}/agent-view")
 @limiter.limit("30/minute")
 def merchant_store_agent_view(

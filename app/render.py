@@ -257,6 +257,23 @@ def render_shell(template: str) -> str:
     return _env.get_template(template).render()
 
 
+def render_profile(address: str, stores: list) -> str:
+    """Render the PUBLIC link-in-bio merchant profile — a shareable list of a
+    merchant's live, public stores. ``stores`` is a list of ``{slug, name,
+    description, url}`` dicts whose name/description are screened LLM copy, rendered
+    through the same autoescaped env as the store themes so they stay inert text
+    (an SSTI/XSS payload in a store name renders as literal characters, never
+    markup or a template expression). ``address`` is a pre-validated, lowercased
+    EVM address — already public (every store's on-chain receive wallet)."""
+    return _env.get_template("_profile.html").render(
+        ADDRESS=address,
+        ADDRESS_SHORT=f"{address[:6]}…{address[-4:]}",
+        BASE_URL=PUBLIC_BASE_URL.rstrip("/"),
+        STORES=stores,
+        STORE_COUNT=len(stores),
+    )
+
+
 def render_og(content: Mapping, slug: str) -> str:
     """Render the per-store Open Graph card (SVG, 1200x630). Served statically at
     /s/<slug>/og.svg and referenced from og:image / twitter:image. Autoescaped
