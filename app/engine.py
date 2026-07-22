@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import unicodedata
@@ -119,13 +120,38 @@ def _resolve_theme(name: str | None) -> str:
     return f"{name}.html" if name in config.ALLOWED_THEMES else config.DEFAULT_THEME
 
 
+_RSVG_BIN = shutil.which("rsvg-convert")
+
+
+def _write_og_png(svg_path, png_path) -> None:
+    """Best-effort rasterize og.svg -> og.png (1200x630) with rsvg-convert, because
+    social scrapers (X / Discord / Telegram / Slack) do not render an SVG og:image.
+    The PNG is cosmetic and this runs inside the paid create-store path, so ANY
+    failure (binary absent on dev/Windows, rsvg error or timeout) is logged and
+    swallowed — it must never break store creation or change fund flow. og.svg
+    stays the source of truth; a missing og.png simply 404s until the next render."""
+    if _RSVG_BIN is None:
+        return
+    try:
+        subprocess.run(
+            [_RSVG_BIN, "-w", "1200", "-h", "630", str(svg_path), "-o", str(png_path)],
+            check=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        logger.exception("og.png rasterization failed for %s", png_path)
+
+
 def _write_store_pages(d, content: dict, addr: str, slug: str, theme: str) -> None:
-    """Write the two nginx-served static assets for a live store: index.html
-    (the chosen theme) and og.svg (the Open Graph card referenced from its head)."""
+    """Write the nginx-served static assets for a live store: index.html (the chosen
+    theme), og.svg (the Open Graph card source), and og.png (its raster for social
+    scrapers). The <head> references og.png as og:image/twitter:image."""
     (d / "index.html").write_text(
         render_theme(content, addr, slug, theme), encoding="utf-8"
     )
     (d / "og.svg").write_text(render_og(content, slug), encoding="utf-8")
+    _write_og_png(d / "og.svg", d / "og.png")
 
 
 def slugify(s):

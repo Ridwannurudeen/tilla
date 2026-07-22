@@ -123,7 +123,7 @@ def _seo_ctx(content: Mapping, slug: str) -> dict:
     the <script type="application/ld+json"> block."""
     base = PUBLIC_BASE_URL.rstrip("/")
     canonical = f"{base}/s/{slug}/"
-    og_image = f"{base}/s/{slug}/og.svg"
+    og_image = f"{base}/s/{slug}/og.png"
     store_name = str(content.get("store_name", "My Store"))
     description = str(content.get("hero_subcopy") or content.get("tagline") or "")
     product_name = str(content.get("product_name", "")) or store_name

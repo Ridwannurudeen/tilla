@@ -229,3 +229,57 @@ def test_rerender_stores_skips_contentless_store(tmp_path, monkeypatch):
 
     assert engine.rerender_stores() == {"rendered": 0, "skipped": 1}
     assert not (tmp_path / "old" / "index.html").exists()
+
+
+def test_write_og_png_skips_when_rsvg_absent(tmp_path, monkeypatch):
+    # No rasterizer on this host (dev/Windows): og.png generation is a silent
+    # no-op — never a raise that could break the paid create-store path.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "_RSVG_BIN", None)
+    svg = tmp_path / "og.svg"
+    svg.write_text("<svg/>", encoding="utf-8")
+    engine._write_og_png(svg, tmp_path / "og.png")
+    assert not (tmp_path / "og.png").exists()
+
+
+def test_write_og_png_invokes_rsvg_with_1200x630(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    calls = []
+    monkeypatch.setattr(engine, "_RSVG_BIN", "/usr/bin/rsvg-convert")
+    monkeypatch.setattr(engine.subprocess, "run", lambda *a, **k: calls.append((a, k)))
+    svg, png = tmp_path / "og.svg", tmp_path / "og.png"
+    engine._write_og_png(svg, png)
+    (argv,), kwargs = calls[0]
+    assert argv[0] == "/usr/bin/rsvg-convert"
+    assert "1200" in argv and "630" in argv
+    assert str(svg) in argv and str(png) in argv
+    assert kwargs["check"] is True and kwargs["timeout"] == 15
+
+
+def test_write_og_png_failopen_on_rsvg_error(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "_RSVG_BIN", "/usr/bin/rsvg-convert")
+
+    def boom(*a, **k):
+        raise engine.subprocess.CalledProcessError(1, "rsvg-convert")
+
+    monkeypatch.setattr(engine.subprocess, "run", boom)
+    # Must NOT raise — a rasterization failure is swallowed and logged.
+    engine._write_og_png(tmp_path / "og.svg", tmp_path / "og.png")
+
+
+def test_write_store_pages_writes_svg_and_index_without_rsvg(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "_RSVG_BIN", None)
+    d = tmp_path / "aperture"
+    d.mkdir()
+    engine._write_store_pages(
+        d, {"store_name": "A", "price_usdt": 9, "emoji": "x"}, "0xabc", "aperture", "original.html"
+    )
+    assert (d / "index.html").exists()
+    assert (d / "og.svg").exists()
+    assert not (d / "og.png").exists()

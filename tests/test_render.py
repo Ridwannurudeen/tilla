@@ -181,7 +181,7 @@ def test_og_and_canonical_meta_present(theme):
     }
     html = render(content, ADDR, SLUG, theme)
     canonical = f"https://tilla.gudman.xyz/s/{SLUG}/"
-    og_image = f"https://tilla.gudman.xyz/s/{SLUG}/og.svg"
+    og_image = f"https://tilla.gudman.xyz/s/{SLUG}/og.png"
     assert f'<link rel="canonical" href="{canonical}">' in html
     assert f'<meta property="og:image" content="{og_image}">' in html
     assert f'<meta name="twitter:image" content="{og_image}">' in html
@@ -207,7 +207,7 @@ def test_jsonld_present_and_valid_product(theme):
     assert ld["offers"]["price"] == "9"
     assert ld["offers"]["priceCurrency"] == "USDT"
     assert ld["offers"]["url"] == f"https://tilla.gudman.xyz/s/{SLUG}/"
-    assert ld["image"] == f"https://tilla.gudman.xyz/s/{SLUG}/og.svg"
+    assert ld["image"] == f"https://tilla.gudman.xyz/s/{SLUG}/og.png"
 
 
 @pytest.mark.parametrize("theme", THEMES)
