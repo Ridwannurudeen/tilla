@@ -157,6 +157,17 @@
   #co .co-receipt .co-more{ display:block; margin-top:12px;
     font-family:'TillaMono',ui-monospace,Consolas,monospace;
     font-size:12px; font-weight:600; }
+  #co .co-email{ margin-top:16px; }
+  #co .co-email .co-clabel{ display:block; }
+  #co .co-email input{ width:100%; padding:10px 12px; font:inherit;
+    font-family:'TillaMono',ui-monospace,Consolas,monospace; font-size:13px;
+    color:var(--text); background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 20%,transparent);
+    border-radius:3px; }
+  #co .co-email input:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  #co .co-email input:disabled{ opacity:.5; }
+  #co .co-share{ margin-top:16px; }
+  #co .co-claim .co-hintrow .co-copy{ width:auto; margin-top:0; }
   @media (prefers-reduced-motion: reduce){
     #co .co-receipt{ animation:none; }
     #co .co-btn, #co .co-copy, #co .co-ghost, #co .co-claim .co-dl{ transition:none; }
@@ -547,6 +558,8 @@
     var item = null, list = lib.purchases || [];
     for (var i = 0; i < list.length; i++) if (list[i].order_id === CO.cid) { item = list[i]; break; }
     if (!item) { setClaim("This wallet didn't pay for this order — sign with the paying wallet."); btn.disabled = false; return; }
+    CO.sessionToken = token;
+    CO.account = account;
     renderClaim(item);
     btn.style.display = "none";
     byId("coClaimHint").style.display = "none";
@@ -565,7 +578,62 @@
     } else {
       var d = document.createElement("div"); d.className = "co-deliver"; d.textContent = item.delivery || "Delivered — thank you!"; el.appendChild(d);
     }
+    var extraEmail = emailReceiptBlock();
+    if (extraEmail) el.appendChild(extraEmail);
+    var extraShare = shareRowBlock();
+    if (extraShare) el.appendChild(extraShare);
     el.style.display = "block";
+  }
+
+  // ---- post-claim extras: email re-delivery + referral link. Both reuse the
+  // claim session proof (CO.sessionToken / CO.account) — no second signature. ----
+  function emailReceiptBlock() {
+    if (typeof CO.sessionToken !== "string" || !CO.sessionToken) return null;
+    var wrap = document.createElement("div"); wrap.className = "co-email";
+    var lbl = document.createElement("label"); lbl.className = "co-clabel";
+    lbl.htmlFor = "coEmailInput"; lbl.textContent = "Email receipt"; wrap.appendChild(lbl);
+    var input = document.createElement("input"); input.type = "email"; input.id = "coEmailInput";
+    input.autocomplete = "email"; input.placeholder = "you@example.com"; wrap.appendChild(input);
+    var btn = document.createElement("button"); btn.className = "co-ghost";
+    btn.textContent = "Email me the receipt & download link"; wrap.appendChild(btn);
+    var hint = document.createElement("div"); hint.className = "co-hint"; wrap.appendChild(hint);
+    btn.onclick = async function () {
+      var email = input.value.trim();
+      if (!email) { hint.textContent = "Enter an email address first."; input.focus(); return; }
+      btn.disabled = true; input.disabled = true; hint.textContent = "";
+      var r;
+      try {
+        r = await fetch("/api/checkout/" + CO.cid + "/email", {
+          method: "POST",
+          headers: { "content-type": "application/json", "Authorization": "Bearer " + CO.sessionToken },
+          body: JSON.stringify({ email: email })
+        });
+      } catch (e) { hint.textContent = "Couldn't send — try again."; btn.disabled = false; input.disabled = false; return; }
+      if (r.status === 401) { hint.textContent = "Please claim again to verify your wallet."; btn.disabled = false; input.disabled = false; return; }
+      var d = null;
+      try { d = await r.json(); } catch (e) {}
+      if (r.ok && d && d.ok) {
+        wrap.textContent = "";
+        var sent = document.createElement("div"); sent.className = "co-hint";
+        sent.textContent = "Sent — the link re-issues your download any time.";
+        wrap.appendChild(sent);
+        return;
+      }
+      hint.textContent = "Couldn't send — try again.";
+      btn.disabled = false; input.disabled = false;
+    };
+    return wrap;
+  }
+
+  function shareRowBlock() {
+    if (typeof CO.account !== "string" || !CO.account) return null;
+    var wrap = document.createElement("div"); wrap.className = "co-share";
+    var link = location.origin + "/s/" + SLUG + "/?ref=" + CO.account;
+    wrap.appendChild(hintCopyRow("Share this store — earn on referred sales", link));
+    var sub = document.createElement("div"); sub.className = "co-hint";
+    sub.textContent = "When someone buys through your link, you earn a share.";
+    wrap.appendChild(sub);
+    return wrap;
   }
 
   // ---- inline byte-mode QR encoder (EC level M, versions 1-10, auto-version +

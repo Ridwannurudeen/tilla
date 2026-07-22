@@ -306,6 +306,9 @@
     <h2 class="sec-h">Marketplace <a class="sec-link mono" href="/marketplace.html">View public marketplace →</a></h2>
     <div id="marketplace"></div>
 
+    <h2 class="sec-h">Referrals</h2>
+    <div id="referrals"></div>
+
     <h2 class="sec-h">Configuration</h2>
     <div class="cols">
       <div class="card">
@@ -521,7 +524,7 @@
     byId("signBtn").classList.add("hide");
     byId("signOut").classList.remove("hide");
     routeHash(); // restore the hash's view instead of always viewMain
-    await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace()]);
+    await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace(), loadReferrals()]);
   }
 
   // ---- marketplace (read-only: listing status, sold split, screening receipts) ----
@@ -581,6 +584,54 @@
       }
       box.appendChild(c);
     });
+  }
+
+  // ---- referrals (this wallet's OWN rev-share earnings; the API only ever returns
+  //      the signed-in earner's balance — every string rendered via textContent) ----
+  async function loadReferrals() {
+    var box = byId("referrals");
+    var data;
+    try { data = await api("/api/affiliate/summary"); }
+    catch (e) { clear(box); box.appendChild(el("div", "muted small", "Could not load referral earnings.")); return; }
+    clear(box);
+    if (!data.stores || !data.stores.length) {
+      box.appendChild(el("div", "card muted sentence", "No referral earnings yet — share a store link with ?ref=<your wallet> to start."));
+      return;
+    }
+    var c = el("div", "card");
+    c.appendChild(el("p", "muted small", "Earnings from sales made through your referral links — share any store's link with ?ref=<your wallet> to earn a share."));
+    var g = el("div", "grid");
+    function stat(k, v) { var s = el("div", "stat"); s.appendChild(el("div", "k", k)); s.appendChild(el("div", "v", v)); g.appendChild(s); }
+    stat("Accrued (USDT0)", data.totals.accrued_usdt);
+    stat("Paid out (USDT0)", data.totals.paid_usdt);
+    stat("Void (USDT0)", data.totals.void_usdt);
+    c.appendChild(g);
+    var t = el("table"), thead = el("thead"), tr = el("tr");
+    ["Store", "Orders", "Accrued", "Paid out", "Void"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
+    thead.appendChild(tr); t.appendChild(thead);
+    var tb = el("tbody");
+    data.stores.forEach(function (st) {
+      var row = el("tr");
+      var std = el("td");
+      if (st.store_slug) {
+        // st.store_slug is server-validated to the slug pattern — safe in a path segment
+        var a = el("a", "mono", st.store_slug); a.href = "/s/" + st.store_slug + "/"; std.appendChild(a);
+      } else {
+        std.appendChild(el("span", "muted", "—"));
+      }
+      row.appendChild(std);
+      row.appendChild(el("td", null, String(st.orders)));
+      row.appendChild(el("td", null, st.accrued_usdt));
+      row.appendChild(el("td", null, st.paid_usdt));
+      row.appendChild(el("td", null, st.void_usdt));
+      tb.appendChild(row);
+    });
+    t.appendChild(tb);
+    var wrap = el("div", "scroll"); wrap.style.marginTop = "10px";
+    wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Referral earnings by store");
+    wrap.appendChild(t);
+    c.appendChild(wrap);
+    box.appendChild(c);
   }
 
   // ---- summary ----
