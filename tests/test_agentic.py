@@ -248,6 +248,7 @@ def test_mcp_ping_and_tools_list():
     assert {t["name"] for t in tools} == {
         "list_products",
         "get_product",
+        "preview_order",
         "create_checkout",
         "pay",
     }
@@ -395,6 +396,59 @@ def test_mcp_create_checkout_unknown_product_id_is_tool_error(make_store):
     ).json()["result"]
     assert r["isError"] is True
     assert "not found" in r["structuredContent"]["error"]
+
+
+# ---- Phase 4 butler flow: read-only preview + confirmation summary ----
+def test_mcp_preview_order_summarizes_without_charging():
+    # The read-only preview carries price/total/ETA/store/rail and a human line, and
+    # creates NO order — money only ever moves on the explicit pay step.
+    sid = _seed(slug="mcp-preview", price_micro=4_000_000)
+    res = _mcp("mcp-preview", "tools/call", {"name": "preview_order"}).json()["result"]
+    assert res.get("isError") is not True
+    sc = res["structuredContent"]
+    s = sc["summary"]
+    assert s["unit_price"] == "4" and s["unit_price_micro"] == 4_000_000
+    assert s["quantity"] == 1
+    assert s["total"] == "4" and s["total_micro"] == 4_000_000
+    assert s["sla_minutes"] == 10
+    assert s["store"]["name"] == "Shoppe" and s["store"]["slug"] == "mcp-preview"
+    assert s["product"]["name"] == "Thing"
+    assert s["currency"] == "USDT" and s["network"] == "eip155:196"
+    assert s["settlement"] == "non_custodial" and s["pay_to"] == "0x" + "a" * 40
+    assert "Thing" in s["line"] and "USDT" in s["line"]
+    assert "nothing is charged" in sc["next_step"]
+    # read-only: no order reserved by a preview
+    with SessionLocal() as db:
+        assert db.scalars(select(Order).where(Order.store_id == sid)).all() == []
+
+
+def test_mcp_preview_order_unknown_product_id_is_tool_error(make_store):
+    make_store(slug="mcp-preview-nope", price_micro=1_000_000)
+    r = _mcp(
+        "mcp-preview-nope",
+        "tools/call",
+        {"name": "preview_order", "arguments": {"product_id": 999999}},
+    ).json()["result"]
+    assert r["isError"] is True
+    assert "not found" in r["structuredContent"]["error"]
+
+
+def test_mcp_create_checkout_returns_confirmation_summary():
+    # create_checkout enriches its result with the same confirm-before-pay summary
+    # and a next_step making the two-step (reserve -> pay) contract explicit.
+    _seed(slug="mcp-ccsum", pay_to="0x" + "c" * 40, price_micro=7_000_000)
+    sc = _mcp("mcp-ccsum", "tools/call", {"name": "create_checkout"}).json()["result"][
+        "structuredContent"
+    ]
+    # existing top-level contract is unchanged (exact amount includes the offset)
+    assert 7_000_001 <= sc["amount_micro"] <= 7_004_999
+    assert sc["pay_to"] == "0x" + "c" * 40
+    s = sc["summary"]
+    assert s["unit_price"] == "7" and s["total"] == "7"
+    assert s["total_micro"] == 7_000_000  # goods price, not the payment offset
+    assert s["sla_minutes"] == 10
+    assert s["store"]["slug"] == "mcp-ccsum"
+    assert "amount_micro" in sc["next_step"] and "UNPAID" in sc["next_step"]
 
 
 # ------------------------------------------------------------ discovery

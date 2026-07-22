@@ -129,6 +129,7 @@ def test_mcp_tools_list_validates(make_store):
     assert {t["name"] for t in result["tools"]} == {
         "list_products",
         "get_product",
+        "preview_order",
         "create_checkout",
         "pay",
     }
