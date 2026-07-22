@@ -188,6 +188,58 @@ def _write_og_png(svg_path, png_path) -> None:
         logger.exception("og.png rasterization failed for %s", png_path)
 
 
+def resync_catalog(session, store, extras_override=None) -> None:
+    """Rebuild ``store.content['products']`` from the store's ACTIVE Product rows
+    (id order) and re-render the static pages, so the storefront catalog — and its
+    index->product mapping — always reflects the live catalog after a dashboard
+    edit. Display extras (blurb, cta_text) live only in content, not on the Product
+    row, so they are preserved by product id; ``extras_override`` (``{product_id:
+    (blurb, cta_text)}``) supplies them for a product just added or edited. A
+    store whose content predates CRUD has no per-item ids yet — its content order
+    equals create-time id order, so ids are backfilled positionally on first sync.
+    Runs inside the caller's transaction (commits are the caller's job)."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    active = session.scalars(
+        select(Product)
+        .where(Product.store_id == store.id, Product.active.is_(True))
+        .order_by(Product.id)
+    ).all()
+    content = dict(store.content or {})
+    old = content.get("products") or []
+    extras = {}
+    for i, item in enumerate(old):
+        if not isinstance(item, dict):
+            continue
+        key = item.get("id")
+        if key is None and i < len(active):
+            key = active[i].id
+        extras[key] = (str(item.get("blurb", "")), str(item.get("cta_text", "Buy now")))
+    if extras_override:
+        extras.update(extras_override)
+    content["products"] = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "price_usdt": p.price_micro / 1e6,
+            "blurb": extras.get(p.id, ("", "Buy now"))[0],
+            "cta_text": extras.get(p.id, ("", "Buy now"))[1],
+        }
+        for p in active
+    ]
+    if content["products"]:
+        primary = content["products"][0]
+        content["product_name"] = primary["name"]
+        content["product_blurb"] = primary["blurb"]
+        content["cta_text"] = primary["cta_text"]
+        content["price_usdt"] = primary["price_usdt"]
+    store.content = content
+    flag_modified(store, "content")
+    d = STORES_DIR / store.slug
+    d.mkdir(parents=True, exist_ok=True)
+    _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+
+
 def _write_store_pages(d, content: dict, addr: str, slug: str, theme: str) -> None:
     """Write the nginx-served static assets for a live store: index.html (the chosen
     theme), og.svg (the Open Graph card source), and og.png (its raster for social

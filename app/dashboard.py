@@ -29,9 +29,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import HTMLResponse, StreamingResponse
 
-from app import affiliates, chain, checkout, config, delivery, refunds, render, webhooks
+from app import (
+    affiliates,
+    chain,
+    checkout,
+    config,
+    delivery,
+    engine,
+    refunds,
+    render,
+    webhooks,
+)
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
+from app.screening import ScreeningBlocked, screen
 from app.models import (
     EmailSubscriber,
     EventLog,
@@ -1026,6 +1037,175 @@ def delete_webhook(request: Request, session: Session = Depends(get_session)):
     log_event(session, "merchant", "webhook.removed", data={"merchant_id": merchant.id})
     session.commit()
     return {"url": None}
+
+
+# ---------------------------------------------------- merchant product catalog
+class ProductAddBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    price_usdt: float = Field(ge=0.01, le=10000)
+    blurb: str = Field(default="", max_length=400)
+    cta_text: str = Field(default="Buy now", max_length=40)
+
+
+class ProductPatchBody(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    price_usdt: float | None = Field(default=None, ge=0.01, le=10000)
+    blurb: str | None = Field(default=None, max_length=400)
+    cta_text: str | None = Field(default=None, max_length=40)
+    active: bool | None = None
+
+
+def _screen_name(name: str) -> None:
+    """Fail-closed name screening for a merchant-supplied product name: BLOCK->422,
+    screening unavailable->503 (never a silent pass)."""
+    try:
+        outcome = screen(name)
+    except ScreeningBlocked as exc:
+        raise HTTPException(422, "product name did not pass safety screening") from exc
+    if outcome.status != "allow":
+        raise HTTPException(503, "content screening temporarily unavailable")
+
+
+@router.get("/api/merchant/stores/{slug}/products")
+@limiter.limit("30/minute")
+def merchant_list_products(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    rows = session.scalars(
+        select(Product).where(Product.store_id == store.id).order_by(Product.id)
+    ).all()
+    return {
+        "products": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "price_usdt": p.price_micro / 1e6,
+                "active": p.active,
+            }
+            for p in rows
+        ]
+    }
+
+
+@router.post("/api/merchant/stores/{slug}/products")
+@limiter.limit("20/minute")
+def merchant_add_product(
+    request: Request,
+    body: ProductAddBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    if store.status != "live":
+        raise HTTPException(409, "store is not live")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "name cannot be empty")
+    _screen_name(name)
+    product = Product(
+        store_id=store.id,
+        name=name,
+        price_micro=int(round(body.price_usdt * 1e6)),
+        active=True,
+    )
+    session.add(product)
+    session.flush()
+    engine.resync_catalog(
+        session,
+        store,
+        extras_override={product.id: (body.blurb.strip(), body.cta_text)},
+    )
+    log_event(
+        session,
+        "merchant",
+        "product.added",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "product_id": product.id},
+    )
+    session.commit()
+    return {
+        "id": product.id,
+        "name": name,
+        "price_usdt": body.price_usdt,
+        "active": True,
+    }
+
+
+@router.patch("/api/merchant/stores/{slug}/products/{pid}")
+@limiter.limit("20/minute")
+def merchant_edit_product(
+    request: Request,
+    body: ProductPatchBody,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    pid: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    product = session.scalar(
+        select(Product).where(Product.id == pid, Product.store_id == store.id)
+    )
+    if product is None:
+        raise HTTPException(404, "product not found")
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(422, "name cannot be empty")
+        _screen_name(name)
+        product.name = name
+    if body.price_usdt is not None:
+        product.price_micro = int(round(body.price_usdt * 1e6))
+    if body.active is not None and body.active != product.active:
+        if not body.active:
+            # never leave a live store with zero active products — checkout would
+            # 409 and the storefront would render an empty catalog.
+            active_count = session.scalar(
+                select(func.count())
+                .select_from(Product)
+                .where(Product.store_id == store.id, Product.active.is_(True))
+            )
+            if active_count <= 1:
+                raise HTTPException(409, "cannot deactivate the last active product")
+        product.active = body.active
+    # blurb/cta live only in content; override just the provided field, keeping the
+    # other from the current catalog entry.
+    extras_override = None
+    if body.blurb is not None or body.cta_text is not None:
+        cur = next(
+            (
+                it
+                for it in (store.content or {}).get("products", [])
+                if isinstance(it, dict) and it.get("id") == product.id
+            ),
+            {},
+        )
+        blurb = body.blurb if body.blurb is not None else str(cur.get("blurb", ""))
+        cta = (
+            body.cta_text
+            if body.cta_text is not None
+            else str(cur.get("cta_text", "Buy now"))
+        )
+        extras_override = {product.id: (blurb.strip(), cta or "Buy now")}
+    engine.resync_catalog(session, store, extras_override=extras_override)
+    log_event(
+        session,
+        "merchant",
+        "product.edited",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "product_id": product.id},
+    )
+    session.commit()
+    return {
+        "id": product.id,
+        "name": product.name,
+        "price_usdt": product.price_micro / 1e6,
+        "active": product.active,
+    }
 
 
 @router.get("/dashboard")
