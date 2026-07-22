@@ -256,10 +256,15 @@ class Order(Base):
     # BEFORE the tx is broadcast, so a crash in the send window reconciles by nonce (at
     # most one tx per nonce mines) instead of blind-re-broadcasting. attest_tx is the
     # on-chain attestation tx; attest_nonce is the account nonce it was signed with;
-    # attestation_uid is the EAS UID parsed from its Attested log.
+    # attestation_uid is the EAS UID parsed from its Attested log. content_hash is the
+    # sha256 (0x + 64 hex) of the delivered payload, computed by the attester at attest
+    # time and recorded here as part of the broadcast intent (alongside attest_tx +
+    # attest_nonce) so the receipt is provably bound to WHAT was delivered and a reconcile
+    # re-broadcast rebuilds the identical attestation. NULL for every non-attesting row.
     attestation_uid: Mapped[str | None] = mapped_column(String(66), nullable=True)
     attest_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
     attest_nonce: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     attest_status: Mapped[str] = mapped_column(
         String(12), nullable=False, default="none", server_default="none"
     )

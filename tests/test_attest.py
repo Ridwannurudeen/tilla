@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 import app.main as main
 from app import agentic, attest, checkout, config
 from app.db import SessionLocal
-from app.models import Order, Store
+from app.models import Delivery, Order, Store
 
 client = TestClient(main.app)
 
@@ -30,7 +30,7 @@ client = TestClient(main.app)
 # schema string / field order / event signature fails loudly. Built by concat so the
 # literal 0x+64hex never appears verbatim (the config.py TRANSFER_TOPIC convention).
 SCHEMA_UID_HEX = (
-    "0x" + "09bb2adc79d2da4811efa979147364d5f3b306c5a41f6f4b101e057026f9fe29"
+    "0x" + "80bddc2e0248d8729a0925d8ddfea352196d546b22e1f0dcbfc9ddea6e79fd98"
 )
 ATTESTED_TOPIC0_HEX = (
     "0x" + "8bf46bf4cfd674fa735a3d63ec1c9ad4153f033c290341f3a588b75685141b35"
@@ -39,6 +39,10 @@ ATTEST_SELECTOR = "0xf17325e7"
 
 PAYER = "0x" + "33" * 20
 PAY_TX = "0x" + "11" * 32
+# The delivered payload a seeded order carries + its pinned sha256 (0x + 64 hex) — the
+# contentHash the attester binds into the receipt.
+DELIV_PAYLOAD = "delivered-secret-xyz"
+CONTENT_HASH = "0x" + "c68a06c58ac560c4c5f35f6c7cea9d66897832f46caeea878770e7186e43249a"
 ATTEST_TX = "0x" + "ee" * 32
 ATTEST_TX2 = "0x" + "dd" * 32
 UID = "0x" + "ab" * 32
@@ -117,14 +121,22 @@ def _seed(
     tx_hash=PAY_TX,
     attest_status="pending",
     status="delivered",
+    delivery_payload=DELIV_PAYLOAD,
+    with_delivery=True,
 ):
     sid = make_store(slug=slug, price_micro=1_000_000)
     with SessionLocal() as s:
         store = s.get(Store, sid)
+        product = agentic._active_product(s, sid)
+        # A delivered order carries a Delivery row (the payload the attester hashes) and
+        # the product it bought. A row already past 'pending' has its content hash
+        # recorded (the broadcast intent); a fresh 'pending' row leaves it NULL for the
+        # worker to compute + persist at attest time.
         s.add(
             Order(
                 id=oid,
                 store_id=sid,
+                product_id=product.id if product else None,
                 pay_to=store.pay_to,
                 amount_micro=1_000_000,
                 expected_micro=1_000_123,
@@ -132,9 +144,17 @@ def _seed(
                 from_addr=from_addr,
                 tx_hash=tx_hash,
                 attest_status=attest_status,
+                content_hash=(
+                    None
+                    if attest_status == "pending"
+                    else attest.content_hash_hex(delivery_payload)
+                ),
                 paid_at=checkout._now(),
             )
         )
+        if with_delivery:
+            s.flush()  # the order row must exist before the Delivery FK references it
+            s.add(Delivery(order_id=oid, kind="text", payload=delivery_payload))
         s.commit()
     return sid, oid
 
@@ -168,23 +188,45 @@ def test_attest_selector_is_canonical():
 
 
 def test_payload_encodes_and_round_trips():
-    data = attest.build_attestation_data(PAYER, "acme-store", 1_500_000, PAY_TX)
-    buyer, slug, micro, tx_b = attest.decode_attestation_data(data)
+    data = attest.build_attestation_data(
+        PAYER, "acme-store", 1_500_000, PAY_TX, 42, CONTENT_HASH
+    )
+    buyer, slug, micro, tx_b, product_id, ch_b = attest.decode_attestation_data(data)
     assert buyer.lower() == PAYER.lower()  # checksummed on the way in
     assert slug == "acme-store"
     assert micro == 1_500_000
     assert "0x" + tx_b.hex() == PAY_TX
+    assert product_id == 42  # product identity bound into the receipt
+    assert "0x" + ch_b.hex() == CONTENT_HASH  # sha256 of the delivered content
+
+
+def test_payload_encodes_null_product_as_zero():
+    # A store with no per-product order binds productId 0 (never a crash on None).
+    data = attest.build_attestation_data(
+        PAYER, "acme-store", 1, PAY_TX, None, CONTENT_HASH
+    )
+    _, _, _, _, product_id, _ = attest.decode_attestation_data(data)
+    assert product_id == 0
+
+
+def test_content_hash_hex_is_sha256_of_payload():
+    assert attest.content_hash_hex(DELIV_PAYLOAD) == CONTENT_HASH
 
 
 def test_attest_request_shape_and_recipient_is_buyer():
-    req = attest._attest_request(PAYER, "acme-store", 1_000_123, PAY_TX)
+    req = attest._attest_request(
+        PAYER, "acme-store", 1_000_123, PAY_TX, 7, CONTENT_HASH
+    )
     assert req["schema"] == attest.schema_uid()
     assert req["data"]["recipient"].lower() == PAYER.lower()  # recipient = buyer
     assert req["data"]["revocable"] is True
     assert req["data"]["refUID"] == b"\x00" * 32
     assert req["data"]["value"] == 0
-    buyer, slug, micro, tx_b = attest.decode_attestation_data(req["data"]["data"])
+    buyer, slug, micro, tx_b, product_id, ch_b = attest.decode_attestation_data(
+        req["data"]["data"]
+    )
     assert slug == "acme-store" and micro == 1_000_123 and "0x" + tx_b.hex() == PAY_TX
+    assert product_id == 7 and "0x" + ch_b.hex() == CONTENT_HASH
 
 
 def test_uid_extracted_from_synthetic_attested_log():
@@ -348,6 +390,76 @@ def test_worker_attests_pending_exactly_once(monkeypatch, make_store):
     assert attest.attest_tick() == 0
     assert prep.count == 1 and bcast.count == 1
     assert _attest_status("ordattest0000001") == "attested"
+
+
+def test_worker_binds_product_and_content_hash(monkeypatch, make_store):
+    # The worker hashes the delivered payload at attest time, threads the product id +
+    # content hash into the attestation build, and persists the hash on the order (the
+    # broadcast intent), so the receipt is provably bound to WHAT was delivered.
+    _wire(monkeypatch)
+    captured = {}
+
+    def _cap_prepare(
+        attester,
+        from_addr,
+        slug,
+        expected_micro,
+        tx_hash,
+        product_id,
+        content_hash,
+        nonce=None,
+    ):
+        captured["product_id"] = product_id
+        captured["content_hash"] = content_hash
+        return object(), ATTEST_TX, ATTEST_NONCE if nonce is None else nonce
+
+    monkeypatch.setattr(attest, "_prepare_attestation", _cap_prepare)
+    monkeypatch.setattr(attest, "_broadcast", _Spy(None))
+    monkeypatch.setattr(attest, "_wait_receipt", _Spy(_receipt(1, UID)))
+    sid, oid = _seed(make_store)
+
+    assert attest.attest_tick() == 1
+    with SessionLocal() as s:
+        expected_pid = agentic._active_product(s, sid).id
+    assert captured["product_id"] == expected_pid  # the product the order bought
+    assert captured["content_hash"] == CONTENT_HASH  # sha256 of the delivered payload
+    # the hash is persisted on the order, recorded with the broadcast intent
+    with SessionLocal() as s:
+        assert s.get(Order, oid).content_hash == CONTENT_HASH
+
+
+def test_missing_delivery_marks_failed(monkeypatch, make_store):
+    # No delivered payload to hash => refuse (a receipt must bind to delivered content).
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
+    sid, oid = _seed(make_store, with_delivery=False)
+    attest._attest_one(object(), oid, sid)
+    assert _attest_status(oid) == "failed"
+    assert (
+        prep.count == 0 and bcast.count == 0
+    )  # can't attest without delivered content
+
+
+def test_sending_reconcile_missing_content_hash_fails(monkeypatch, make_store):
+    # A 'sending' row without a recorded content hash can't rebuild its attestation —
+    # fail-closed rather than sign a receipt not bound to the delivered content.
+    prep = _Spy(_prep())
+    bcast = _Spy(None)
+    monkeypatch.setattr(attest, "_prepare_attestation", prep)
+    monkeypatch.setattr(attest, "_broadcast", bcast)
+    monkeypatch.setattr(attest, "_get_receipt", _Spy(None))
+    _seed(make_store, attest_status="sending")
+    with SessionLocal() as s:
+        o = s.get(Order, "ordattest0000001")
+        o.attest_tx = ATTEST_TX
+        o.attest_nonce = ATTEST_NONCE
+        o.content_hash = None  # broadcast intent incomplete
+        s.commit()
+    attest._reconcile_sending(object())
+    assert _attest_status("ordattest0000001") == "failed"
+    assert prep.count == 0 and bcast.count == 0
 
 
 def test_pending_is_claimed_sending_with_nonce_before_broadcast(

@@ -225,7 +225,13 @@ SCHEMA_REGISTRY_ADDR = "0x4200000000000000000000000000000000000020"
 # The Tilla receipt schema. Field ORDER is load-bearing: it defines both the schema
 # UID (keccak of schema+resolver+revocable) and the abi.encode layout of every
 # attestation's data blob. Changing it silently orphans every prior attestation.
-ATTEST_SCHEMA = "address buyer,string storeId,uint256 amountUsdt6,bytes32 paymentTxHash"
+# productId + contentHash bind the receipt to WHAT was delivered — the product identity
+# and a sha256 of the delivered payload — not merely that money moved. Both are appended
+# so the original four fields keep their positions (additive).
+ATTEST_SCHEMA = (
+    "address buyer,string storeId,uint256 amountUsdt6,bytes32 paymentTxHash,"
+    "uint256 productId,bytes32 contentHash"
+)
 # Worker cadence + burst bound (mirrors the webhook loop knobs).
 ATTEST_INTERVAL = float(os.environ.get("TILLA_ATTEST_INTERVAL", "30"))
 # One attestation broadcast per tick: two orders in the same tick would fetch the

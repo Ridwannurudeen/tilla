@@ -689,7 +689,7 @@ def test_migration_0025_additive_and_index_survives(tmp_path):
     r = _alembic(db, "upgrade", "0024_store_visibility")
     assert r.returncode == 0, r.stderr
 
-    # seed a delivered order against the 0024 schema (no reviews table yet)
+    # seed a delivered order against the 0024 schema (no reviews table or content_hash yet)
     con = sqlite3.connect(db)
     con.execute(
         "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
@@ -708,27 +708,36 @@ def test_migration_0025_additive_and_index_survives(tmp_path):
 
     r = _alembic(db, "upgrade", "head")
     assert r.returncode == 0, r.stderr
+    # 0025_reviews created the reviews table; 0026_attest_content_hash added orders.content_hash
     assert "reviews" in _table_names(db)
-
     con = sqlite3.connect(db)
     rddl = con.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='reviews'"
     ).fetchone()[0]
     assert "uq_reviews_order_id" in rddl  # one review per completed order, ever
     assert "ck_reviews_rating" in rddl  # rating bounded 1..5
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "content_hash" in ocols
+    # nullable, no server_default: the existing delivered order stays NULL (never attested)
+    assert (
+        con.execute("SELECT content_hash FROM orders WHERE id='m25ord'").fetchone()[0]
+        is None
+    )
     idx = {
         i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
     }
     assert "ix_reviews_store_id" in idx
-    # a new table never touches orders — the M3 partial unique index is intact
+    # a new table + a native ADD COLUMN never rebuild orders — the M3 partial index is intact
     assert "ux_orders_active_amount" in idx
     con.close()
 
-    # up-down-up: the partial index must survive the downgrade + re-upgrade
+    # up-down-up: both migrations reverse and the partial index survives the round-trip
     r = _alembic(db, "downgrade", "0024_store_visibility")
     assert r.returncode == 0, r.stderr
     assert "reviews" not in _table_names(db)
     con = sqlite3.connect(db)
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "content_hash" not in ocols
     idx = {
         i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
     }
@@ -751,7 +760,7 @@ def test_fresh_schema_has_marketplace_and_receipts():
     assert "screening_receipts" in insp.get_table_names()
     # M11 attestation columns + worker index present on the fresh schema too
     ocols = {c["name"] for c in insp.get_columns("orders")}
-    assert {"attestation_uid", "attest_tx", "attest_status"} <= ocols
+    assert {"attestation_uid", "attest_tx", "attest_status", "content_hash"} <= ocols
     oidx = {i["name"] for i in insp.get_indexes("orders")}
     assert "ix_orders_attest_status" in oidx
     # M13 growth tables + referrer_addr column present on the fresh schema too
