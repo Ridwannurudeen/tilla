@@ -40,6 +40,7 @@ the loop continues, exactly like the sweeper and webhook loops.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 
 from eth_abi import decode as abi_decode
@@ -49,7 +50,7 @@ from sqlalchemy import select, update
 
 from app import checkout, config
 from app.db import SessionLocal
-from app.models import Order, Store, log_event
+from app.models import Delivery, Order, Store, log_event
 
 logger = logging.getLogger("tilla")
 
@@ -172,30 +173,56 @@ def schema_uid() -> bytes:
     return keccak(packed)
 
 
+def content_hash_hex(payload: str) -> str:
+    """The sha256 of the delivered payload as 0x + 64 hex — the bytes32 contentHash bound
+    into the receipt so it attests WHAT was delivered, not just that money moved."""
+    return "0x" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bytes32(hexstr: str) -> bytes:
+    return bytes.fromhex(hexstr[2:] if hexstr.startswith("0x") else hexstr)
+
+
 def build_attestation_data(
-    from_addr: str, slug: str, expected_micro: int, tx_hash: str
+    from_addr: str,
+    slug: str,
+    expected_micro: int,
+    tx_hash: str,
+    product_id: int | None,
+    content_hash: str,
 ) -> bytes:
-    """abi.encode the receipt blob in the schema's field order (load-bearing):
-    (address buyer, string storeId, uint256 amountUsdt6, bytes32 paymentTxHash)."""
+    """abi.encode the receipt blob in the schema's field order (load-bearing): (address
+    buyer, string storeId, uint256 amountUsdt6, bytes32 paymentTxHash, uint256 productId,
+    bytes32 contentHash). productId is 0 for a store with no per-product order;
+    contentHash is :func:`content_hash_hex` of the delivered payload."""
     return abi_encode(
-        ["address", "string", "uint256", "bytes32"],
+        ["address", "string", "uint256", "bytes32", "uint256", "bytes32"],
         [
             to_checksum_address(from_addr),
             slug,
             int(expected_micro),
-            bytes.fromhex(tx_hash[2:] if tx_hash.startswith("0x") else tx_hash),
+            _bytes32(tx_hash),
+            int(product_id or 0),
+            _bytes32(content_hash),
         ],
     )
 
 
-def decode_attestation_data(data: bytes) -> tuple[str, str, int, bytes]:
+def decode_attestation_data(data: bytes) -> tuple[str, str, int, bytes, int, bytes]:
     """Inverse of :func:`build_attestation_data` (used by the golden round-trip test
     and the runbook read-back)."""
-    return abi_decode(["address", "string", "uint256", "bytes32"], data)
+    return abi_decode(
+        ["address", "string", "uint256", "bytes32", "uint256", "bytes32"], data
+    )
 
 
 def _attest_request(
-    from_addr: str, slug: str, expected_micro: int, tx_hash: str
+    from_addr: str,
+    slug: str,
+    expected_micro: int,
+    tx_hash: str,
+    product_id: int | None,
+    content_hash: str,
 ) -> dict:
     """The EAS attest() request tuple for one receipt. recipient = the buyer wallet.
     Takes primitives (not the ORM row) so it is called after the read session closes,
@@ -207,7 +234,9 @@ def _attest_request(
             "expirationTime": 0,
             "revocable": SCHEMA_REVOCABLE,
             "refUID": b"\x00" * 32,
-            "data": build_attestation_data(from_addr, slug, expected_micro, tx_hash),
+            "data": build_attestation_data(
+                from_addr, slug, expected_micro, tx_hash, product_id, content_hash
+            ),
             "value": 0,
         },
     }
@@ -344,12 +373,16 @@ def _prepare_attestation(
     slug: str,
     expected_micro: int,
     tx_hash: str,
+    product_id: int | None,
+    content_hash: str,
     nonce=None,
 ):
     """Build + sign one attestation tx WITHOUT broadcasting. Returns
     ``(signed_tx, tx_hash, nonce)`` — the caller records the nonce, then broadcasts."""
     fn = attester.eas.functions.attest(
-        _attest_request(from_addr, slug, expected_micro, tx_hash)
+        _attest_request(
+            from_addr, slug, expected_micro, tx_hash, product_id, content_hash
+        )
     )
     return _prepare_signed(attester, fn, nonce=nonce)
 
@@ -488,23 +521,30 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
         store = session.get(Store, store_id) if order is not None else None
         if order is None or store is None or order.attest_status != "pending":
             return
-        if not order.from_addr or not order.tx_hash:
+        delivery = session.scalar(select(Delivery).where(Delivery.order_id == order_id))
+        # A receipt binds to WHAT was delivered — refuse without a buyer, a payment tx,
+        # or a delivery payload to hash (fail-closed, never a hollow receipt).
+        if not order.from_addr or not order.tx_hash or delivery is None:
             _claim(order_id, ("pending",), attest_status="failed")
             _log(
                 order_id,
                 store_id,
                 "attest.failed",
-                {"reason": "missing buyer or payment tx"},
+                {"reason": "missing buyer, payment tx, or delivery"},
             )
             return
-        # Capture primitives inside the session — the send happens after it closes.
+        # Capture primitives inside the session — the send happens after it closes. The
+        # content hash is computed here (attest time) from the delivered payload and the
+        # product identity rides order.product_id (0 when the store has no per-product).
         from_addr, slug = order.from_addr, store.slug
         expected_micro, tx_hash = order.expected_micro, order.tx_hash
+        product_id = order.product_id
+        content_hash = content_hash_hex(delivery.payload)
 
     # Build + sign BEFORE any broadcast (gas-over-cap refuses here, leaving it pending).
     try:
         signed, tx, nonce = _prepare_attestation(
-            attester, from_addr, slug, expected_micro, tx_hash
+            attester, from_addr, slug, expected_micro, tx_hash, product_id, content_hash
         )
     except _GasTooHigh as exc:
         logger.warning("attest: order %s refused, gas %s over cap", order_id, exc)
@@ -513,14 +553,16 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
         logger.exception("attest: prepare failed for %s (stays pending)", order_id)
         return
 
-    # Claim pending->sending recording the broadcast intent (tx hash + nonce) BEFORE
-    # broadcasting, so a crash in the send window leaves a reconcilable 'sending' row.
+    # Claim pending->sending recording the broadcast intent (tx hash + nonce + the
+    # content hash we signed over) BEFORE broadcasting, so a crash in the send window
+    # leaves a reconcilable 'sending' row that rebuilds the identical attestation.
     if not _claim(
         order_id,
         ("pending",),
         attest_status="sending",
         attest_tx=tx,
         attest_nonce=nonce,
+        content_hash=content_hash,
     ):
         logger.warning(
             "attest: lost pending->sending claim for %s (already handled)", order_id
@@ -587,6 +629,9 @@ def _reconcile_sending_one(attester: _Attester, order_id: str, store_id: int) ->
         attest_tx, attest_nonce = order.attest_tx, order.attest_nonce
         from_addr, tx_hash = order.from_addr, order.tx_hash
         expected_micro = order.expected_micro
+        # The content hash was recorded with the broadcast intent (pending->sending), so a
+        # same-nonce re-broadcast rebuilds the identical attestation from the stored value.
+        product_id, content_hash = order.product_id, order.content_hash
         slug = store.slug if store is not None else None
     if (
         not attest_tx
@@ -594,6 +639,7 @@ def _reconcile_sending_one(attester: _Attester, order_id: str, store_id: int) ->
         or slug is None
         or not from_addr
         or not tx_hash
+        or not content_hash
     ):
         _claim(order_id, ("sending",), attest_status="failed")
         _log(
@@ -647,7 +693,14 @@ def _reconcile_sending_one(attester: _Attester, order_id: str, store_id: int) ->
     # can ever mine) and keep watching the (possibly new) hash.
     try:
         signed, new_tx, _ = _prepare_attestation(
-            attester, from_addr, slug, expected_micro, tx_hash, nonce=attest_nonce
+            attester,
+            from_addr,
+            slug,
+            expected_micro,
+            tx_hash,
+            product_id,
+            content_hash,
+            nonce=attest_nonce,
         )
         _broadcast(attester, signed)
     except _GasTooHigh as exc:

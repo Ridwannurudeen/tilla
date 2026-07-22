@@ -682,6 +682,62 @@ def test_migration_0013_additive_and_index_survives(tmp_path):
     assert r.returncode == 0, r.stderr
 
 
+def test_migration_0025_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m25.db"
+    r = _alembic(db, "upgrade", "0024_store_visibility")
+    assert r.returncode == 0, r.stderr
+
+    # seed a delivered order against the 0024 schema (no content_hash yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.execute(
+        "INSERT INTO orders (id, store_id, pay_to, amount_micro, expected_micro,"
+        " paid_micro, overpaid_micro, status, created_at)"
+        " VALUES ('m25ord',1,'0xabc',9000000,9000123,9000123,0,'delivered','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "content_hash" in ocols
+    # nullable, no server_default: the existing delivered order stays NULL (never attested)
+    assert (
+        con.execute("SELECT content_hash FROM orders WHERE id='m25ord'").fetchone()[0]
+        is None
+    )
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    # native ADD COLUMN on orders leaves the M3 partial unique index intact
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    r = _alembic(db, "downgrade", "0024_store_visibility")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    ocols = {c[1] for c in con.execute("PRAGMA table_info(orders)")}
+    assert "content_hash" not in ocols
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx  # survives the downgrade rebuild too
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+
+
 def test_fresh_schema_has_marketplace_and_receipts():
     # Fresh create_all (conftest) must match the migrated schema: the new column +
     # table exist on the in-process engine used by the app/tests.
@@ -693,7 +749,7 @@ def test_fresh_schema_has_marketplace_and_receipts():
     assert "screening_receipts" in insp.get_table_names()
     # M11 attestation columns + worker index present on the fresh schema too
     ocols = {c["name"] for c in insp.get_columns("orders")}
-    assert {"attestation_uid", "attest_tx", "attest_status"} <= ocols
+    assert {"attestation_uid", "attest_tx", "attest_status", "content_hash"} <= ocols
     oidx = {i["name"] for i in insp.get_indexes("orders")}
     assert "ix_orders_attest_status" in oidx
     # M13 growth tables + referrer_addr column present on the fresh schema too
