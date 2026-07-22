@@ -67,6 +67,7 @@ FILES=(
   themes/_dashboard.html
   themes/og.svg
   www/index.html
+  www/receipt-demo.html
 )
 
 # Subscription sidecar (Node). node_modules is server-owned (installed via
