@@ -188,6 +188,27 @@
   .card .blocks span:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
   .card-grid{ display:grid; grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);
     gap:clamp(28px,4.5vw,64px); }
+
+  /* ---------- the Product Plate: slug-seeded portrait field, emoji medallion.
+     Same FNV-1a→mulberry32 identity as the hero mosaic — one store, one print. */
+  .plate{ position:relative; overflow:hidden; margin-bottom:clamp(24px,3.5vw,36px);
+    aspect-ratio:4/3; border:1px solid var(--hairline); border-radius:3px;
+    background:var(--bg); }
+  .plate::after{ content:""; position:absolute; inset:10px; pointer-events:none;
+    border:1px solid color-mix(in srgb,var(--text) 14%,transparent); }
+  #plateField{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .plate-emoji{ position:absolute; inset:0; display:grid; place-items:center; }
+  .plate-emoji span{ display:flex; align-items:center; justify-content:center;
+    min-width:clamp(92px,11vw,128px); min-height:clamp(92px,11vw,128px);
+    max-width:86%; padding:10px 16px; text-align:center;
+    font-size:clamp(50px,6vw,70px); line-height:1.1;
+    background:color-mix(in srgb,var(--bg) 80%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 26%,transparent); border-radius:4px;
+    backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px);
+    box-shadow:0 14px 36px color-mix(in srgb,var(--primary) 24%,transparent); }
+  .motion .reveal .plate-emoji span{ opacity:0; transform:scale(.86) translateY(10px);
+    transition:opacity .7s ease-out .15s, transform .7s cubic-bezier(.2,.65,.25,1) .15s; }
+  .motion .reveal.in .plate-emoji span{ opacity:1; transform:none; }
   .card h2{ font-size:clamp(calc(1.9rem * var(--dna-ms2)), calc(4vw * var(--dna-ms2)), calc(3rem * var(--dna-ms2)));
     font-weight:calc(250 + var(--dna-weight)); line-height:1.06;
     letter-spacing:-.025em; color:var(--primary); text-wrap:balance; }
@@ -299,6 +320,10 @@
         <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
         <div class="card-grid">
           <div>
+            <figure class="plate" aria-hidden="true">
+              <canvas id="plateField"></canvas>
+              <div class="plate-emoji"><span>{{EMOJI}}</span></div>
+            </figure>
             <h2>{{PRODUCT_NAME}}</h2>
             <p class="blurb">{{PRODUCT_BLURB}}</p>
           </div>
@@ -391,12 +416,66 @@
     }
     ctx.globalAlpha = 1;
   }
+  /* ---- Product Plate field: the SAME fnv(slug) seed as the mosaic, drawn as a
+     coarser Block Print composition — probability rises toward the frame edges
+     and a calm core is left for the emoji medallion. Density follows the same
+     validated data-texture enum. ---- */
+  var PLATES = {
+    sparse: { cols: 7, fill: 0.34 },
+    medium: { cols: 9, fill: 0.5 },
+    dense: { cols: 12, fill: 0.66 }
+  };
+  var plateParams = Object.prototype.hasOwnProperty.call(PLATES, textureName)
+    ? PLATES[textureName] : PLATES.medium;
+  var plate = document.getElementById("plateField");
+  function drawPlate() {
+    if (!plate) return;
+    var rect = plate.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    plate.width = Math.round(rect.width * dpr);
+    plate.height = Math.round(rect.height * dpr);
+    var ctx = plate.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+    var css = getComputedStyle(document.documentElement);
+    function readColor(name, fb) {
+      var v = css.getPropertyValue(name).trim() || fb;
+      ctx.fillStyle = "#010203"; ctx.fillStyle = v;
+      return (ctx.fillStyle === "#010203" && v !== "#010203") ? fb : v;
+    }
+    var primary = readColor("--primary", "#6C5CE7");
+    var accent = readColor("--accent", "#00D1B2");
+    var tint = readColor("--tint", primary);
+    var colors = [primary, accent, tint];
+    var cols = plateParams.cols;
+    var cell = rect.width / cols;
+    var rows = Math.ceil(rect.height / cell);
+    var rand = mulberry32(fnv(slug));
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var roll = rand(), pick = rand(), alpha = rand(), big = rand();
+        var cx = (x + 0.5) / cols - 0.5, cy = (y + 0.5) / rows - 0.5;
+        if (Math.sqrt(cx * cx + cy * cy) * 2 < 0.42) continue;
+        var edge = Math.max(Math.abs(cx), Math.abs(cy)) * 2;
+        if (roll >= plateParams.fill * (0.35 + 0.65 * edge)) continue;
+        ctx.globalAlpha = 0.14 + alpha * 0.62;
+        ctx.fillStyle = colors[Math.floor(pick * 3) % 3];
+        var span = big < 0.08 ? 2 : 1;
+        ctx.fillRect(x * cell + 1.5, y * cell + 1.5, cell * span - 3, cell * span - 3);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
   var resizeTimer;
   window.addEventListener("resize", function () {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(drawMosaic, 160);
+    resizeTimer = setTimeout(function () { drawMosaic(); drawPlate(); }, 160);
   });
   drawMosaic();
+  drawPlate();
 
   if (reduce) return;
   document.documentElement.classList.add("motion");

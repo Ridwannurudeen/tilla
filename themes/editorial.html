@@ -178,6 +178,37 @@
     margin-top:18px; max-width:34rem; font-size:1.02rem; line-height:1.75;
     color:color-mix(in srgb,var(--text) 74%,transparent);
   }
+  /* the product plate: emoji as subject in a hairline-ruled panel; one fine
+     seeded mark (SVG, drawn by the script below); rule weight follows the
+     texture-driven --rule/--hairline vars the theme already owns */
+  .plate{ margin-bottom:clamp(30px,4vh,48px); }
+  .plate-frame{
+    position:relative; display:grid; place-items:center; aspect-ratio:4/3;
+    border:var(--rule) solid var(--hairline); border-radius:2px;
+    background:var(--tint); overflow:hidden;
+  }
+  .plate-frame::before{
+    content:""; position:absolute; inset:10px; pointer-events:none;
+    border:1px solid color-mix(in srgb,var(--text) 9%,transparent);
+  }
+  .plate-field{ position:absolute; inset:0; width:100%; height:100%; }
+  .plate-field rect{ vector-effect:non-scaling-stroke; }
+  .plate-field .f-ink{
+    fill:none; stroke:color-mix(in srgb,var(--text) 55%,transparent);
+    stroke-width:var(--rule);
+  }
+  .plate-field .f-primary{ fill:var(--primary); }
+  .plate-field .f-accent{ fill:var(--accent); }
+  .plate-emoji{ position:relative; font-size:clamp(3.6rem,11vw,5.6rem); line-height:1; }
+  .plate-caption{
+    display:flex; align-items:baseline; justify-content:space-between; gap:12px;
+    margin-top:12px; font-size:10px; font-weight:500;
+    letter-spacing:.22em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 45%,transparent);
+  }
+  .plate-caption .cap-name{
+    min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
   .offer{
     display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap;
     margin-top:clamp(24px,3vh,34px); padding-top:clamp(24px,3vh,34px);
@@ -293,6 +324,16 @@
         <span class="label">The Purchase</span>
       </div>
       <div class="card">
+        <div class="plate" aria-hidden="true">
+          <div class="plate-frame">
+            <svg class="plate-field" id="plateField" viewBox="0 0 400 300"></svg>
+            <span class="plate-emoji">{{EMOJI}}</span>
+          </div>
+          <div class="plate-caption mono">
+            <span>PL. 03</span>
+            <span class="cap-name">{{STORE_NAME}}</span>
+          </div>
+        </div>
         <h2>{{PRODUCT_NAME}}</h2>
         <p class="blurb">{{PRODUCT_BLURB}}</p>
         <div class="offer">
@@ -312,5 +353,71 @@
     </div>
   </footer>
 </div>
+
+<script>
+(function () {
+  "use strict";
+  /* ---- Product Plate mark: one fine seeded construction behind the brand
+     emoji, seeded from SLUG via the same FNV-1a -> mulberry32 pair as the
+     flagship mosaic, so a store's plate and mosaic share one identity. The
+     slug only ever flows through the hash — never into markup — and the
+     emoji is autoescaped template text this script never touches. ---- */
+  var field = document.getElementById("plateField");
+  if (!field) return;
+  var slug = (typeof SLUG === "string" && SLUG) ? SLUG : "tilla";
+  function fnv(str) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), a | 1);
+      t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 0x100000000;
+    };
+  }
+  /* Design DNA texture -> how many elements compose the single mark
+     ("medium" is the default two-part construction; rule weight already
+     follows the texture-driven --rule var in CSS) */
+  var DETAIL = { sparse: 1, medium: 2, dense: 4 };
+  var textureName = document.body.getAttribute("data-texture");
+  var detail = Object.prototype.hasOwnProperty.call(DETAIL, textureName)
+    ? DETAIL[textureName] : DETAIL.medium;
+  var rand = mulberry32(fnv(slug));
+  var NS = "http://www.w3.org/2000/svg";
+  var g = document.createElementNS(NS, "g");
+  function square(x, y, side, cls, opacity) {
+    var el = document.createElementNS(NS, "rect");
+    el.setAttribute("x", (x - side / 2).toFixed(1));
+    el.setAttribute("y", (y - side / 2).toFixed(1));
+    el.setAttribute("width", side.toFixed(1));
+    el.setAttribute("height", side.toFixed(1));
+    el.setAttribute("class", cls);
+    el.setAttribute("opacity", opacity);
+    g.appendChild(el);
+  }
+  /* rule-of-thirds anchor slots; the centre cell belongs to the emoji */
+  var SLOTS = [[72, 58], [200, 58], [328, 58], [72, 150], [328, 150],
+               [72, 242], [200, 242], [328, 242]];
+  var slot = SLOTS[Math.floor(rand() * SLOTS.length) % SLOTS.length];
+  var cx = slot[0], cy = slot[1];
+  var side = 34 + rand() * 38;
+  var tilt = rand() < 0.5;
+  var flip = rand() < 0.5 ? -1 : 1;
+  square(cx, cy, side, "f-ink", "0.5");
+  if (detail > 1) {
+    square(cx + flip * side / 2, cy - side / 2, side * 0.3, "f-primary", "0.9");
+  }
+  if (detail > 2) {
+    square(cx - flip * side / 2, cy + side / 2, side * 0.22, "f-accent", "0.4");
+    square(cx, cy, side * 0.55, "f-ink", "0.3");
+  }
+  if (tilt) g.setAttribute("transform", "rotate(45 " + cx + " " + cy + ")");
+  field.appendChild(g);
+})();
+</script>
 </body>
 </html>

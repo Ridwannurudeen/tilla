@@ -144,6 +144,22 @@
   .card .blocks span:nth-child(1){ background:var(--primary); }
   .card .blocks span:nth-child(2){ background:var(--accent); }
   .card .blocks span:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
+  /* ---------- Product Plate: brutalist product block. The emoji is the focal
+     subject; behind it a slug-seeded field of BIG solid palette blocks (same
+     FNV-1a -> mulberry32 identity as the flagship mosaic). Zero radius. ---------- */
+  .plate{ position:relative; overflow:hidden; margin:8px 0 clamp(26px,4vw,42px);
+    height:clamp(200px,32vw,300px);
+    border:3px solid var(--text); background:var(--bg);
+    box-shadow:10px 10px 0 var(--accent); }
+  .plate canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .plate-mark{ position:absolute; top:50%; left:50%;
+    transform:translate(-50%,-50%) rotate(-3deg);
+    display:flex; align-items:center; justify-content:center;
+    min-width:clamp(110px,20vw,168px); min-height:clamp(110px,20vw,168px);
+    max-width:86%; padding:10px 16px; overflow:hidden; white-space:nowrap;
+    font-size:clamp(52px,9vw,84px); line-height:1;
+    border:3px solid var(--text); background:var(--bg);
+    box-shadow:8px 8px 0 var(--primary); }
   .card h2{ font-size:clamp(1.8rem,4.5vw,3.2rem); font-weight:700; text-transform:uppercase;
     font-size:clamp(calc(1.8rem*var(--dna-r)),calc(4.5vw*var(--dna-r)),calc(3.2rem*var(--dna-r)));
     font-weight:var(--dna-w);
@@ -272,6 +288,7 @@
     <div class="wrap">
       <div class="card">
         <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="plate" aria-hidden="true"><canvas id="plateField"></canvas><span class="plate-mark">{{EMOJI}}</span></div>
         <h2>{{PRODUCT_NAME}}</h2>
         <p class="blurb">{{PRODUCT_BLURB}}</p>
         <div class="price-row mono"><span class="p">{{PRICE}}</span><span class="u">USDT</span></div>
@@ -289,5 +306,83 @@
     <span>Settled on X Layer · chainId 196</span>
   </div>
 </footer>
+
+<script>
+(function () {
+  "use strict";
+  /* ---- Product Plate field: deterministic BIG-block backdrop, seeded by SLUG
+     with the same FNV-1a -> mulberry32 pair as the flagship mosaic, so a
+     store's plate and mosaic share one generative identity. The slug only
+     ever flows through the hash — never into markup. ---- */
+  function fnv(str) {
+    var h = 2166136261 >>> 0;
+    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), a | 1);
+      t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 0x100000000;
+    };
+  }
+  /* Design DNA texture -> block density: fewer, bigger blocks when sparse;
+     a tighter, louder grid when dense. "medium" is the default look. */
+  var TEXTURES = {
+    sparse: { cols: 3, fill: 0.3 },
+    medium: { cols: 5, fill: 0.42 },
+    dense: { cols: 7, fill: 0.58 }
+  };
+  var textureName = document.body.getAttribute("data-texture");
+  var texture = Object.prototype.hasOwnProperty.call(TEXTURES, textureName)
+    ? TEXTURES[textureName] : TEXTURES.medium;
+  var slug = (typeof SLUG === "string" && SLUG) ? SLUG : "tilla";
+  var plate = document.getElementById("plateField");
+  function drawPlate() {
+    if (!plate) return;
+    var rect = plate.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    plate.width = Math.round(rect.width * dpr);
+    plate.height = Math.round(rect.height * dpr);
+    var ctx = plate.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+    var css = getComputedStyle(document.documentElement);
+    function readColor(name, fb) {
+      var v = css.getPropertyValue(name).trim() || fb;
+      ctx.fillStyle = "#010203"; ctx.fillStyle = v;
+      return (ctx.fillStyle === "#010203" && v !== "#010203") ? fb : v;
+    }
+    var primary = readColor("--primary", "#6C5CE7");
+    var accent = readColor("--accent", "#00D1B2");
+    var tint = readColor("--tint", primary);
+    var colors = [primary, accent, tint];
+    var cell = rect.width / texture.cols;
+    var cols = texture.cols, rows = Math.ceil(rect.height / cell);
+    var rand = mulberry32(fnv(slug));
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    for (var y = 0; y < rows; y++) {
+      for (var x = 0; x < cols; x++) {
+        var roll = rand(), pick = rand(), tone = rand(), big = rand();
+        if (roll >= texture.fill) continue;
+        ctx.globalAlpha = tone < 0.3 ? 0.55 : 1;
+        ctx.fillStyle = colors[Math.floor(pick * 3) % 3];
+        var span = big < 0.12 ? 2 : 1;
+        ctx.fillRect(x * cell, y * cell, cell * span, cell * span);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+  var plateTimer;
+  window.addEventListener("resize", function () {
+    clearTimeout(plateTimer);
+    plateTimer = setTimeout(drawPlate, 160);
+  });
+  drawPlate();
+})();
+</script>
 </body>
 </html>
