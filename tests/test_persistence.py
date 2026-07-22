@@ -749,6 +749,61 @@ def test_migration_0025_additive_and_index_survives(tmp_path):
     assert "reviews" in _table_names(db)
 
 
+def test_migration_0027_additive_and_index_survives(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "m27.db"
+    r = _alembic(db, "upgrade", "0026_attest_content_hash")
+    assert r.returncode == 0, r.stderr
+
+    # seed a store against the 0026 schema (no commission_jobs table yet)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    con.execute(
+        "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme, created_at,"
+        " updated_at) VALUES (1,'s',1,'live','0xabc','original.html','2026','2026')"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    # 0027_commission_jobs created the escrow job table (additive-only)
+    assert "commission_jobs" in _table_names(db)
+    con = sqlite3.connect(db)
+    jddl = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='commission_jobs'"
+    ).fetchone()[0]
+    assert "ck_commission_jobs_status" in jddl  # status bounded to the lifecycle
+    assert "uq_commission_jobs_funded_tx" in jddl  # one deposit tx funds one job ever
+    assert "uq_commission_jobs_released_tx" in jddl  # one release tx completes one job
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ix_commission_jobs_store_id" in idx
+    assert "ix_commission_jobs_buyer_addr" in idx
+    # a new table never rebuilds orders — the M3 partial index is intact
+    assert "ux_orders_active_amount" in idx
+    con.close()
+
+    # up-down-up: the new table reverses and the partial index survives the round-trip
+    r = _alembic(db, "downgrade", "0026_attest_content_hash")
+    assert r.returncode == 0, r.stderr
+    assert "commission_jobs" not in _table_names(db)
+    con = sqlite3.connect(db)
+    idx = {
+        i[0] for i in con.execute("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert "ux_orders_active_amount" in idx  # untouched by the downgrade too
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    assert "commission_jobs" in _table_names(db)
+
+
 def test_fresh_schema_has_marketplace_and_receipts():
     # Fresh create_all (conftest) must match the migrated schema: the new column +
     # table exist on the in-process engine used by the app/tests.

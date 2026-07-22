@@ -736,6 +736,83 @@ class AcpSession(Base):
     )
 
 
+class CommissionJob(Base):
+    """Roadmap Phase 3 A2A commissioned/custom-build job — the escrow pillar. A buyer
+    agent commissions a custom deliverable from a store's provider; the row walks a
+    lifecycle (open -> budget_set -> funded -> submitted -> completed, plus cancelled /
+    disputed terminals) with an OPTIONAL evaluator that gates release. State is tracked
+    here, NOT in any custody: this is the only custodial-adjacent surface in Tilla and
+    it is verify-only.
+
+    NON-CUSTODIAL by construction — no code turns a row here into a fund movement. The
+    two fund-relevant steps are each a VERIFIED on-chain USDT0 transfer the parties sign
+    themselves (the M9 Refund / self_serve pattern): ``funded_tx`` records the buyer's
+    deposit to ``escrow_addr`` (a holding wallet the parties designate; Tilla never holds
+    its keys) and ``released_tx`` records the release from ``escrow_addr`` to the provider
+    (``store.pay_to``). Tilla only verifies each tx landed with the exact ``budget_micro``
+    between the pinned wallets and records the hash — it NEVER sends, holds, or auto-
+    releases. UNIQUE(funded_tx) / UNIQUE(released_tx) make one on-chain transfer usable by
+    a single job ever (the ProcessedTransfer/Refund precedent; SQLite treats the many
+    unfunded NULLs as distinct). Every transition is a race-proof conditional UPDATE (the
+    M3 ``checkout.transition`` idiom), so no step ever runs twice."""
+
+    __tablename__ = "commission_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open','budget_set','funded','submitted','completed',"
+            "'cancelled','disputed')",
+            name="ck_commission_jobs_status",
+        ),
+        CheckConstraint(
+            "budget_micro IS NULL OR budget_micro > 0",
+            name="ck_commission_jobs_budget_positive",
+        ),
+        UniqueConstraint("funded_tx", name="uq_commission_jobs_funded_tx"),
+        UniqueConstraint("released_tx", name="uq_commission_jobs_released_tx"),
+        Index("ix_commission_jobs_store_id", "store_id"),
+        Index("ix_commission_jobs_buyer_addr", "buyer_addr"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # The commissioning buyer's on-chain wallet (lowercased). Authenticates every
+    # buyer-side action and is the pinned ``from`` of the verified deposit tx.
+    buyer_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    # Screened at creation (Warden, fail-closed) BEFORE the row is written.
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    brief: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL until set_budget. Exact micro-USDT both verified transfers must match.
+    budget_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The holding wallet the buyer deposits into and the provider is released from —
+    # designated by the parties, NEVER Tilla (no keys held). Set at set_budget; the
+    # pinned ``to`` of the deposit tx and ``from`` of the release tx.
+    escrow_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # Optional arbiter. When set, ONLY this wallet may authorize release (gates the
+    # submitted -> completed step); NULL leaves release to the buyer.
+    evaluator_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="open", server_default="open"
+    )
+    # The verified deposit / release tx hashes (recorded, never sent). NULL until each
+    # step's on-chain transfer is verified.
+    funded_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # Block of the deposit transfer; the release transfer must not predate it (the M9
+    # refund block floor — a release can never precede the deposit it settles).
+    funded_block: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    released_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # The provider's submitted deliverable reference/note — screened at submit time.
+    deliverable: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+    funded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Plugin(Base):
     """M15.1 provider registry row — the metadata + review-state surface for the
     three formalized extension points (delivery / payment_rail / theme). Built-ins

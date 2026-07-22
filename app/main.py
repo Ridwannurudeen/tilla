@@ -45,6 +45,7 @@ from app import (
     dashboard,
     delivery,
     embed,
+    escrow,
     external_feeds,
     federation,
     growth,
@@ -234,6 +235,11 @@ app.include_router(acp.router)
 # Phase 3 growth-kit: merchant-gated POST/GET /api/stores/{slug}/growth-kit. Additive,
 # no schema change, no fund-moving or external-posting code (persists to event_log).
 app.include_router(growth.router)
+# Roadmap Phase 3 escrow: the A2A commissioned-build job machine under /api/escrow/*.
+# Always mounted, every endpoint 503s until TILLA_ESCROW is set (the ACP/MPP dormant-
+# mount pattern). NON-CUSTODIAL: it tracks state and records verified deposit/release
+# txs — no fund-moving code, Tilla never holds keys or sends funds.
+app.include_router(escrow.router)
 
 
 @app.middleware("http")

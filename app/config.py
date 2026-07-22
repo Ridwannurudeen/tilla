@@ -323,6 +323,19 @@ GROWTH_SCHED_INTERVAL = float(os.environ.get("TILLA_GROWTH_SCHED_INTERVAL", "864
 GROWTH_SCHED_STORE_DAILY_MAX = int(os.environ.get("TILLA_GROWTH_STORE_DAILY_MAX", "6"))
 GROWTH_DAILY_MAX = int(os.environ.get("TILLA_GROWTH_DAILY_MAX", "50"))
 
+# ---------- Roadmap Phase 3: A2A commissioned-build escrow — DORMANT by default --
+# A buyer agent commissions a custom deliverable; the CommissionJob walks a lifecycle
+# (open -> budget_set -> funded -> submitted -> completed, + cancelled/disputed) with
+# buyer protection and an optional evaluator that gates release. This is Tilla's only
+# custodial-ADJACENT surface, so it is opt-in and phase-gated OFF: every /api/escrow/*
+# endpoint 503s until TILLA_ESCROW is flipped (the MPP/ACP dormant-mount pattern).
+# NON-CUSTODIAL (INV, above all): Tilla holds no keys, sends no funds, and never auto-
+# releases. The two fund-relevant transitions (funded, completed) are each driven by
+# VERIFYING a user-signed on-chain USDT0 transfer and RECORDING its tx hash — the exact
+# self_serve/refunds verify-only pattern. The state machine only tracks state; no fund-
+# moving code exists here, so flipping the flag exposes a tracker, never a spender.
+ESCROW_ENABLED = _flag("TILLA_ESCROW")
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
 
