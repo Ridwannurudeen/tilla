@@ -88,7 +88,7 @@ _AGENT_HEADERS = {
 # The one path the agent-guard middleware + resolvers key off. ':slug' in the x402
 # route pattern compiles to the same [^/]+ (no cross-slash match); the optional
 # trailing slash is tolerated here though FastAPI's route never forwards one.
-_BUY_PATH_RE = re.compile(r"^/s/([a-z0-9][a-z0-9-]{0,39})/buy/?$")
+_BUY_PATH_RE = re.compile(r"^/s/([a-z0-9][a-z0-9-]{0,39})/buy(?:/([0-9]{1,18}))?/?$")
 
 # The reaper voids agent orders stuck in the provisional 'settling' status (a
 # crash or lost settle between the deliver-commit and the settle-confirm: the goods
@@ -131,6 +131,31 @@ def _active_product(session: Session, store_id: int) -> Product | None:
         select(Product)
         .where(Product.store_id == store_id, Product.active.is_(True))
         .order_by(Product.id)
+    )
+
+
+def _product_id_from_path(path: str) -> int | None:
+    """The product id in a ``/s/<slug>/buy/<id>`` path, or None for a bare
+    ``/buy`` (primary product)."""
+    m = _BUY_PATH_RE.match(path)
+    return int(m.group(2)) if m and m.group(2) else None
+
+
+def _product_for_path(session: Session, store: Store, path: str) -> Product | None:
+    """The product a ``/buy`` path targets: the ``/buy/<id>`` product — validated
+    to be an ACTIVE product of THIS store — or the primary product for a bare
+    ``/buy``. Returns None if the path names an id that isn't an active product of
+    the store (so the resolvers fall back to the sentinel and the handler 404s
+    BEFORE settle, exactly like an unknown store)."""
+    pid = _product_id_from_path(path)
+    if pid is None:
+        return _active_product(session, store.id)
+    return session.scalar(
+        select(Product).where(
+            Product.id == pid,
+            Product.store_id == store.id,
+            Product.active.is_(True),
+        )
     )
 
 
@@ -273,7 +298,7 @@ def resolve_price(path: str) -> AssetAmount:
             store = _live_store(session, slug)
             if store is None:
                 return _sentinel_price()
-            product = _active_product(session, store.id)
+            product = _product_for_path(session, store, path)
             if product is None:
                 return _sentinel_price()
             return AssetAmount(
@@ -413,14 +438,13 @@ def fulfill_agent_order(
     return order, _agent_buy_body(session, order, store, product)
 
 
-@router.post("/s/{slug}/buy")
-@limiter.limit("60/minute")
-def agent_buy(
-    request: Request,
-    slug: str = Path(..., pattern=config.SLUG_PATTERN),
-    session: Session = Depends(get_session),
-    ref: str | None = None,
-):
+def _do_agent_buy(
+    request: Request, session: Session, slug: str, ref: str | None
+) -> JSONResponse:
+    """Shared body for POST /s/{slug}/buy and /s/{slug}/buy/{product_id}. The
+    product is resolved from the request PATH (bare /buy = primary; /buy/{id} =
+    that product), the SAME resolution ``resolve_price`` used to build the 402
+    challenge — so the price the agent paid always equals what is charged here."""
     # FAIL CLOSED: no verified payment (middleware absent — OKX_API_KEY unset — or
     # payment not provided) → 402. Goods are never served free.
     payload = getattr(request.state, "payment_payload", None)
@@ -429,8 +453,7 @@ def agent_buy(
     # M13 affiliate attribution: the ?ref= query param survives the 402->paid-retry
     # roundtrip. Validate BEFORE settlement so a malformed ref makes this handler
     # return >=400 (middleware skips settle, zero funds move) rather than settling a
-    # sale that can never be attributed. The query string is path-independent, so the
-    # path-keyed x402 middleware is untouched.
+    # sale that can never be attributed.
     try:
         referrer_addr = affiliates.normalize_ref(ref)
     except affiliates.RefRejected as exc:
@@ -439,13 +462,16 @@ def agent_buy(
     # a sentinel challenge got paid), return >=400 so the middleware SKIPS
     # settlement — the signed authorization is never executed, zero funds move.
     store = _require_live_store(session, slug)
-    product = _active_product(session, store.id)
+    product = _product_for_path(session, store, request.url.path)
     if product is None:
-        raise HTTPException(409, "store has no active product")
+        # >=400 BEFORE settle -> middleware skips settle, zero funds move. A bare
+        # /buy with no active product is 409; a /buy/{id} that names something that
+        # isn't an active product of THIS store is 404 (no wrong charge, no IDOR).
+        if _product_id_from_path(request.url.path) is None:
+            raise HTTPException(409, "store has no active product")
+        raise HTTPException(404, "product not found")
     # Pay-time HARD GATE: an aggr_deferred payment against a non-batch product is
-    # refused BEFORE settlement. A >=400 here makes the payment middleware skip
-    # settle, so the signed authorization is never executed and zero funds move —
-    # the same funds-safe pattern as the dead-store re-check above.
+    # refused BEFORE settlement (same funds-safe >=400-skips-settle pattern).
     if (
         _payment_scheme(request) == PAYMENT_SCHEME_AGGR_DEFERRED
         and (product.pricing_model or "one_time") != "batch"
@@ -468,6 +494,29 @@ def agent_buy(
     return JSONResponse(body)
 
 
+@router.post("/s/{slug}/buy")
+@limiter.limit("60/minute")
+def agent_buy(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+    ref: str | None = None,
+):
+    return _do_agent_buy(request, session, slug, ref)
+
+
+@router.post("/s/{slug}/buy/{product_id}")
+@limiter.limit("60/minute")
+def agent_buy_product(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    product_id: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+    ref: str | None = None,
+):
+    return _do_agent_buy(request, session, slug, ref)
+
+
 @router.get("/s/{slug}/buy")
 def agent_buy_get(
     request: Request,
@@ -479,6 +528,22 @@ def agent_buy_get(
     BEFORE settle: a >=400 response makes the payment middleware skip settlement, so
     zero funds can move on the GET method and no Order row is ever created. Buying is
     POST-only."""
+    return JSONResponse(
+        {"error": "method not allowed; use POST to buy"},
+        status_code=405,
+        headers={"Allow": "POST", **_AGENT_HEADERS},
+    )
+
+
+@router.get("/s/{slug}/buy/{product_id}")
+def agent_buy_product_get(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    product_id: int = Path(..., ge=1),
+):
+    """Per-product GET twin of ``agent_buy_get``: a PAID GET is refused 405 BEFORE
+    settle so zero funds can move on the GET method; an UNPAID GET returns the 402
+    challenge for the specific product via the paywall."""
     return JSONResponse(
         {"error": "method not allowed; use POST to buy"},
         status_code=405,
@@ -918,7 +983,7 @@ def _tool_get_product(
         "deliverable_kind": deliverable.kind if deliverable else "text",
         "pricing": _pricing_block(product),
         "x402": {
-            "endpoint": f"/s/{slug}/buy",
+            "endpoint": f"/s/{slug}/buy/{product.id}",
             "network": NETWORK,
             "asset": ASSET,
             "schemes": enabled_schemes(product),
@@ -1102,7 +1167,7 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
         "availability": "in_stock",
         "pricing": _pricing_block(product),
         "x402": {
-            "endpoint": f"/s/{slug}/buy",
+            "endpoint": f"/s/{slug}/buy/{product.id}",
             "network": NETWORK,
             "asset": ASSET,
             "schemes": enabled_schemes(product),

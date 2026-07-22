@@ -106,7 +106,7 @@ def test_feed_validates_against_pinned_schema():
     assert body["store"]["slug"] == "feedshop"
     p = body["products"][0]
     assert p["price"] == {"amount": "9.5", "currency": "USDT"}
-    assert p["x402"]["endpoint"] == "/s/feedshop/buy"
+    assert p["x402"]["endpoint"] == f"/s/feedshop/buy/{p['id']}"
     assert p["x402"]["asset"] == config.USDT0
 
 
@@ -203,7 +203,7 @@ def test_mcp_tools_call_list_and_get_product():
         "mcp4", "tools/call", {"name": "get_product", "arguments": {"product_id": pid}}
     ).json()["result"]
     sc = gp["structuredContent"]
-    assert sc["x402"]["endpoint"] == "/s/mcp4/buy"
+    assert sc["x402"]["endpoint"] == f"/s/mcp4/buy/{pid}"
     assert sc["network"] == "eip155:196"
 
 

@@ -74,7 +74,7 @@ properties:
           properties:
             endpoint:
               type: string
-              pattern: "^/s/[a-z0-9][a-z0-9-]{0,39}/buy$"
+              pattern: "^/s/[a-z0-9][a-z0-9-]{0,39}/buy(/[0-9]+)?$"
             network:
               type: string
               const: "eip155:196"

@@ -1538,6 +1538,12 @@ if os.getenv("OKX_API_KEY"):
         # (listing-review robustness); a PAID GET reaches agentic.agent_buy_get and
         # is refused 405 BEFORE settle, so zero funds can move on the GET method.
         "GET /s/:slug/buy": _store_route,
+        # Per-product buy: same dynamic resolvers (resolve_price/resolve_pay_to read
+        # the product id from the path), so an agent can x402-buy ANY product, not
+        # just the primary. POST + GET registered for the same reasons as the bare
+        # buy route above.
+        "POST /s/:slug/buy/:product_id": _store_route,
+        "GET /s/:slug/buy/:product_id": _store_route,
     }
     app.add_middleware(PaymentMiddlewareASGI, routes=_paid, server=_srv)
     # Registered AFTER the payment middleware so it is OUTERMOST (runs first): it

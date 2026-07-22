@@ -63,7 +63,7 @@ def _openai_product(
         "enable_search": True,
         "enable_checkout": True,
         "x402": {
-            "endpoint": f"/s/{store.slug}/buy",
+            "endpoint": f"/s/{store.slug}/buy/{product.id}",
             "network": agentic.NETWORK,
             "asset": agentic.ASSET,
             "schemes": agentic.enabled_schemes(product),
