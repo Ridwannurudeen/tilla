@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 import app.main as main
-from app import chain, checkout, config, delivery
+from app import chain, checkout, config, delivery, payment
 from app.db import SessionLocal
 from app.models import (
     ChainCursor,
@@ -102,8 +102,15 @@ def _order(slug):
 
 
 def _seed_cursor(last_block):
+    # Per-chain cursor keyed by chain_id (18.2): the canonical X Layer ledger is 196.
     with SessionLocal() as s:
-        s.merge(ChainCursor(id=1, last_block=last_block, updated_at=checkout._now()))
+        s.merge(
+            ChainCursor(
+                id=payment.CANONICAL_CHAIN.chain_id,
+                last_block=last_block,
+                updated_at=checkout._now(),
+            )
+        )
         s.commit()
 
 
@@ -216,7 +223,9 @@ def test_sweeper_windows_never_exceed_101_blocks(make_store):
     for frm, to in rpc.getlogs_calls:
         assert to - frm + 1 <= 101  # inclusive span cap
     with SessionLocal() as s:
-        assert s.get(ChainCursor, 1).last_block == 497  # 500 - CONFIRMATIONS
+        assert (
+            s.get(ChainCursor, payment.CANONICAL_CHAIN.chain_id).last_block == 497
+        )  # 500 - CONFIRMATIONS
 
     before = len(rpc.getlogs_calls)
     checkout.sweep_tick()  # nothing new -> no further getLogs

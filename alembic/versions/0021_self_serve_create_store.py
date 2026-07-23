@@ -13,8 +13,8 @@ is generated with their wallet as the receive address.
 No existing table is touched, so the M3 partial unique index ux_orders_active_amount
 is provably untouched (create_table only). Downgrade drops the table.
 
-Revision ID: 0010_self_serve_create_store
-Revises: 0009_growth
+Revision ID: 0021_self_serve_create_store
+Revises: 0020_settle_ref
 Create Date: 2026-07-22
 """
 
@@ -25,8 +25,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0010_self_serve_create_store"
-down_revision: Union[str, None] = "0009_growth"
+revision: str = "0021_self_serve_create_store"
+down_revision: Union[str, None] = "0020_settle_ref"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

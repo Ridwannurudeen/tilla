@@ -17,9 +17,9 @@ from x402.http.utils import (
 from x402.schemas import PaymentPayload, PaymentRequired, PaymentRequirements
 
 import app.main as main  # noqa: F401 — ensures app + limiter wired for direct calls
-from app import agentic, config
+from app import agentic, checkout, config
 from app.db import SessionLocal
-from app.models import Product, Store
+from app.models import Order, Product, Store
 from app.payment import (
     build_store_payment_option,
     build_store_payment_options,
@@ -282,3 +282,418 @@ def test_aggr_deferred_with_real_tx_flips_delivered(make_store):
         assert s.get(Order, oid).status == "delivered"
         assert s.get(Order, oid).tx_hash == "0x" + "d" * 64
     assert "agent_order.settled" in _events(oid)
+
+
+# ------------------------ get_settle_status reconciliation poller (M8 blocker) ------
+from app import reconcile  # noqa: E402
+
+
+class _FakeStatusClient:
+    """Stands in for the OKX sync facilitator client — no network. Records the
+    reference it was polled with and returns a canned SettleStatusResponse."""
+
+    def __init__(self, resp):
+        self._resp = resp
+        self.queried: list[str] = []
+
+    def get_settle_status(self, tx_hash: str):
+        self.queried.append(tx_hash)
+        return self._resp
+
+
+def _status(**kw):
+    from x402.schemas.responses import SettleStatusResponse
+
+    return SettleStatusResponse(**kw)
+
+
+def _pending_settling_order(make_store, slug: str, ref: str = "0x" + "e" * 64) -> str:
+    """A batch order held 'settling' after a deferred settle returned success with a
+    PENDING (unconfirmed) aggregated reference — the state the poller finalizes."""
+    from x402.http.utils import encode_payment_response_header
+    from x402.schemas import SettleResponse
+
+    oid = _batch_settling_order(make_store, slug)
+    header = encode_payment_response_header(
+        SettleResponse(
+            success=True, transaction=ref, status="pending", network="eip155:196"
+        )
+    )
+    agentic.record_settlement(oid, header, "aggr_deferred")
+    return oid
+
+
+def test_pending_settle_captures_ref_and_stays_settling(make_store):
+    # A deferred settle marked 'pending' (aggregated tx not yet confirmed) must NOT
+    # flip to delivered — it stays settling, records the pollable ref, logs pending.
+    oid = _pending_settling_order(make_store, "rp0")
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "settling"
+        assert o.settle_ref == "0x" + "e" * 64
+        assert o.tx_hash is None
+    events = _events(oid)
+    assert "agent_order.settle_pending" in events
+    assert "agent_order.settled" not in events
+
+
+def test_reconcile_confirmed_tx_flips_delivered(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp1")
+    client = _FakeStatusClient(
+        _status(
+            success=True,
+            status="success",
+            transaction="0x" + "c" * 64,
+            network="eip155:196",
+        )
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 1
+    assert client.queried == ["0x" + "e" * 64]
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash == "0x" + "c" * 64
+    assert "agent_order.settled" in _events(oid)
+
+
+def test_reconcile_pending_leaves_settling(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp2")
+    client = _FakeStatusClient(_status(success=True, status="pending"))
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "settling"
+        assert o.tx_hash is None
+    assert "agent_order.settled" not in _events(oid)
+
+
+def test_reconcile_success_without_tx_never_delivers(make_store, monkeypatch):
+    # Never deliver without a confirmed tx hash, even on a 'success' status.
+    oid = _pending_settling_order(make_store, "rp3")
+    client = _FakeStatusClient(
+        _status(success=True, status="success", transaction=None)
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+
+def test_reconcile_failed_voids(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp4")
+    client = _FakeStatusClient(
+        _status(success=False, status="failed", error_reason="reverted")
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 1
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "canceled"
+    events = _events(oid)
+    assert "agent_order.settle_reconcile_failed" in events
+    assert "agent_order.settled" not in events
+
+
+def test_reconcile_missing_status_does_not_void(make_store, monkeypatch):
+    # A facilitator response with success=False but NO explicit "failed" status
+    # (e.g. status omitted on a transient error) must NOT void a paid order — only
+    # an explicit "failed" is definitive. Stays settling, retried next tick.
+    oid = _pending_settling_order(make_store, "rpns")
+    client = _FakeStatusClient(_status(success=False, status=None))
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+    assert "agent_order.settle_reconcile_failed" not in _events(oid)
+
+
+def test_reaper_exempts_aggr_deferred_orders(make_store, monkeypatch):
+    # A poller-owned aggr order (settle_ref set) whose aggregated tx confirms slowly
+    # must NOT be reaped by the 15-min reaper — that would void a genuinely-paid
+    # order without refund. The reaper skips settle_ref-bearing orders.
+    import datetime
+
+    oid = _pending_settling_order(make_store, "rpreap")
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        # Age it well past the reap window.
+        o.paid_at = checkout._now() - datetime.timedelta(hours=2)
+        s.commit()
+        reaped = agentic.reap_agent_orders(s)
+        s.commit()
+        assert reaped == 0
+        assert s.get(Order, oid).status == "settling"  # left for the poller
+
+
+def test_reconcile_idempotent_double_tick(make_store, monkeypatch):
+    oid = _pending_settling_order(make_store, "rp5")
+    client = _FakeStatusClient(
+        _status(
+            success=True,
+            status="success",
+            transaction="0x" + "a" * 64,
+            network="eip155:196",
+        )
+    )
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 1
+    # A delivered order has left 'settling', so the second tick never re-selects it —
+    # no re-delivery, no duplicate settled event.
+    assert reconcile.reconcile_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "delivered"
+    assert _events(oid).count("agent_order.settled") == 1
+
+
+def test_reconcile_skips_orders_without_settle_ref(make_store, monkeypatch):
+    # An order with no captured ref is never polled (the poller only touches rows
+    # carrying settle_ref) — a no-tx settle stays for the reaper, not the poller.
+    oid = _batch_settling_order(make_store, "rp6")
+    agentic.record_settlement(oid, "not-a-decodable-header", "aggr_deferred")
+    client = _FakeStatusClient(_status(success=True, status="success"))
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: client)
+    assert reconcile.reconcile_tick() == 0
+    assert client.queried == []
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+
+def test_reconcile_dormant_without_client(make_store, monkeypatch):
+    _pending_settling_order(make_store, "rp7")
+    monkeypatch.setattr(reconcile, "_client_factory", lambda: None)
+    # No client (no creds) => idle, zero network, nothing acted on.
+    assert reconcile.reconcile_tick() == 0
+
+
+# --------------- CHAIN settlement detection (facilitator gives no tx ref) ----------
+# The live OKX case: /settle serves 200 with an EMPTY transaction, so settlement is
+# only observable on-chain — a USDT0 Transfer from buyer -> merchant whose tx was
+# submitted by the facilitator RELAYER, batched (N orders -> one summed transfer).
+import json  # noqa: E402
+
+import httpx  # noqa: E402
+import respx  # noqa: E402
+
+from app import chain  # noqa: E402
+
+RELAYER = config.AGGR_FACILITATOR_RELAYER
+
+
+class _ChainRpc:
+    """respx-mocked X Layer JSON-RPC: a head, USDT0 Transfer logs, and receipts (with
+    the tx `to` = submitter). Mirrors tests/test_checkout.Rpc."""
+
+    def __init__(self, head, logs=None, receipts=None):
+        self.head = head
+        self.logs = logs or []
+        self.receipts = receipts or {}
+
+    def handler(self, request):
+        body = json.loads(request.content)
+        method, params = body["method"], body["params"]
+        if method == "eth_blockNumber":
+            result = hex(self.head)
+        elif method == "eth_getLogs":
+            frm = int(params[0]["fromBlock"], 16)
+            to = int(params[0]["toBlock"], 16)
+            tos = {a.lower() for a in params[0]["topics"][2]}
+            result = [
+                lg
+                for lg in self.logs
+                if frm <= int(lg["blockNumber"], 16) <= to
+                and lg["topics"][2].lower() in tos
+            ]
+        elif method == "eth_getTransactionReceipt":
+            result = self.receipts.get(params[0].lower())
+        else:
+            result = None
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    def install(self):
+        respx.post(config.RPC_URL).mock(side_effect=self.handler)
+
+
+def _transfer_log(frm, to, value, block, tx, log_index=0):
+    return {
+        "address": config.USDT0,
+        "topics": [
+            config.TRANSFER_TOPIC,
+            chain.pad_address(frm),
+            chain.pad_address(to),
+        ],
+        "data": hex(value),
+        "transactionHash": tx,
+        "logIndex": hex(log_index),
+        "blockNumber": hex(block),
+    }
+
+
+def _receipt(to, status="0x1"):
+    return {"status": status, "to": to}
+
+
+def _chain_settling_order(make_store, slug, price=1_000_000, pay_to="0x" + "a" * 40):
+    """A batch order held 'settling' after the live empty-tx settle (settle_ref NULL)."""
+    make_store(slug=slug, price_micro=price, pay_to=pay_to)
+    _set_pricing(slug, "batch")
+    with SessionLocal() as s:
+        agentic.agent_buy(_paid_request(slug, "aggr_deferred"), slug, s)
+    # The live path: /settle 200 with no decodable tx leaves it settling, ref NULL.
+    with SessionLocal() as s:
+        return s.scalar(select(Order)).id
+
+
+@respx.mock
+def test_chain_reconcile_flips_delivered_on_facilitator_transfer(
+    make_store, monkeypatch
+):
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "ch1", price=1_000_000)
+    tx = "0x" + "1" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, 900, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 1
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash == tx
+        assert o.settle_ref == tx
+    assert "agent_order.settled" in _events(oid)
+
+
+@respx.mock
+def test_chain_reconcile_batches_one_transfer_to_two_orders(make_store, monkeypatch):
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    make_store(slug="ch2", price_micro=1_000_000, pay_to="0x" + "a" * 40)
+    _set_pricing("ch2", "batch")
+    ids = []
+    for i in range(2):
+        nonce = "0x" + f"{i:064x}"
+        req = _buy_request("ch2")
+        req.state.payment_payload = PaymentPayload(
+            x402_version=2,
+            payload={"authorization": {"nonce": nonce, "from": PAYER}},
+            accepted=_reqs("aggr_deferred"),
+        )
+        req.state.payment_requirements = _reqs("aggr_deferred")
+        with SessionLocal() as s:
+            agentic.agent_buy(req, "ch2", s)
+    with SessionLocal() as s:
+        ids = [o.id for o in s.scalars(select(Order).order_by(Order.created_at)).all()]
+    assert len(ids) == 2
+    # ONE transfer of the SUM (2.0) settles BOTH 1.0 orders.
+    tx = "0x" + "2" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 2_000_000, 900, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 2
+    with SessionLocal() as s:
+        for oid in ids:
+            o = s.get(Order, oid)
+            assert o.status == "delivered"
+            assert o.settle_ref == tx
+
+
+@respx.mock
+def test_chain_reconcile_ignores_non_relayer_transfer(make_store, monkeypatch):
+    # A direct buyer->merchant transfer NOT submitted by the facilitator relayer is
+    # not a settlement — the order must stay settling (no false positive).
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "ch3", price=1_000_000)
+    tx = "0x" + "3" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, 900, tx)],
+        receipts={tx: _receipt("0x" + "9" * 40)},  # tx.to != relayer
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+
+@respx.mock
+def test_chain_reconcile_ignores_wrong_from(make_store, monkeypatch):
+    # A facilitator-relayed transfer to pay_to but from a DIFFERENT buyer does not
+    # settle this order.
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "ch4", price=1_000_000)
+    tx = "0x" + "4" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log("0x" + "5" * 40, "0x" + "a" * 40, 1_000_000, 900, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+
+@respx.mock
+def test_chain_reconcile_idempotent_double_tick(make_store, monkeypatch):
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "ch5", price=1_000_000)
+    tx = "0x" + "6" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, 900, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 1
+    # Delivered order has left 'settling'; a re-scan of the same tx never re-settles.
+    assert reconcile.reconcile_chain_tick() == 0
+    assert _events(oid).count("agent_order.settled") == 1
+
+
+def test_chain_reconcile_dormant_when_flag_off(make_store, monkeypatch):
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", False)
+    _chain_settling_order(make_store, "ch6", price=1_000_000)
+    # Flag off => no candidate query, zero RPC (no respx mock installed, would error).
+    assert reconcile.reconcile_chain_tick() == 0
+
+
+def test_reap_tick_skips_when_chain_unreachable(make_store, monkeypatch):
+    # A live aggr_deferred order sits settling with settle_ref NULL until the chain
+    # reconciler finds the facilitator transfer. If the chain is unreachable the reaper
+    # must NOT void it (fail-closed) — else an RPC outage spanning the 15-min window
+    # would claw back a genuinely-paid order.
+    import datetime
+
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "reapguard1", price=1_000_000)
+    with SessionLocal() as s:
+        s.get(Order, oid).paid_at = checkout._now() - datetime.timedelta(hours=2)
+        s.commit()
+    monkeypatch.setattr(reconcile, "chain_reachable", lambda: False)
+    agentic._reap_tick()
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+
+def test_reap_tick_voids_stuck_order_when_chain_reachable(make_store, monkeypatch):
+    # Chain reachable + reconciler finds no facilitator transfer => a genuinely stuck
+    # order (never settled on-chain) is still voided by the reaper as before.
+    import datetime
+
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "reapguard2", price=1_000_000)
+    with SessionLocal() as s:
+        s.get(Order, oid).paid_at = checkout._now() - datetime.timedelta(hours=2)
+        s.commit()
+    monkeypatch.setattr(reconcile, "chain_reachable", lambda: True)
+    monkeypatch.setattr(reconcile, "reconcile_chain_tick", lambda: 0)
+    agentic._reap_tick()
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "canceled"

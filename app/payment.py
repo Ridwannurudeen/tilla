@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -11,6 +13,10 @@ import httpx
 from x402.http import OKXFacilitatorClient, PaymentOption
 from x402.http.types import HTTPRequestContext
 from x402.schemas import AssetAmount
+
+from app import config
+
+logger = logging.getLogger("tilla")
 
 PAYMENT_PROTOCOL = "x402-v2"
 PAYMENT_FACILITATOR = "okx"
@@ -21,7 +27,7 @@ PAYMENT_SCHEME = "exact"
 PAYMENT_SCHEME_AGGR_DEFERRED = "aggr_deferred"
 PAYMENT_NETWORK = "eip155:196"
 PAYMENT_ASSET = "0x779ded0c9e1022225f8e0630b35a9b54be713736"
-PAYMENT_AMOUNT = "1000000"
+PAYMENT_AMOUNT = "50000"
 PAYMENT_EIP712_NAME = "USD₮0"
 PAYMENT_EIP712_VERSION = "1"
 PAYMENT_SYMBOL = "USDT"
@@ -29,6 +35,158 @@ PAYMENT_DECIMALS = 6
 PAYMENT_DISPLAY_PRICE = "1 USDT"
 PAYMENT_TIMEOUT_SECONDS = 300
 DEFAULT_FACILITATOR_URL = "https://web3.okx.com"
+
+
+@dataclass(frozen=True)
+class ChainConfig:
+    """One settlement chain's pinned constants. The registry below is the single
+    source every rail/verification path reads instead of scattered module +
+    ``config`` constants, so an order's chain is fixed at creation and a receipt
+    from any other chain can never confirm it."""
+
+    chain_id: int
+    caip2: str
+    rpc_url: str
+    ws_url: str
+    asset: str
+    asset_symbol: str
+    decimals: int
+    eip712_name: str
+    eip712_version: str
+    explorer_tx_base: str
+    canonical: bool
+
+
+# EXACTLY ONE entry — X Layer 196, the canonical USDT0 settlement ledger (INV-2),
+# built from today's constants (``PAYMENT_*`` + ``config.RPC_URL/USDT0/
+# OKLINK_TX_BASE``; ``PAYMENT_ASSET`` and ``config.USDT0`` are the same address).
+# A SECOND chain is 18.2 — gated on the read-only ``/supported`` probe listing
+# ``(exact, <caip2>)`` before an entry is added (never advertise an unsettleable
+# rail, the M8 lesson / INV-1). The commented shape below documents the schema for
+# that future entry; it MUST stay commented until the probe confirms the chain.
+CHAINS: dict[str, ChainConfig] = {
+    PAYMENT_NETWORK: ChainConfig(
+        chain_id=196,
+        caip2=PAYMENT_NETWORK,
+        rpc_url=config.RPC_URL,
+        ws_url="wss://ws.xlayer.tech",
+        asset=PAYMENT_ASSET,
+        asset_symbol=PAYMENT_SYMBOL,
+        decimals=PAYMENT_DECIMALS,
+        eip712_name=PAYMENT_EIP712_NAME,
+        eip712_version=PAYMENT_EIP712_VERSION,
+        explorer_tx_base=config.OKLINK_TX_BASE,
+        canonical=True,
+    ),
+    # "eip155:8453": ChainConfig(
+    #     chain_id=8453,
+    #     caip2="eip155:8453",
+    #     rpc_url="https://…",
+    #     ws_url="wss://…",
+    #     asset="0x…",
+    #     asset_symbol="USDC",
+    #     decimals=6,
+    #     eip712_name="USD Coin",
+    #     eip712_version="2",
+    #     explorer_tx_base="https://…/tx/",
+    #     canonical=False,
+    # ),
+}
+
+CANONICAL_CHAIN: ChainConfig = CHAINS[PAYMENT_NETWORK]
+
+
+def chain_for(network: str) -> ChainConfig:
+    """The pinned :class:`ChainConfig` an order was created on, resolved from its
+    recorded ``network``. Verification uses ONLY this chain's RPC + asset. Raises
+    ``KeyError`` for an unknown network — never falls back to the canonical chain,
+    because silently re-pointing an order to a different ledger is exactly the
+    wrong-chain fund loss the registry exists to prevent."""
+    return CHAINS[network]
+
+
+# ---------- 18.2 /supported probe snapshot + per-chain accepts gate ----------
+# The read-only startup probe result: the set of ``(scheme, network)`` pairs the OKX
+# facilitator advertised at boot (``GET /api/v6/pay/x402/supported``). ``None`` until
+# the probe runs; a probe FAILURE caches an EMPTY snapshot (probe failure ⇒ 196-only,
+# never a crash — see :func:`probe_supported`). A non-canonical chain enters the
+# accepts list ONLY when this snapshot lists ``(exact, its caip2)`` AND its flag is on
+# (INV-1, the M8 lesson: never advertise an unsettleable rail).
+_SUPPORTED_SNAPSHOT: frozenset[tuple[str, str]] | None = None
+
+
+def set_supported_snapshot(kinds) -> frozenset[tuple[str, str]]:
+    """Cache the ``(scheme, network)`` pairs for the process. ``kinds`` is either a
+    parsed ``SupportedResponse.kinds`` (objects with ``.scheme`` / ``.network``) or an
+    iterable of ``(scheme, network)`` tuples (tests). Returns the cached snapshot."""
+    global _SUPPORTED_SNAPSHOT
+    pairs: set[tuple[str, str]] = set()
+    for kind in kinds:
+        scheme = getattr(kind, "scheme", None)
+        network = getattr(kind, "network", None)
+        if scheme is None and isinstance(kind, (tuple, list)) and len(kind) == 2:
+            scheme, network = kind
+        if scheme is not None and network is not None:
+            pairs.add((scheme, network))
+    _SUPPORTED_SNAPSHOT = frozenset(pairs)
+    return _SUPPORTED_SNAPSHOT
+
+
+def supported_snapshot() -> frozenset[tuple[str, str]]:
+    """The cached probe snapshot, or an empty set if the probe has not run / failed."""
+    return _SUPPORTED_SNAPSHOT if _SUPPORTED_SNAPSHOT is not None else frozenset()
+
+
+def probe_supported(client: OKXFacilitatorClient) -> frozenset[tuple[str, str]]:
+    """Run the read-only ``get_supported`` probe and cache the snapshot. On ANY
+    failure the snapshot is set EMPTY (probe failure ⇒ 196-only, never a crash) and
+    the failure is logged; ``eip155:196`` stays live regardless (grandfathered proven
+    rail, so :func:`chain_enabled` never consults the snapshot for it)."""
+    try:
+        response = client.get_supported()
+        snapshot = set_supported_snapshot(response.kinds)
+        logger.info("x402 /supported probe: %s", sorted(snapshot))
+        return snapshot
+    except Exception:
+        logger.exception("x402 /supported probe failed — falling back to 196-only")
+        return set_supported_snapshot([])
+
+
+def _chain_flag(chain_id: int) -> bool:
+    """``TILLA_CHAIN_<chain_id>_ENABLED`` — default OFF, so live behaviour stays
+    byte-identical until an operator flips a chain on in the VPS ``.env``."""
+    return os.environ.get(f"TILLA_CHAIN_{chain_id}_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def chain_enabled(cfg: ChainConfig) -> bool:
+    """Whether the sweeper scans ``cfg`` and the store 402 may advertise it. The
+    canonical X Layer ledger is ALWAYS enabled (grandfathered proven rail, INV-2).
+    Any other chain is enabled ONLY when its ``TILLA_CHAIN_<id>_ENABLED`` flag is on
+    AND the startup ``/supported`` snapshot lists ``(exact, caip2)`` — flag on but
+    probe miss ⇒ still disabled (INV-1)."""
+    if cfg.canonical:
+        return True
+    return (
+        _chain_flag(cfg.chain_id)
+        and (
+            PAYMENT_SCHEME,
+            cfg.caip2,
+        )
+        in supported_snapshot()
+    )
+
+
+def enabled_chains() -> list[ChainConfig]:
+    """The chains the sweeper scans and the store 402 may advertise, in registry
+    order: the canonical chain first, then any flag+probe-enabled chain. With all
+    ``TILLA_CHAIN_*`` flags OFF this is exactly ``[CANONICAL_CHAIN]``."""
+    return [cfg for cfg in CHAINS.values() if chain_enabled(cfg)]
+
 
 _FIXED_CONFIGURATION = {
     "TILLA_PAYMENT_FACILITATOR": PAYMENT_FACILITATOR,
@@ -125,13 +283,13 @@ def load_payment_rail(environment: Mapping[str, str]) -> PaymentRail:
         facilitator=PAYMENT_FACILITATOR,
         facilitator_url=facilitator_url,
         scheme=PAYMENT_SCHEME,
-        network=PAYMENT_NETWORK,
-        asset=PAYMENT_ASSET,
+        network=CANONICAL_CHAIN.caip2,
+        asset=CANONICAL_CHAIN.asset,
         amount=PAYMENT_AMOUNT,
-        eip712_name=PAYMENT_EIP712_NAME,
-        eip712_version=PAYMENT_EIP712_VERSION,
-        symbol=PAYMENT_SYMBOL,
-        decimals=PAYMENT_DECIMALS,
+        eip712_name=CANONICAL_CHAIN.eip712_name,
+        eip712_version=CANONICAL_CHAIN.eip712_version,
+        symbol=CANONICAL_CHAIN.asset_symbol,
+        decimals=CANONICAL_CHAIN.decimals,
         display_price=PAYMENT_DISPLAY_PRICE,
         pay_to=pay_to,
     )
@@ -196,9 +354,41 @@ def _dynamic_store_hooks(rail: PaymentRail):
         return await asyncio.to_thread(resolve_pay_to, ctx.path, sentinel_pay_to)
 
     async def _price(ctx: HTTPRequestContext) -> AssetAmount:
+        from app.agentic import payer_from_payment_header, resolve_price
+
+        # M16 B2B: the wholesale tier is keyed on (agent_id query param, verified
+        # payer). agent_id rides the query string (like ?ref=, it survives the
+        # 402->paid-retry); the payer is recovered from the payment header. Absent
+        # either, resolve_price returns the base price — byte-identical to today.
+        adapter = getattr(ctx, "adapter", None)
+        agent_id = adapter.get_query_param("agent_id") if adapter is not None else None
+        payer = payer_from_payment_header(getattr(ctx, "payment_header", None))
+        return await asyncio.to_thread(resolve_price, ctx.path, agent_id, payer)
+
+    return _pay_to, _price
+
+
+def _chain_store_hooks(rail: PaymentRail, cfg: ChainConfig):
+    """Per-chain variant of :func:`_dynamic_store_hooks` for a non-canonical accepts
+    entry: same per-store payTo resolution and same product price (v1 is same-6dp
+    USDT-family only — no FX), but the price ``AssetAmount`` carries THIS chain's
+    asset + EIP-712 domain so the challenge names the token that settles on it."""
+    sentinel_pay_to = rail.pay_to
+
+    async def _pay_to(ctx: HTTPRequestContext) -> str:
+        from app.agentic import resolve_pay_to
+
+        return await asyncio.to_thread(resolve_pay_to, ctx.path, sentinel_pay_to)
+
+    async def _price(ctx: HTTPRequestContext) -> AssetAmount:
         from app.agentic import resolve_price
 
-        return await asyncio.to_thread(resolve_price, ctx.path)
+        base = await asyncio.to_thread(resolve_price, ctx.path)
+        return AssetAmount(
+            amount=base.amount,
+            asset=cfg.asset,
+            extra={"name": cfg.eip712_name, "version": cfg.eip712_version},
+        )
 
     return _pay_to, _price
 
@@ -225,7 +415,6 @@ def build_store_payment_options(rail: PaymentRail) -> list[PaymentOption]:
     middleware strips it from the 402 for non-batch stores, and the buy handler
     hard-gates a non-batch aggr payment with a 409 BEFORE settle — so no dishonest
     challenge is served and zero funds move on a mis-scheme."""
-    from app import config
 
     options = [build_store_payment_option(rail)]
     if config.AGGR_DEFERRED_ENABLED:
@@ -235,6 +424,23 @@ def build_store_payment_options(rail: PaymentRail) -> list[PaymentOption]:
                 scheme=PAYMENT_SCHEME_AGGR_DEFERRED,
                 price=price,
                 network=rail.network,
+                pay_to=pay_to,
+                max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
+            )
+        )
+    # 18.2 per-chain accepts: append one exact entry per flag+probe-enabled
+    # non-canonical chain (INV-1 gate in :func:`enabled_chains`). With all
+    # TILLA_CHAIN_* flags OFF this loop is empty, so the accepts list is
+    # byte-identical to today ([exact] or [exact, aggr_deferred]).
+    for cfg in enabled_chains():
+        if cfg.canonical:
+            continue
+        pay_to, price = _chain_store_hooks(rail, cfg)
+        options.append(
+            PaymentOption(
+                scheme=PAYMENT_SCHEME,
+                price=price,
+                network=cfg.caip2,
                 pay_to=pay_to,
                 max_timeout_seconds=PAYMENT_TIMEOUT_SECONDS,
             )

@@ -17,13 +17,20 @@ in-repo precedents:
     ``agentic.record_settlement`` on the settling->delivered flip for agent orders),
     and ``attest_loop`` drains them off the buyer-critical path.
 
-IDEMPOTENCY (one attestation per order, never double-attest): a two-phase, race-proof
-transition (the M3 pattern). Each pending order is SENT, then claimed
-``pending -> sent`` recording ``attest_tx`` immediately (before the receipt wait), then
-``sent -> attested`` with the parsed UID. A restart mid-flight finds ``sent`` rows and
-RECONCILES by fetching the attest tx receipt — it never re-sends. Because the winning
-``pending -> sent`` transition is a conditional UPDATE, only one caller can ever attest
-a given order.
+IDEMPOTENCY (one attestation per order, never double-attest): a three-phase, race-proof
+transition (the M3 pattern) with a crash-safe send window. The attest tx is BUILT and
+SIGNED first (yielding its hash + nonce), then the order is claimed
+``pending -> sending`` recording ``attest_tx`` + ``attest_nonce`` BEFORE the tx is
+broadcast, then broadcast, then flipped ``sending -> sent`` and finally
+``sent -> attested`` with the parsed UID. A crash BETWEEN the broadcast and the DB claim
+can therefore only ever leave a ``sending`` row (never lose the broadcast intent), so a
+restart RECONCILES it against the chain instead of blind-re-broadcasting: found on chain
+=> ``attested``; nonce consumed by a different mined tx => our attestation is definitively
+not on chain, re-attest fresh; nonce still free => re-broadcast the SAME-nonce tx
+(idempotent — at most one tx per nonce can ever mine). ``sent`` rows reconcile by fetching
+the attest tx receipt only — they never re-send. Because every transition is a conditional
+UPDATE, only one caller can ever attest a given order. This is GAS safety (avoid a wasted
+duplicate OKB attest tx), NOT fund loss.
 
 FAIL-SAFE: any misconfiguration (wrong chain, missing key, gas over cap, NULL
 buyer/payment tx, RPC error) refuses/idles and never signs; a bad tick is logged and
@@ -33,6 +40,7 @@ the loop continues, exactly like the sweeper and webhook loops.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 
 from eth_abi import decode as abi_decode
@@ -42,7 +50,7 @@ from sqlalchemy import select, update
 
 from app import checkout, config
 from app.db import SessionLocal
-from app.models import Order, Store, log_event
+from app.models import Delivery, Order, Store, log_event
 
 logger = logging.getLogger("tilla")
 
@@ -165,30 +173,56 @@ def schema_uid() -> bytes:
     return keccak(packed)
 
 
+def content_hash_hex(payload: str) -> str:
+    """The sha256 of the delivered payload as 0x + 64 hex — the bytes32 contentHash bound
+    into the receipt so it attests WHAT was delivered, not just that money moved."""
+    return "0x" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _bytes32(hexstr: str) -> bytes:
+    return bytes.fromhex(hexstr[2:] if hexstr.startswith("0x") else hexstr)
+
+
 def build_attestation_data(
-    from_addr: str, slug: str, expected_micro: int, tx_hash: str
+    from_addr: str,
+    slug: str,
+    expected_micro: int,
+    tx_hash: str,
+    product_id: int | None,
+    content_hash: str,
 ) -> bytes:
-    """abi.encode the receipt blob in the schema's field order (load-bearing):
-    (address buyer, string storeId, uint256 amountUsdt6, bytes32 paymentTxHash)."""
+    """abi.encode the receipt blob in the schema's field order (load-bearing): (address
+    buyer, string storeId, uint256 amountUsdt6, bytes32 paymentTxHash, uint256 productId,
+    bytes32 contentHash). productId is 0 for a store with no per-product order;
+    contentHash is :func:`content_hash_hex` of the delivered payload."""
     return abi_encode(
-        ["address", "string", "uint256", "bytes32"],
+        ["address", "string", "uint256", "bytes32", "uint256", "bytes32"],
         [
             to_checksum_address(from_addr),
             slug,
             int(expected_micro),
-            bytes.fromhex(tx_hash[2:] if tx_hash.startswith("0x") else tx_hash),
+            _bytes32(tx_hash),
+            int(product_id or 0),
+            _bytes32(content_hash),
         ],
     )
 
 
-def decode_attestation_data(data: bytes) -> tuple[str, str, int, bytes]:
+def decode_attestation_data(data: bytes) -> tuple[str, str, int, bytes, int, bytes]:
     """Inverse of :func:`build_attestation_data` (used by the golden round-trip test
     and the runbook read-back)."""
-    return abi_decode(["address", "string", "uint256", "bytes32"], data)
+    return abi_decode(
+        ["address", "string", "uint256", "bytes32", "uint256", "bytes32"], data
+    )
 
 
 def _attest_request(
-    from_addr: str, slug: str, expected_micro: int, tx_hash: str
+    from_addr: str,
+    slug: str,
+    expected_micro: int,
+    tx_hash: str,
+    product_id: int | None,
+    content_hash: str,
 ) -> dict:
     """The EAS attest() request tuple for one receipt. recipient = the buyer wallet.
     Takes primitives (not the ORM row) so it is called after the read session closes,
@@ -200,7 +234,9 @@ def _attest_request(
             "expirationTime": 0,
             "revocable": SCHEMA_REVOCABLE,
             "refUID": b"\x00" * 32,
-            "data": build_attestation_data(from_addr, slug, expected_micro, tx_hash),
+            "data": build_attestation_data(
+                from_addr, slug, expected_micro, tx_hash, product_id, content_hash
+            ),
             "value": 0,
         },
     }
@@ -277,32 +313,51 @@ def _schema_is_registered(attester: _Attester) -> bool:
     return bool(record) and record[0] != b"\x00" * 32
 
 
-def _send_signed(attester: _Attester, fn) -> str:
-    """Estimate gas, REFUSE over the cap, then build + sign + broadcast ``fn``.
-    Returns the tx hash (0x hex). Signs at most once; the caller never retries."""
+def _hex(tx_hash) -> str:
+    return (
+        tx_hash.to_0x_hex()
+        if hasattr(tx_hash, "to_0x_hex")
+        else "0x" + bytes(tx_hash).hex()
+    )
+
+
+def _prepare_signed(attester: _Attester, fn, nonce=None):
+    """Estimate gas, REFUSE over the cap, then build + SIGN ``fn`` WITHOUT broadcasting.
+    Returns ``(signed_tx, tx_hash, nonce)``. Passing an explicit ``nonce`` pins it (a
+    reconcile re-broadcast of the same order); otherwise the account's next free nonce is
+    used. The nonce is the dedup key — at most one tx per nonce can mine — so recording it
+    before broadcast makes the send window crash-safe."""
     w3, account = attester.w3, attester.account
     gas_estimate = fn.estimate_gas({"from": account.address, "value": 0})
     gas_price = max(w3.eth.gas_price, w3.to_wei(1, "gwei"))
     gas_cost = int(gas_estimate) * int(gas_price)
     if gas_cost > config.TILLA_ATTEST_MAX_GAS_WEI:
         raise _GasTooHigh(gas_cost)
+    if nonce is None:
+        nonce = w3.eth.get_transaction_count(account.address)
     tx = fn.build_transaction(
         {
             "from": account.address,
             "value": 0,
-            "nonce": w3.eth.get_transaction_count(account.address),
+            "nonce": nonce,
             "chainId": config.ATTEST_CHAIN_ID,
             "gas": int(int(gas_estimate) * 1.3),
             "gasPrice": int(gas_price),
         }
     )
     signed = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    return (
-        tx_hash.to_0x_hex()
-        if hasattr(tx_hash, "to_0x_hex")
-        else "0x" + bytes(tx_hash).hex()
-    )
+    return signed, _hex(signed.hash), nonce
+
+
+def _broadcast(attester: _Attester, signed) -> str:
+    """Broadcast a pre-signed tx. Returns its hash (equal to the prepared hash)."""
+    return _hex(attester.w3.eth.send_raw_transaction(signed.raw_transaction))
+
+
+def _send_signed(attester: _Attester, fn) -> str:
+    """Prepare + broadcast ``fn`` in one shot (schema register). Signs at most once."""
+    signed, _tx_hash, _nonce = _prepare_signed(attester, fn)
+    return _broadcast(attester, signed)
 
 
 def _register_schema(attester: _Attester) -> str:
@@ -312,13 +367,24 @@ def _register_schema(attester: _Attester) -> str:
     return _send_signed(attester, fn)
 
 
-def _send_attestation(
-    attester: _Attester, from_addr: str, slug: str, expected_micro: int, tx_hash: str
-) -> str:
+def _prepare_attestation(
+    attester: _Attester,
+    from_addr: str,
+    slug: str,
+    expected_micro: int,
+    tx_hash: str,
+    product_id: int | None,
+    content_hash: str,
+    nonce=None,
+):
+    """Build + sign one attestation tx WITHOUT broadcasting. Returns
+    ``(signed_tx, tx_hash, nonce)`` — the caller records the nonce, then broadcasts."""
     fn = attester.eas.functions.attest(
-        _attest_request(from_addr, slug, expected_micro, tx_hash)
+        _attest_request(
+            from_addr, slug, expected_micro, tx_hash, product_id, content_hash
+        )
     )
-    return _send_signed(attester, fn)
+    return _prepare_signed(attester, fn, nonce=nonce)
 
 
 def _wait_receipt(attester: _Attester, tx_hash: str):
@@ -341,6 +407,15 @@ def _get_receipt(attester: _Attester, tx_hash: str):
     is not yet mined / not found."""
     try:
         return attester.w3.eth.get_transaction_receipt(tx_hash)
+    except Exception:
+        return None
+
+
+def _confirmed_nonce(attester: _Attester) -> int | None:
+    """The attester account's mined (latest-block) transaction count = the next free
+    nonce. Used for nonce-based dedup on reconcile. None on RPC error (retry later)."""
+    try:
+        return int(attester.w3.eth.get_transaction_count(attester.account.address))
     except Exception:
         return None
 
@@ -425,43 +500,85 @@ def _sent_orders() -> list[tuple[str, int, str | None]]:
         return [(r[0], r[1], r[2]) for r in rows]
 
 
+def _sending_orders() -> list[tuple[str, int]]:
+    """(order_id, store_id) for rows left mid-broadcast. _reconcile_sending_one re-reads
+    each row's broadcast intent inside its own session."""
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(Order.id, Order.store_id).where(Order.attest_status == "sending")
+        ).all()
+        return [(r[0], r[1]) for r in rows]
+
+
 def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
-    """Send + claim + resolve one pending order. A missing buyer/payment tx fails the
-    row (can't attest a receipt without them); a gas-over-cap refusal leaves it pending
-    for a calmer window."""
+    """Build+sign, claim pending->sending (recording the nonce), broadcast, then
+    sending->sent + resolve one pending order. A missing buyer/payment tx fails the row
+    (can't attest a receipt without them); a gas-over-cap refusal leaves it pending for a
+    calmer window. The nonce is recorded BEFORE the broadcast, so a crash in the send
+    window leaves a reconcilable 'sending' row — never a blind re-broadcast."""
     with SessionLocal() as session:
         order = session.get(Order, order_id)
         store = session.get(Store, store_id) if order is not None else None
         if order is None or store is None or order.attest_status != "pending":
             return
-        if not order.from_addr or not order.tx_hash:
+        delivery = session.scalar(select(Delivery).where(Delivery.order_id == order_id))
+        # A receipt binds to WHAT was delivered — refuse without a buyer, a payment tx,
+        # or a delivery payload to hash (fail-closed, never a hollow receipt).
+        if not order.from_addr or not order.tx_hash or delivery is None:
             _claim(order_id, ("pending",), attest_status="failed")
             _log(
                 order_id,
                 store_id,
                 "attest.failed",
-                {"reason": "missing buyer or payment tx"},
+                {"reason": "missing buyer, payment tx, or delivery"},
             )
             return
-        # Capture primitives inside the session — the send happens after it closes.
+        # Capture primitives inside the session — the send happens after it closes. The
+        # content hash is computed here (attest time) from the delivered payload and the
+        # product identity rides order.product_id (0 when the store has no per-product).
         from_addr, slug = order.from_addr, store.slug
         expected_micro, tx_hash = order.expected_micro, order.tx_hash
+        product_id = order.product_id
+        content_hash = content_hash_hex(delivery.payload)
 
+    # Build + sign BEFORE any broadcast (gas-over-cap refuses here, leaving it pending).
     try:
-        tx = _send_attestation(attester, from_addr, slug, expected_micro, tx_hash)
+        signed, tx, nonce = _prepare_attestation(
+            attester, from_addr, slug, expected_micro, tx_hash, product_id, content_hash
+        )
     except _GasTooHigh as exc:
         logger.warning("attest: order %s refused, gas %s over cap", order_id, exc)
         return
     except Exception:
-        logger.exception("attest: send failed for %s (stays pending)", order_id)
+        logger.exception("attest: prepare failed for %s (stays pending)", order_id)
         return
 
-    # Claim pending->sent recording the tx BEFORE the receipt wait, so a crash after
-    # the send can only ever reconcile (never re-send) this order.
-    if not _claim(order_id, ("pending",), attest_status="sent", attest_tx=tx):
+    # Claim pending->sending recording the broadcast intent (tx hash + nonce + the
+    # content hash we signed over) BEFORE broadcasting, so a crash in the send window
+    # leaves a reconcilable 'sending' row that rebuilds the identical attestation.
+    if not _claim(
+        order_id,
+        ("pending",),
+        attest_status="sending",
+        attest_tx=tx,
+        attest_nonce=nonce,
+        content_hash=content_hash,
+    ):
         logger.warning(
-            "attest: lost pending->sent claim for %s (already handled)", order_id
+            "attest: lost pending->sending claim for %s (already handled)", order_id
         )
+        return
+    _log(order_id, store_id, "attest.sending", {"tx": tx, "nonce": nonce})
+
+    try:
+        _broadcast(attester, signed)
+    except Exception:
+        # Broadcast failed/uncertain — leave it 'sending'; reconcile checks the chain by
+        # nonce before ever re-broadcasting (never blind, never double).
+        logger.exception("attest: broadcast failed for %s (will reconcile)", order_id)
+        return
+
+    if not _claim(order_id, ("sending",), attest_status="sent"):
         return
     _log(order_id, store_id, "attest.sent", {"tx": tx})
 
@@ -472,14 +589,17 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
 
 
 def _resolve_receipt(order_id: str, store_id: int, receipt) -> None:
-    """Drive a 'sent' order to attested (status 1 + UID) or failed (status 0)."""
+    """Drive a broadcast ('sending'/'sent') order to attested (status 1 + UID) or failed
+    (status 0). Accepts both states so a 'sending' row whose tx is already mined resolves
+    directly on reconcile."""
+    from_statuses = ("sending", "sent")
     if _receipt_status(receipt) != 1:
-        _claim(order_id, ("sent",), attest_status="failed")
+        _claim(order_id, from_statuses, attest_status="failed")
         _log(order_id, store_id, "attest.failed", {"reason": "attestation tx reverted"})
         return
     uid = _uid_from_receipt(receipt)
     if uid is None:
-        _claim(order_id, ("sent",), attest_status="failed")
+        _claim(order_id, from_statuses, attest_status="failed")
         _log(
             order_id,
             store_id,
@@ -487,9 +607,128 @@ def _resolve_receipt(order_id: str, store_id: int, receipt) -> None:
             {"reason": "no Attested log in receipt"},
         )
         return
-    if _claim(order_id, ("sent",), attest_status="attested", attestation_uid=uid):
+    if _claim(order_id, from_statuses, attest_status="attested", attestation_uid=uid):
         _reconcile_seen.pop(order_id, None)
         _log(order_id, store_id, "attest.attested", {"uid": uid})
+
+
+def _reconcile_sending_one(attester: _Attester, order_id: str, store_id: int) -> None:
+    """Resolve one row left 'sending' by a crash between the pending->sending claim and
+    the broadcast-confirmed sending->sent flip. Nonce-based dedup:
+      - attest tx found on chain => resolve (attested / failed);
+      - nonce consumed by a DIFFERENT mined tx => our attestation is definitively not on
+        chain and can never mine at this nonce => re-attest fresh (back to pending);
+      - nonce still free (tx pending in mempool or never broadcast) => re-broadcast the
+        SAME-nonce tx (idempotent: at most one tx per nonce mines) and advance to sent.
+    """
+    with SessionLocal() as session:
+        order = session.get(Order, order_id)
+        store = session.get(Store, store_id) if order is not None else None
+        if order is None or order.attest_status != "sending":
+            return
+        attest_tx, attest_nonce = order.attest_tx, order.attest_nonce
+        from_addr, tx_hash = order.from_addr, order.tx_hash
+        expected_micro = order.expected_micro
+        # The content hash was recorded with the broadcast intent (pending->sending), so a
+        # same-nonce re-broadcast rebuilds the identical attestation from the stored value.
+        product_id, content_hash = order.product_id, order.content_hash
+        slug = store.slug if store is not None else None
+    if (
+        not attest_tx
+        or attest_nonce is None
+        or slug is None
+        or not from_addr
+        or not tx_hash
+        or not content_hash
+    ):
+        _claim(order_id, ("sending",), attest_status="failed")
+        _log(
+            order_id,
+            store_id,
+            "attest.failed",
+            {"reason": "sending row missing broadcast intent"},
+        )
+        return
+
+    receipt = _get_receipt(attester, attest_tx)
+    if receipt is not None:
+        _resolve_receipt(order_id, store_id, receipt)
+        return
+
+    confirmed = _confirmed_nonce(attester)
+    if confirmed is None:
+        return  # RPC hiccup — retry on a later tick
+    if confirmed > attest_nonce:
+        # The nonce slot is filled and our hash isn't on chain — BUT the receipt read
+        # above and this nonce read are not atomic: our tx could have mined in the gap
+        # (receipt None, then nonce advanced), and _get_receipt swallows RPC errors to
+        # None, so a transient flake looks identical to a real not-found. Re-check the
+        # receipt ONCE before the irreversible fresh re-attest — only a confirmed real
+        # not-found re-attests; a just-mined/flake-recovered receipt resolves instead.
+        # This closes the double-attest window without gating the resolve path on the
+        # nonce RPC.
+        recheck = _get_receipt(attester, attest_tx)
+        if recheck is not None:
+            _resolve_receipt(order_id, store_id, recheck)
+            return
+        # The nonce slot was filled by a different mined tx (our hash is not on chain).
+        # Our attestation is definitively not on chain — re-attest fresh (new nonce).
+        _reconcile_seen.pop(order_id, None)
+        if _claim(
+            order_id,
+            ("sending",),
+            attest_status="pending",
+            attest_tx=None,
+            attest_nonce=None,
+        ):
+            _log(
+                order_id,
+                store_id,
+                "attest.reattest",
+                {"reason": "nonce consumed by other tx", "nonce": attest_nonce},
+            )
+        return
+
+    # Nonce still free — re-broadcast pinned to the SAME nonce (dedup: one tx per nonce
+    # can ever mine) and keep watching the (possibly new) hash.
+    try:
+        signed, new_tx, _ = _prepare_attestation(
+            attester,
+            from_addr,
+            slug,
+            expected_micro,
+            tx_hash,
+            product_id,
+            content_hash,
+            nonce=attest_nonce,
+        )
+        _broadcast(attester, signed)
+    except _GasTooHigh as exc:
+        logger.warning(
+            "attest: reconcile rebroadcast of %s refused, gas %s over cap",
+            order_id,
+            exc,
+        )
+        return
+    except Exception:
+        logger.exception(
+            "attest: reconcile rebroadcast of %s failed (stays sending)", order_id
+        )
+        return
+    if _claim(order_id, ("sending",), attest_status="sent", attest_tx=new_tx):
+        _log(
+            order_id,
+            store_id,
+            "attest.sent",
+            {"tx": new_tx, "nonce": attest_nonce, "rebroadcast": True},
+        )
+
+
+def _reconcile_sending(attester: _Attester) -> None:
+    """Restart safety for the send window: resolve every row left 'sending' by a crash
+    between the broadcast and the sending->sent claim (see _reconcile_sending_one)."""
+    for order_id, store_id in _sending_orders():
+        _reconcile_sending_one(attester, order_id, store_id)
 
 
 def _reconcile_sent(attester: _Attester) -> None:
@@ -526,7 +765,7 @@ def _reconcile_sent(attester: _Attester) -> None:
 def attest_tick() -> int:
     """One attestation pass. Refuses (idles, signs nothing) unless a live attester is
     configured AND the connected chain matches ATTEST_CHAIN_ID. Reconciles in-flight
-    'sent' rows, ensures the schema is registered once, then attests up to
+    'sending' then 'sent' rows, ensures the schema is registered once, then attests up to
     MAX_PER_TICK pending orders. Returns the number of orders acted on."""
     attester = _attester_factory()
     if attester is None:
@@ -544,6 +783,7 @@ def attest_tick() -> int:
         )
         return 0
 
+    _reconcile_sending(attester)
     _reconcile_sent(attester)
     if not _ensure_schema(attester):
         return 0

@@ -19,13 +19,20 @@ from xml.sax.saxutils import escape
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
 from itsdangerous import BadSignature, SignatureExpired
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+)
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from starlette.responses import FileResponse, JSONResponse, Response
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from app import (
     acp,
@@ -38,9 +45,16 @@ from app import (
     dashboard,
     delivery,
     embed,
+    escrow,
     external_feeds,
+    federation,
     growth,
+    growth_scheduler,
     mpp,
+    payment,
+    providers,
+    reconcile,
+    render,
     subscriptions,
     webhooks,
 )
@@ -60,8 +74,10 @@ from app.models import (
     Delivery,
     EmailSubscriber,
     Entitlement,
+    Merchant,
     Order,
     Product,
+    Review,
     ScreeningReceipt,
     Store,
     log_event,
@@ -99,6 +115,9 @@ async def lifespan(app: FastAPI):
     sweeper = None
     webhook_task = None
     attest_task = None
+    reconcile_task = None
+    federation_task = None
+    growth_sched_task = None
     if config.SWEEP_ENABLED:
         sweeper = asyncio.create_task(checkout.sweeper_loop())
         # M9 outbound webhook dispatcher — shares the sweeper's background-loop gate
@@ -111,17 +130,46 @@ async def lifespan(app: FastAPI):
         # + flag on the VPS) is an explicit user-gated runbook step.
         if config.ATTEST_ENABLED and config.TILLA_ATTESTER_KEY:
             attest_task = asyncio.create_task(attest.attest_loop())
+        # M8 aggr_deferred settle reconciliation poller — DORMANT: only starts with
+        # SWEEP_ENABLED AND AGGR_DEFERRED_ENABLED AND OKX creds. Missing any one => no
+        # task, no RPC, and the SDK facilitator client is never built. It finalizes
+        # deferred (async) settles once their aggregated tx confirms; idle until a
+        # batch buy leaves an order in 'settling' with a pending settle_ref.
+        if config.AGGR_DEFERRED_ENABLED and os.getenv("OKX_API_KEY"):
+            reconcile_task = asyncio.create_task(reconcile.reconcile_loop())
+        # M16.4 federation ingest — shares the background-loop gate so tests never
+        # start it. DOUBLY dormant: also a no-op unless TILLA_FEDERATION_PEERS is
+        # set (empty => the loop idles with zero network). Read-only discovery
+        # mirror; never moves funds.
+        if config.FEDERATION_PEERS:
+            federation_task = asyncio.create_task(federation.federation_loop())
+        # M17.3 content-calendar scheduler — DORMANT: only under SWEEP_ENABLED AND
+        # TILLA_GROWTH_SCHED_ENABLED (default OFF), so zero LLM spend by default and
+        # never started in tests. It drafts + screens + queues only; sends nothing.
+        if config.GROWTH_SCHED_ENABLED:
+            growth_sched_task = asyncio.create_task(
+                growth_scheduler.growth_scheduler_loop()
+            )
     # x402 agent commerce (prod only): pre-warm the facilitator /supported off-loop
     # so the first protected request doesn't do the blocking sync GET, and run the
     # reaper that voids agent orders stuck delivered-without-settle.
     reaper = None
     if os.getenv("OKX_API_KEY"):
         await _prewarm_facilitator()
+        await _probe_supported()
         reaper = asyncio.create_task(agentic.agent_reaper_loop())
     try:
         yield
     finally:
-        for task in (sweeper, webhook_task, attest_task, reaper):
+        for task in (
+            sweeper,
+            webhook_task,
+            attest_task,
+            reconcile_task,
+            reaper,
+            federation_task,
+            growth_sched_task,
+        ):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -146,6 +194,17 @@ async def _prewarm_facilitator() -> None:
         logger.info("x402 facilitator pre-warmed at startup")
     except Exception:
         logger.exception("x402 facilitator pre-warm failed; lazy init will retry")
+
+
+async def _probe_supported() -> None:
+    """18.2 read-only ``/supported`` probe at boot: cache the ``(scheme, network)``
+    snapshot the per-chain accepts gate reads, and log it (this increment's live
+    artifact). Never raises — a probe failure caches an empty snapshot so the store
+    402 stays 196-only, never a crash (196 is grandfathered as the proven rail)."""
+    fac = globals().get("_fac")
+    if fac is None:
+        return
+    await asyncio.to_thread(payment.probe_supported, fac)
 
 
 app = FastAPI(
@@ -176,6 +235,11 @@ app.include_router(acp.router)
 # Phase 3 growth-kit: merchant-gated POST/GET /api/stores/{slug}/growth-kit. Additive,
 # no schema change, no fund-moving or external-posting code (persists to event_log).
 app.include_router(growth.router)
+# Roadmap Phase 3 escrow: the A2A commissioned-build job machine under /api/escrow/*.
+# Always mounted, every endpoint 503s until TILLA_ESCROW is set (the ACP/MPP dormant-
+# mount pattern). NON-CUSTODIAL: it tracks state and records verified deposit/release
+# txs — no fund-moving code, Tilla never holds keys or sends funds.
+app.include_router(escrow.router)
 
 
 @app.middleware("http")
@@ -286,12 +350,15 @@ def ready():
 @app.get("/sitemap.xml")
 @limiter.limit("60/minute")
 def sitemap(request: Request, session: Session = Depends(get_session)):
-    """XML sitemap of every LIVE store URL (pending/blocked stores are excluded —
-    their pages aren't served). Slugs are a restricted charset, but the <loc>
-    text is XML-escaped regardless."""
+    """XML sitemap of every LIVE, PUBLIC store URL (pending/blocked stores are excluded
+    — their pages aren't served; Phase 1.7 hidden/sandbox stores are excluded too, so
+    they stay unindexed). Slugs are a restricted charset, but the <loc> text is
+    XML-escaped regardless."""
     base = config.PUBLIC_BASE_URL.rstrip("/")
     slugs = session.scalars(
-        select(Store.slug).where(Store.status == "live").order_by(Store.slug)
+        select(Store.slug)
+        .where(Store.status == "live", Store.visibility == "public")
+        .order_by(Store.slug)
     ).all()
     # Hub pages first (nginx-served statics the crawler can't discover from the
     # store URLs alone), then every live store.
@@ -300,12 +367,129 @@ def sitemap(request: Request, session: Session = Depends(get_session)):
     urls += "".join(
         f"<url><loc>{escape(base)}/s/{escape(slug)}/</loc></url>" for slug in slugs
     )
+    # Phase 4 link-in-bio: one /m/{address} profile per merchant with at least one
+    # live, public store — the SAME visibility filter as the store URLs above, so it
+    # surfaces no address a crawler couldn't already read off those stores' checkout
+    # pages (every store renders its receive wallet). Addresses are a restricted
+    # 0x-hex charset, XML-escaped regardless.
+    profile_addrs = session.scalars(
+        select(Merchant.wallet_address)
+        .join(Store, Store.merchant_id == Merchant.id)
+        .where(Store.status == "live", Store.visibility == "public")
+        .distinct()
+        .order_by(Merchant.wallet_address)
+    ).all()
+    urls += "".join(
+        f"<url><loc>{escape(base)}/m/{escape(addr)}</loc></url>"
+        for addr in profile_addrs
+    )
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
         f"{urls}</urlset>"
     )
     return Response(content=xml, media_type="application/xml")
+
+
+@app.get("/m/{address}")
+@limiter.limit("60/minute")
+def merchant_profile(
+    request: Request,
+    address: str = Path(..., min_length=1, max_length=64),
+    session: Session = Depends(get_session),
+):
+    """Phase 4 link-in-bio: a merchant's PUBLIC 'all my stores' profile — their LIVE,
+    PUBLIC stores (Phase 1.7 visibility) as one shareable page. Hidden/pending/blocked
+    stores are excluded (the same filter as discovery + the sitemap). An unknown
+    address, a malformed address, or a merchant with no public stores is a uniform 404
+    (no existence oracle). Store names/descriptions are screened LLM copy rendered
+    through the autoescaped Jinja env, so they stay inert text; the wallet shown is
+    already public (it is every store's on-chain receive address)."""
+    addr = address.lower()
+    if not _EVM_ADDRESS.fullmatch(addr):
+        raise HTTPException(404, "profile not found")
+    merchant = session.scalar(select(Merchant).where(Merchant.wallet_address == addr))
+    if merchant is None:
+        raise HTTPException(404, "profile not found")
+    stores = session.scalars(
+        select(Store)
+        .where(
+            Store.merchant_id == merchant.id,
+            Store.status == "live",
+            Store.visibility == "public",
+        )
+        .order_by(Store.created_at.desc())
+    ).all()
+    if not stores:
+        raise HTTPException(404, "profile not found")
+    items = [
+        {
+            "slug": s.slug,
+            "name": agentic._store_name(s),
+            "description": agentic._store_description(s),
+            "url": f"/s/{s.slug}/",
+        }
+        for s in stores
+    ]
+    return HTMLResponse(render.render_profile(addr, items))
+
+
+# ---------- Phase 4 custom domains: host-based store resolution ----------
+def _request_host(request: Request) -> str:
+    """The lowercased Host header without any port. Empty when absent."""
+    host = request.headers.get("host", "")
+    return host.split(":", 1)[0].strip().lower()
+
+
+def _store_for_host(request: Request, session: Session) -> Store | None:
+    """The live store whose VERIFIED custom domain equals this request's Host, or None.
+    Fail-closed: an unverified/unclaimed domain, a non-live store, or a non-matching host
+    all yield None (the caller 404s), so an unverified domain can never serve a store."""
+    host = _request_host(request)
+    if not host:
+        return None
+    return session.scalar(
+        select(Store).where(
+            Store.custom_domain == host,
+            Store.custom_domain_verified_at.isnot(None),
+            Store.status == "live",
+        )
+    )
+
+
+@app.get("/")
+@limiter.limit("120/minute")
+def custom_domain_root(request: Request, session: Session = Depends(get_session)):
+    """Serve a store on its VERIFIED custom domain. This route is only reached via the
+    operator's custom-domain vhost (the platform host serves its landing page from nginx
+    statics); a request whose Host is not a verified custom domain is a fail-closed 404.
+    The store is rendered through the same autoescaped env as its static page, with
+    canonical/OG pointing at the custom domain root."""
+    store = _store_for_host(request, session)
+    if store is None or not isinstance(store.content, dict):
+        raise HTTPException(404, "not found")
+    base_url = f"https://{store.custom_domain}"
+    html = render.render(
+        store.content, store.pay_to, store.slug, store.theme, base_url=base_url
+    )
+    return HTMLResponse(html)
+
+
+@app.get("/og.png")
+@app.get("/og.svg")
+def custom_domain_og(request: Request, session: Session = Depends(get_session)):
+    """Serve the store's Open Graph card on its verified custom domain, so the OG image
+    URL (``https://<domain>/og.png``) referenced by the custom-domain page resolves. The
+    asset is the store's own pre-rendered static card; a non-matching Host is a 404."""
+    store = _store_for_host(request, session)
+    if store is None:
+        raise HTTPException(404, "not found")
+    name = "og.png" if request.url.path.endswith(".png") else "og.svg"
+    asset = config.STORES_DIR / store.slug / name
+    if not asset.is_file():
+        raise HTTPException(404, "not found")
+    media = "image/png" if name == "og.png" else "image/svg+xml"
+    return FileResponse(asset, media_type=media)
 
 
 # ---------- ASP endpoint: create a store (x402-paid) ----------
@@ -333,8 +517,8 @@ class CreateStoreBody(BaseModel):
     def _validate_theme(cls, v):
         if v is None or v == "":
             return None
-        if v not in config.ALLOWED_THEMES:
-            raise ValueError("theme must be one of: original, bold, editorial")
+        if v not in providers.allowed_theme_names():
+            raise ValueError("theme must be a built-in or an active installed theme")
         return v
 
 
@@ -416,8 +600,8 @@ class UpgradeStoreBody(_SlugBody):
     def _validate_theme(cls, v):
         if v is None or v == "":
             return None
-        if v not in config.ALLOWED_THEMES:
-            raise ValueError("theme must be one of: original, bold, editorial")
+        if v not in providers.allowed_theme_names():
+            raise ValueError("theme must be a built-in or an active installed theme")
         return v
 
 
@@ -494,7 +678,7 @@ def upgrade_store_get(request: Request):
             "error": "method not allowed; use POST to upgrade a store",
             "how": (
                 "POST {slug, description?, theme?} + Authorization: Bearer "
-                "<manage_key> (x402-paid, 1 USDT) → regenerates, re-screens, and "
+                "<manage_key> (x402-paid, 0.03 USDT) → regenerates, re-screens, and "
                 "re-renders a store you own"
             ),
         },
@@ -580,7 +764,7 @@ def add_product_get(request: Request):
             "error": "method not allowed; use POST to add a product",
             "how": (
                 "POST {slug, name, price_usdt} + Authorization: Bearer "
-                "<manage_key> (x402-paid, 0.5 USDT) → adds a second product to a "
+                "<manage_key> (x402-paid, 0.01 USDT) → adds a second product to a "
                 "store you own"
             ),
         },
@@ -619,6 +803,10 @@ def _order_response(
         "amount_micro": order.expected_micro,
         "pay_to": order.pay_to,
     }
+    # Storefront depth: the membership tier the paid amount maps to (if any).
+    tier_name = _membership_tier_name(session, order)
+    if tier_name:
+        out["tier"] = tier_name
     if terminal:
         delivery_row = session.scalar(
             select(Delivery).where(Delivery.order_id == order.id)
@@ -660,6 +848,27 @@ def _order_response(
     return out
 
 
+def _current_version(session: Session, deliverable: Deliverable) -> Deliverable:
+    """Roll an entitlement's deliverable FORWARD to the store's current active version in
+    the same (store, product, kind) lineage — the versioned-releases mechanism: a past
+    buyer re-downloads the newest release. Returns the highest active deliverable of the
+    same kind whose ``version`` is strictly greater, else the deliverable unchanged. A
+    plain replace (which keeps version 1) never satisfies ``version >`` so it never rolls
+    a past buyer forward; only an explicit new version (version = prev + 1) does."""
+    q = select(Deliverable).where(
+        Deliverable.store_id == deliverable.store_id,
+        Deliverable.kind == deliverable.kind,
+        Deliverable.active.is_(True),
+        Deliverable.version > deliverable.version,
+    )
+    if deliverable.product_id is None:
+        q = q.where(Deliverable.product_id.is_(None))
+    else:
+        q = q.where(Deliverable.product_id == deliverable.product_id)
+    newer = session.scalar(q.order_by(Deliverable.version.desc()).limit(1))
+    return newer or deliverable
+
+
 def _augment_gated(session: Session, order: Order, out: dict) -> None:
     """Add the additive M4 keys — ``download_url`` (file) / ``license_key``
     (license) — minted fresh at read time. Deployed store pages ignore unknown
@@ -672,6 +881,11 @@ def _augment_gated(session: Session, order: Order, out: dict) -> None:
     deliverable = session.get(Deliverable, ent.deliverable_id)
     if deliverable is None:
         return
+    # Versioned releases: a file re-download follows the lineage forward to the current
+    # active version, so a past buyer always gets the newest file. License keys live on
+    # the entitlement (version-independent), so a license is left unchanged.
+    if deliverable.kind == "file":
+        deliverable = _current_version(session, deliverable)
     if deliverable.kind == "license" and ent.license_key:
         out["license_key"] = ent.license_key
     elif deliverable.kind == "file" and ent.download_count < deliverable.max_downloads:
@@ -691,6 +905,12 @@ class CheckoutCreateBody(BaseModel):
     # Both absent -> the primary product, byte-identical to the single-product flow.
     product_id: int | None = None
     product_index: int | None = None
+    # Storefront depth (additive, optional). ``tier`` is the buyer-chosen membership tier
+    # NAME (its configured price becomes the order amount); ``amount_micro`` is the
+    # buyer-chosen pay-what-you-want amount (must be >= the configured floor). Both absent
+    # -> the product list price, byte-identical to the pre-storefront-depth flow.
+    tier: str | None = Field(default=None, max_length=60)
+    amount_micro: StrictInt | None = None
 
     @field_validator("ref")
     @classmethod
@@ -699,6 +919,64 @@ class CheckoutCreateBody(BaseModel):
             return affiliates.normalize_ref(v)
         except affiliates.RefRejected as exc:
             raise ValueError(str(exc)) from exc
+
+
+def _pricing_params(product: Product) -> dict:
+    return product.pricing_params if isinstance(product.pricing_params, dict) else {}
+
+
+def _resolve_checkout_price(
+    product: Product, tier: str | None, amount_micro: int | None
+) -> int | None:
+    """The buyer-chosen order price (micro-USDT) for a membership / pay-what-you-want
+    product, or None for a plain list-price product. Fail-closed:
+
+    - Membership: the buyer MUST name a configured tier (400 if none picked, 404 if the
+      name is unknown); the tier's price is returned.
+    - Pay-what-you-want: the buyer MUST name an amount (400 if absent) that is at or above
+      the configured floor (400 below the floor).
+
+    A product without membership/pwyw config ignores tier/amount and returns None so the
+    caller uses the product list price."""
+    params = _pricing_params(product)
+    membership = params.get("membership_tiers")
+    pwyw_min = params.get("pwyw_min_micro")
+    if isinstance(membership, list) and membership:
+        if not tier:
+            raise HTTPException(400, "select a membership tier")
+        match = next(
+            (t for t in membership if isinstance(t, dict) and t.get("name") == tier),
+            None,
+        )
+        if match is None:
+            raise HTTPException(404, "unknown membership tier")
+        return int(match["price_micro"])
+    if isinstance(pwyw_min, int):
+        if amount_micro is None:
+            raise HTTPException(400, "choose an amount to pay")
+        if amount_micro < pwyw_min:
+            raise HTTPException(400, "amount is below the minimum")
+        return int(amount_micro)
+    return None
+
+
+def _membership_tier_name(session: Session, order: Order) -> str | None:
+    """The membership tier NAME an order's paid amount maps to, or None. Derived by
+    matching ``order.amount_micro`` (the chosen tier price recorded at checkout) against
+    the product's configured membership tiers — so the tier is recorded by the amount,
+    with no extra column."""
+    if order.product_id is None:
+        return None
+    product = session.get(Product, order.product_id)
+    if product is None:
+        return None
+    membership = _pricing_params(product).get("membership_tiers")
+    if not isinstance(membership, list):
+        return None
+    for t in membership:
+        if isinstance(t, dict) and int(t.get("price_micro", -1)) == order.amount_micro:
+            return t.get("name")
+    return None
 
 
 # ---------- store checkout: buyer pays the merchant ----------
@@ -742,16 +1020,35 @@ def create_checkout(
     else:
         product = products[0]
     referrer_addr = body.ref if body is not None else None
+    tier = body.tier if body is not None else None
+    chosen_amount = body.amount_micro if body is not None else None
+    price_override = _resolve_checkout_price(product, tier, chosen_amount)
     try:
-        order = checkout.create_order(session, store, product, referrer_addr)
+        order = checkout.create_order(
+            session, store, product, referrer_addr, price_micro_override=price_override
+        )
     except checkout.AmountUnavailable as exc:
         raise HTTPException(503, "checkout busy, retry") from exc
-    log_event(session, "api", "order.created", store_id=store.id, order_id=order.id)
+    log_event(
+        session,
+        "api",
+        "order.created",
+        store_id=store.id,
+        order_id=order.id,
+        data={"tier": _membership_tier_name(session, order)}
+        if price_override is not None
+        else None,
+    )
     session.commit()
+    tier_name = _membership_tier_name(session, order)
     return {
         "id": order.id,
         "pay_to": store.pay_to,
         "product_name": product.name,
+        **({"tier": tier_name} if tier_name else {}),
+        # Phase 1.3 SLA: the delivery-time promise (minutes) shown to the buyer as
+        # an ETA, and consumed by embed/custom checkout frontends.
+        "sla_minutes": agentic._effective_sla(product),
         "amount": order.expected_micro / 1e6,
         # Exact base-unit amount so the browser builds ERC-20 calldata with BigInt
         # only (amount*1e6 in JS can be off by one micro, which the exact-match
@@ -890,6 +1187,43 @@ def _deliverable_product_id(session: Session, store: Store, raw: object) -> int 
     return pid
 
 
+def _truthy(value: object) -> bool:
+    """Coerce a form/JSON flag to bool: JSON true, or the strings '1'/'true'/'yes'/'on'
+    (a multipart field is always a string)."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_deliverable_version(
+    session: Session,
+    store_id: int,
+    product_id: int | None,
+    kind: str,
+    versioned: bool,
+) -> int:
+    """The ``version`` for a new deliverable. A plain create/replace is a fresh lineage
+    (version 1). A versioned release (versioned=True) is ``max(existing version) + 1`` over
+    every deliverable of the SAME (store, product, kind) — active or not, so the number is
+    strictly monotonic and always greater than any past buyer's entitlement version. It
+    409s when no deliverable of that kind exists yet (nothing to version)."""
+    if not versioned:
+        return 1
+    q = select(func.max(Deliverable.version)).where(
+        Deliverable.store_id == store_id, Deliverable.kind == kind
+    )
+    if product_id is None:
+        q = q.where(Deliverable.product_id.is_(None))
+    else:
+        q = q.where(Deliverable.product_id == product_id)
+    prev_max = session.scalar(q)
+    if prev_max is None:
+        raise HTTPException(
+            409, "no existing deliverable of this kind to publish a new version of"
+        )
+    return int(prev_max) + 1
+
+
 def _positive_int(value, default: int) -> int:
     if value is None:
         return default
@@ -951,15 +1285,101 @@ class _SubscriptionParams(BaseModel):
     plan_name: str = Field(min_length=1, max_length=120)
 
 
+class _WholesaleTier(BaseModel):
+    # M16 B2B: one buyer-identity-keyed wholesale price. price_micro is a StrictInt
+    # (no float amounts) bounded to the M1 product price range. buyer is either the
+    # sentinel 'any_agent' or 'erc8004:<id>' — validated below.
+    model_config = ConfigDict(extra="forbid")
+    buyer: str
+    price_micro: StrictInt = Field(
+        ge=config.TIER_PRICE_MICRO_MIN, le=config.TIER_PRICE_MICRO_MAX
+    )
+
+    @field_validator("buyer")
+    @classmethod
+    def _v_buyer(cls, v: str) -> str:
+        if v == "any_agent":
+            return v
+        m = re.fullmatch(r"erc8004:(\d{1,20})", v)
+        if m:
+            # Canonicalize the id (strip leading zeros) so the stored buyer always
+            # matches match_tier's f"erc8004:{int}" form — 'erc8004:07' would
+            # otherwise be a dead tier that silently never applies.
+            return f"erc8004:{int(m.group(1))}"
+        raise ValueError("buyer must be 'any_agent' or 'erc8004:<id>'")
+
+
+class _MembershipTier(BaseModel):
+    # Storefront depth: one named access tier a buyer may pick at checkout. name is
+    # merchant copy (rendered client-side via textContent — never innerHTML); price_micro
+    # is a StrictInt (no float amounts) in the same micro-USDT range as a wholesale tier.
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=60)
+    price_micro: StrictInt = Field(
+        ge=config.TIER_PRICE_MICRO_MIN, le=config.TIER_PRICE_MICRO_MAX
+    )
+
+
 class PricingBody(BaseModel):
     pricing_model: Literal["one_time", "batch", "metered", "subscription"]
     params: dict | None = None
+    # M16 B2B wholesale tiers — additive on the SAME pricing_params JSON column, no
+    # migration. A pricing call rewrites the product's wholesale terms wholesale:
+    # omitted/None clears any prior tiers (the same replace semantics as params).
+    tiers: list[_WholesaleTier] | None = None
+    # Storefront depth — membership tiers + pay-what-you-want, both additive on the SAME
+    # pricing_params JSON column (no migration). A buyer picks a membership tier by name
+    # (its price becomes the order amount) OR names an amount >= pwyw_min_micro; the two
+    # are mutually exclusive (rejected together). Omitted/None clears any prior value, the
+    # same replace semantics as tiers/params.
+    membership_tiers: list[_MembershipTier] | None = None
+    pwyw_min_micro: StrictInt | None = Field(
+        default=None, ge=config.TIER_PRICE_MICRO_MIN, le=config.TIER_PRICE_MICRO_MAX
+    )
 
 
 _PRICING_PARAM_MODELS = {
     "metered": _MeteredParams,
     "subscription": _SubscriptionParams,
 }
+
+
+def _validate_tiers(
+    tiers: list[_WholesaleTier] | None, base_price_micro: int
+) -> list[dict] | None:
+    """Normalize wholesale tiers or raise 422: at most TIERS_MAX, no duplicate
+    buyers, and every tier at or below the base price (a wholesale tier is a
+    discount — a tier above base would grief verified buyers once 16.2 wires
+    tiers into the 402). Per-tier shape/bounds are enforced by the model."""
+    if not tiers:
+        return None
+    if len(tiers) > config.TIERS_MAX:
+        raise HTTPException(422, f"at most {config.TIERS_MAX} wholesale tiers")
+    buyers = [t.buyer for t in tiers]
+    if len(set(buyers)) != len(buyers):
+        raise HTTPException(422, "duplicate tier buyer")
+    for t in tiers:
+        if t.price_micro > base_price_micro:
+            raise HTTPException(
+                422, "tier price_micro must not exceed the base product price"
+            )
+    return [t.model_dump() for t in tiers]
+
+
+def _validate_membership_tiers(
+    tiers: list[_MembershipTier] | None,
+) -> list[dict] | None:
+    """Normalize membership tiers or raise 422: at most TIERS_MAX and no duplicate
+    names (case-insensitive — 'Gold' and 'gold' would be an ambiguous pick). Per-tier
+    shape/bounds are enforced by the model."""
+    if not tiers:
+        return None
+    if len(tiers) > config.TIERS_MAX:
+        raise HTTPException(422, f"at most {config.TIERS_MAX} membership tiers")
+    names = [t.name.strip().lower() for t in tiers]
+    if len(set(names)) != len(names):
+        raise HTTPException(422, "duplicate membership tier name")
+    return [t.model_dump() for t in tiers]
 
 
 def _validate_pricing_params(model: str, params: dict | None) -> dict | None:
@@ -1003,10 +1423,12 @@ async def set_pricing(
         raise HTTPException(422, "invalid JSON body") from None
     try:
         parsed = PricingBody.model_validate(body)
-    except ValidationError:
+    except ValidationError as exc:
+        first = exc.errors(include_url=False)[0]
+        loc = ".".join(str(p) for p in first.get("loc", ()))
         raise HTTPException(
             422,
-            "pricing_model must be one of: one_time, batch, metered, subscription",
+            f"invalid pricing body ({loc or 'pricing_model'}): {first.get('msg')}",
         ) from None
     params = _validate_pricing_params(parsed.pricing_model, parsed.params)
     product = session.scalar(
@@ -1016,8 +1438,25 @@ async def set_pricing(
     )
     if product is None:
         raise HTTPException(409, "store has no active product")
+    tiers = _validate_tiers(parsed.tiers, product.price_micro)
+    membership_tiers = _validate_membership_tiers(parsed.membership_tiers)
+    # Membership tiers and pay-what-you-want are two ways to set the checkout price, so a
+    # single product can carry only one (both together is an ambiguous checkout).
+    if membership_tiers and parsed.pwyw_min_micro is not None:
+        raise HTTPException(
+            422, "a product cannot set both membership tiers and pay-what-you-want"
+        )
+    # Tiers/membership/pwyw all ride the SAME JSON column under their own keys alongside
+    # any model params. Absent keys clear prior values (whole-rewrite semantics).
+    merged = dict(params) if params else {}
+    if tiers:
+        merged["tiers"] = tiers
+    if membership_tiers:
+        merged["membership_tiers"] = membership_tiers
+    if parsed.pwyw_min_micro is not None:
+        merged["pwyw_min_micro"] = parsed.pwyw_min_micro
     product.pricing_model = parsed.pricing_model
-    product.pricing_params = params
+    product.pricing_params = merged or None
     log_event(
         session,
         "api",
@@ -1030,6 +1469,9 @@ async def set_pricing(
         "product_id": product.id,
         "pricing_model": parsed.pricing_model,
         "params": params,
+        "tiers": tiers,
+        "membership_tiers": membership_tiers,
+        "pwyw_min_micro": parsed.pwyw_min_micro,
     }
 
 
@@ -1065,6 +1507,9 @@ async def create_deliverable(
         except delivery.UploadTooLarge:
             raise HTTPException(413, "file exceeds the size cap") from None
         product_id = _deliverable_product_id(session, store, form.get("product_id"))
+        version = _resolve_deliverable_version(
+            session, store.id, product_id, "file", _truthy(form.get("version"))
+        )
         _deactivate_deliverables(session, store.id, product_id)
         deliverable = Deliverable(
             store_id=store.id,
@@ -1080,6 +1525,7 @@ async def create_deliverable(
             link_ttl_seconds=_positive_int(
                 form.get("link_ttl_seconds"), config.LINK_TTL_DEFAULT
             ),
+            version=version,
             active=True,
         )
     else:
@@ -1097,15 +1543,22 @@ async def create_deliverable(
                 raise HTTPException(
                     422, "text deliverable requires a non-empty payload"
                 )
+            version = _resolve_deliverable_version(
+                session, store.id, product_id, "text", _truthy(body.get("version"))
+            )
             _deactivate_deliverables(session, store.id, product_id)
             deliverable = Deliverable(
                 store_id=store.id,
                 product_id=product_id,
                 kind="text",
                 payload=payload,
+                version=version,
                 active=True,
             )
         elif kind == "license":
+            version = _resolve_deliverable_version(
+                session, store.id, product_id, "license", _truthy(body.get("version"))
+            )
             _deactivate_deliverables(session, store.id, product_id)
             deliverable = Deliverable(
                 store_id=store.id,
@@ -1114,6 +1567,7 @@ async def create_deliverable(
                 max_activations=_positive_int(
                     body.get("max_activations"), config.LICENSE_ACTIVATIONS_DEFAULT
                 ),
+                version=version,
                 active=True,
             )
         else:
@@ -1133,6 +1587,7 @@ async def create_deliverable(
         "id": deliverable.id,
         "product_id": deliverable.product_id,
         "kind": deliverable.kind,
+        "version": deliverable.version,
         "active": True,
     }
     if deliverable.kind == "file":
@@ -1257,15 +1712,130 @@ def library(request: Request, session: Session = Depends(get_session)):
             "product": product.name if product else None,
             "amount": order.expected_micro / 1e6,
             "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+            # Phase 1.6: lets the buyer UI offer confirm/dispute while still 'pending'.
+            "eval_status": order.eval_status,
             "kind": delivery_row.kind if delivery_row else "text",
             # The authenticated wallet owner may see the full Delivery payload —
             # this is the ONLY post-gating path to an entitlement-backed text
             # secret (file/license also get download_url/license_key below).
             "delivery": delivery_row.payload if delivery_row else DEFAULT_DELIVERY,
         }
+        tier_name = _membership_tier_name(session, order)
+        if tier_name:
+            item["tier"] = tier_name
         _augment_gated(session, order, item)
         purchases.append(item)
     return {"wallet": wallet, "purchases": purchases}
+
+
+class EvaluateBody(BaseModel):
+    order_id: str = Field(min_length=1, max_length=32)
+    verdict: Literal["confirm", "reject"]
+
+
+@app.post("/api/library/evaluate")
+@limiter.limit("30/minute")
+def library_evaluate(
+    request: Request, body: EvaluateBody, session: Session = Depends(get_session)
+):
+    """The paying buyer confirms or disputes a delivered order (Phase 1.6). Gated by
+    the same wallet-signature session as /api/library, and only for an order whose
+    on-chain payer IS the authenticated wallet. Reputation-only: it never moves funds
+    (a dispute is not a refund) — it feeds success_rate. Idempotent: a settled
+    evaluation is not re-opened; an unknown/foreign order is an opaque 404."""
+    if not config.SIGNING_KEY:
+        raise HTTPException(503, "sign-in not configured")
+    try:
+        wallet = delivery.load_session_token(_bearer(request))
+    except SignatureExpired:
+        raise HTTPException(401, "session expired") from None
+    except BadSignature:
+        raise HTTPException(401, "invalid session") from None
+    order = session.get(Order, body.order_id)
+    if (
+        order is None
+        or order.from_addr is None
+        or order.from_addr.lower() != wallet
+        or order.status not in checkout.TERMINAL_DELIVERED
+    ):
+        raise HTTPException(404, "order not found")
+    if order.eval_status not in ("none", "pending"):
+        raise HTTPException(409, "order already evaluated")
+    order.eval_status = "confirmed" if body.verdict == "confirm" else "rejected"
+    log_event(
+        session,
+        "api",
+        f"order.eval_{order.eval_status}",
+        store_id=order.store_id,
+        order_id=order.id,
+    )
+    session.commit()
+    return {"order_id": order.id, "eval_status": order.eval_status}
+
+
+class ReviewBody(BaseModel):
+    order_id: str = Field(min_length=1, max_length=32)
+    rating: StrictInt = Field(ge=1, le=5)
+    body: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/api/library/review")
+@limiter.limit("30/minute")
+def library_review(
+    request: Request, body: ReviewBody, session: Session = Depends(get_session)
+):
+    """A verified buyer writes ONE review for a delivered order they paid for (Phase
+    3). Gated by the same wallet-signature session as /api/library, and un-fakeable:
+    the order must exist, be delivered (TERMINAL_DELIVERED), and its on-chain payer
+    must equal the authenticated wallet — else an opaque 404 (no order oracle). The
+    body is Warden-screened before insert (BLOCK -> 422, unavailable -> 503) so no
+    unscreened text is stored; UNIQUE(order_id) makes a second review a 409.
+    Reputation-only: it never moves funds."""
+    if not config.SIGNING_KEY:
+        raise HTTPException(503, "sign-in not configured")
+    try:
+        wallet = delivery.load_session_token(_bearer(request))
+    except SignatureExpired:
+        raise HTTPException(401, "session expired") from None
+    except BadSignature:
+        raise HTTPException(401, "invalid session") from None
+    order = session.get(Order, body.order_id)
+    if (
+        order is None
+        or order.from_addr is None
+        or order.from_addr.lower() != wallet
+        or order.status not in checkout.TERMINAL_DELIVERED
+    ):
+        raise HTTPException(404, "order not found")
+    text_body = body.body.strip()
+    if not text_body:
+        raise HTTPException(422, "review body is empty")
+    # Screen fail-closed BEFORE any row is written: BLOCK -> 422, unavailable -> 503.
+    try:
+        outcome = screen(text_body)
+    except ScreeningBlocked as exc:
+        raise HTTPException(422, "content did not pass safety screening") from exc
+    if outcome.status != "allow":
+        raise HTTPException(503, "content screening temporarily unavailable")
+    review = Review(
+        store_id=order.store_id,
+        product_id=order.product_id,
+        order_id=order.id,
+        from_addr=order.from_addr.lower(),
+        rating=body.rating,
+        body=text_body,
+    )
+    try:
+        with session.begin_nested():
+            session.add(review)
+    except IntegrityError:
+        # UNIQUE(order_id): this completed order is already reviewed.
+        raise HTTPException(409, "order already reviewed") from None
+    log_event(
+        session, "api", "order.reviewed", store_id=order.store_id, order_id=order.id
+    )
+    session.commit()
+    return {"order_id": order.id, "rating": review.rating}
 
 
 class WaitlistBody(BaseModel):
@@ -1565,13 +2135,13 @@ if os.getenv("OKX_API_KEY"):
     # x402-check probes GET and expects a 402 challenge (the Warden 405->402
     # lesson); a paid GET with no body returns service-usage JSON.
     _upgrade_route = RouteConfig(
-        accepts=[build_fee_payment_option(_rail, "1000000")],
-        description="Tilla — upgrade an existing storefront (1 USDT)",
+        accepts=[build_fee_payment_option(_rail, "30000")],
+        description="Tilla — upgrade an existing storefront (0.03 USDT)",
         mime_type="application/json",
     )
     _add_product_route = RouteConfig(
-        accepts=[build_fee_payment_option(_rail, "500000")],
-        description="Tilla — add a product to a storefront (0.5 USDT)",
+        accepts=[build_fee_payment_option(_rail, "10000")],
+        description="Tilla — add a product to a storefront (0.01 USDT)",
         mime_type="application/json",
     )
     _paid = {

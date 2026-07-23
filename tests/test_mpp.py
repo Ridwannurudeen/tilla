@@ -309,9 +309,11 @@ def test_open_endpoint_creates_channel(make_store, monkeypatch):
     r = client.post(
         "/s/e1/mpp/open",
         json={
-            "payload": {
-                "channelId": "ch_sa",
-                "authorization": {"from": "0x" + "c" * 40},
+            "sa_request": {
+                "payload": {
+                    "channelId": "ch_sa",
+                    "authorization": {"from": "0x" + "c" * 40},
+                }
             }
         },
     )
@@ -327,7 +329,9 @@ def test_open_endpoint_creates_channel(make_store, monkeypatch):
 def test_open_endpoint_502_on_sa_error_no_row(make_store, monkeypatch):
     _metered_store("e2")
     _enable(monkeypatch, MockGateway(fail=True))
-    r = client.post("/s/e2/mpp/open", json={"payload": {"channelId": "ch_x"}})
+    r = client.post(
+        "/s/e2/mpp/open", json={"sa_request": {"payload": {"channelId": "ch_x"}}}
+    )
     assert r.status_code == 502
     with SessionLocal() as s:
         assert s.scalar(select(MppChannel)) is None  # no local state change
@@ -396,7 +400,7 @@ def test_close_endpoint(make_store, monkeypatch):
         "/s/e5/mpp/close",
         json={
             "channel_id": "ch_c",
-            "payload": {"channelId": "ch_c"},
+            "sa_request": {"payload": {"channelId": "ch_c"}},
             "final_spent_micro": 42,
         },
     )
@@ -433,7 +437,7 @@ def test_topup_unknown_channel_404_before_sa(make_store, monkeypatch):
         json={
             "channel_id": "ghost",
             "additional_deposit_micro": 100,
-            "payload": {"channelId": "ghost"},
+            "sa_request": {"payload": {"channelId": "ghost"}},
         },
     )
     assert r.status_code == 404  # existence checked before the fund-moving SA call
@@ -450,7 +454,7 @@ def test_topup_amount_derived_from_receipt_not_client(make_store, monkeypatch):
         json={
             "channel_id": "ch_t2",
             "additional_deposit_micro": 1,
-            "payload": {"channelId": "ch_t2"},
+            "sa_request": {"payload": {"channelId": "ch_t2"}},
         },
     )
     assert r.status_code == 200
@@ -485,7 +489,7 @@ def test_close_does_not_lower_spent_below_vouchers(make_store, monkeypatch):
         "/s/cl1/mpp/close",
         json={
             "channel_id": "ch_cl",
-            "payload": {"channelId": "ch_cl"},
+            "sa_request": {"payload": {"channelId": "ch_cl"}},
             "final_spent_micro": 0,
         },
     )

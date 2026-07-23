@@ -1,7 +1,9 @@
 """Environment-driven settings shared across the app package."""
 
+import logging
 import os
 import pathlib
+import re
 
 THEMES_DIR = pathlib.Path(__file__).resolve().parent.parent / "themes"
 STORES_DIR = pathlib.Path(os.environ.get("TILLA_STORES_DIR", "/opt/tilla/stores"))
@@ -181,6 +183,31 @@ def _flag(name: str) -> bool:
 # eip155:196 makes the middleware's lazy initialize raise -> 502 on ALL protected
 # routes, so only flip after the /supported probe confirms the scheme.
 AGGR_DEFERRED_ENABLED = _flag("TILLA_AGGR_DEFERRED")
+# aggr_deferred reconciliation poller cadence + burst bound (mirrors the attest loop
+# knobs). Only meaningful when the reconcile loop runs (SWEEP_ENABLED AND
+# AGGR_DEFERRED_ENABLED AND OKX creds) — never in tests, which disable SWEEP_ENABLED.
+RECONCILE_INTERVAL = float(os.environ.get("TILLA_RECONCILE_INTERVAL", "30"))
+RECONCILE_MAX_PER_TICK = int(os.environ.get("TILLA_RECONCILE_MAX_PER_TICK", "20"))
+# CHAIN settlement detection for aggr_deferred: OKX's facilitator /settle returns a
+# 200 with an EMPTY transaction, so the real settlement is only observable on-chain —
+# a USDT0 Transfer from the buyer (order.from_addr) to the merchant (order.pay_to)
+# whose transaction was submitted by the OKX facilitator RELAYER below. Settlements
+# BATCH (N orders -> one summed transfer), so the poller attributes by accumulation
+# per (from_addr -> pay_to) pair. The relayer is pinned so a stray direct transfer can
+# never be mistaken for a settlement; overridable in the VPS .env if OKX rotates it.
+AGGR_FACILITATOR_RELAYER = os.environ.get(
+    "TILLA_AGGR_FACILITATOR_RELAYER",
+    "0x0596C8A60D30195CFAddD8bB61b13dBD2AA725B7",
+).lower()
+# How far back (in blocks) the chain poller scans for a pair's settlement transfer.
+# The facilitator settles ~30s after payment and the reaper voids a settling order
+# after 15 min, so a bounded recent window covers every finalizable order. Paged in
+# GETLOGS_MAX_SPAN-block windows (the X Layer 101-block cap), capped at
+# RECONCILE_MAX_WINDOWS windows per pair per tick.
+AGGR_SETTLE_LOOKBACK_BLOCKS = int(
+    os.environ.get("TILLA_AGGR_SETTLE_LOOKBACK_BLOCKS", "1200")
+)
+RECONCILE_MAX_WINDOWS = int(os.environ.get("TILLA_RECONCILE_MAX_WINDOWS", "12"))
 # MPP pay-as-you-go: /s/{slug}/mpp/* endpoints. OFF -> every endpoint 503s.
 MPP_ENABLED = _flag("TILLA_MPP_ENABLED")
 # Subscriptions (x402 period, JS sidecar): /s/{slug}/subscribe. OFF -> 503.
@@ -218,10 +245,21 @@ SCHEMA_REGISTRY_ADDR = "0x4200000000000000000000000000000000000020"
 # The Tilla receipt schema. Field ORDER is load-bearing: it defines both the schema
 # UID (keccak of schema+resolver+revocable) and the abi.encode layout of every
 # attestation's data blob. Changing it silently orphans every prior attestation.
-ATTEST_SCHEMA = "address buyer,string storeId,uint256 amountUsdt6,bytes32 paymentTxHash"
+# productId + contentHash bind the receipt to WHAT was delivered — the product identity
+# and a sha256 of the delivered payload — not merely that money moved. Both are appended
+# so the original four fields keep their positions (additive).
+ATTEST_SCHEMA = (
+    "address buyer,string storeId,uint256 amountUsdt6,bytes32 paymentTxHash,"
+    "uint256 productId,bytes32 contentHash"
+)
 # Worker cadence + burst bound (mirrors the webhook loop knobs).
 ATTEST_INTERVAL = float(os.environ.get("TILLA_ATTEST_INTERVAL", "30"))
-ATTEST_MAX_PER_TICK = int(os.environ.get("TILLA_ATTEST_MAX_PER_TICK", "5"))
+# One attestation broadcast per tick: two orders in the same tick would fetch the
+# same account nonce (the first's tx is still unmined), collide on that nonce, and
+# either churn sending->pending or — if gas rose and one replaced the other in the
+# mempool — strand the replaced order in a never-mining 'sent' that reconcile marks
+# terminally 'failed'. Serializing to one broadcast per tick sidesteps both.
+ATTEST_MAX_PER_TICK = int(os.environ.get("TILLA_ATTEST_MAX_PER_TICK", "1"))
 # Per-tx gas-cost cap in wei (estimate_gas * gas_price). Over this the tick REFUSES
 # to sign and leaves the order 'pending' for a calmer fee window — refuse, never
 # overspend (the TILLA_WARDEN_MAX_MICRO philosophy). Default 0.01 OKB (~30x a normal
@@ -247,8 +285,92 @@ TILLA_ACP_SIGNING_SECRET = os.environ.get("TILLA_ACP_SIGNING_SECRET", "")
 # many active subscribers (abuse bound, alongside the tightest slowapi limiter).
 TILLA_SUBSCRIBERS_MAX = int(os.environ.get("TILLA_SUBSCRIBERS_MAX", "5000"))
 
+# ---------- M16 B2B wholesale tiers: read-only ERC-8004 owner verification -----
+# A wholesale tier discount is granted ONLY when the settled payer wallet equals
+# the on-chain owner of the presented ERC-8004 agent id (INV-1), resolved by a
+# READ-ONLY eth_call to this IdentityRegistry — Tilla never writes to it and never
+# signs. Empty (the default) => verification always returns None => every quote and
+# settle falls back to the base price (fail-to-base, never fail-open-to-a-discount).
+# The live X Layer registry address is set in the VPS .env (user-gated, like the
+# other dormant on-chain constants); tests inject it + mock the RPC.
+ERC8004_REGISTRY = os.environ.get("TILLA_ERC8004_REGISTRY", "").lower()
+# Owner lookup selector: ownerOf(uint256) = 0x6352211e. ERC-8004 agents are ERC-721
+# tokens whose tokenId is the agentId, so ownerOf returns the controlling wallet.
+# Overridable in case the deployed registry exposes a differently-named read.
+ERC8004_OWNER_SELECTOR = os.environ.get("TILLA_ERC8004_OWNER_SELECTOR", "0x6352211e")
+# Positive-result cache TTL (seconds) for the identity read — bounds enumeration /
+# DoS on the public quote endpoint. Only verified owners are cached; an RPC outage
+# is never cached, so a discount is never served on stale trust.
+ERC8004_LOOKUP_TTL = float(os.environ.get("TILLA_ERC8004_LOOKUP_TTL", "300"))
+# Wholesale tier bounds (micro-USDT), mirroring the M1 product price bounds
+# (0.01 .. 10000 USDT); no floats — micro ints only.
+TIER_PRICE_MICRO_MIN = 10_000
+TIER_PRICE_MICRO_MAX = 10_000_000_000
+TIERS_MAX = 20
+
+# ---------- M16.4 federation ingest (mirror-of-mirrors) ----------------------
+# Operator-configured peer base URLs (comma-separated https origins), NEVER
+# user-submitted. Empty (the default) => the feature is DORMANT: the loop never
+# starts, zero network. The ingest fetches each peer's /discovery/resources +
+# per-store feed.json, schema-validates against the frozen 16.3 contract, and
+# caches read-only rows in ``federated_listings`` that link OUT to the peer's own
+# checkout. Tilla NEVER proxies, quotes, or settles a peer's sale.
+FEDERATION_PEERS = [
+    p.strip()
+    for p in os.environ.get("TILLA_FEDERATION_PEERS", "").split(",")
+    if p.strip()
+]
+FEDERATION_INTERVAL = float(os.environ.get("TILLA_FEDERATION_INTERVAL", "300"))
+FEDERATION_FETCH_TIMEOUT = float(os.environ.get("TILLA_FEDERATION_FETCH_TIMEOUT", "5"))
+# Hard body cap per fetched document (bytes) — a poisoned/oversized peer feed is
+# rejected before it is parsed (256 KiB).
+FEDERATION_MAX_BYTES = int(os.environ.get("TILLA_FEDERATION_MAX_BYTES", "262144"))
+# Cap the stores ingested per peer per tick (bounds a hostile peer's row count).
+FEDERATION_MAX_STORES = int(os.environ.get("TILLA_FEDERATION_MAX_STORES", "50"))
+# ---------- M17 growth agent: content-calendar scheduler — DORMANT by default ---
+# A background loop drafts marketing copy on a merchant's calendar cadence, screens
+# it fail-closed, and queues it in the growth outbox (INV-1: it NEVER sends). It is
+# double-gated OFF: GROWTH_SCHED_ENABLED default OFF (so zero LLM spend) AND it only
+# starts under SWEEP_ENABLED (never in tests). Enabling it is the demand receipt —
+# flipped ON in the VPS .env only once a real merchant asks for a calendar.
+GROWTH_SCHED_ENABLED = _flag("TILLA_GROWTH_SCHED_ENABLED")
+# Cadence of the scheduler loop (seconds). Default daily; the per-store cadence
+# (daily/weekly) is enforced on top of this tick inside the tick itself.
+GROWTH_SCHED_INTERVAL = float(os.environ.get("TILLA_GROWTH_SCHED_INTERVAL", "86400"))
+# Per-store hard cap on scheduled generations per day (abuse backstop on top of the
+# cadence pacing), and a global daily ceiling across every store (unattended-spend
+# guard). A generation = one LLM call producing one store's scheduled drafts.
+GROWTH_SCHED_STORE_DAILY_MAX = int(os.environ.get("TILLA_GROWTH_STORE_DAILY_MAX", "6"))
+GROWTH_DAILY_MAX = int(os.environ.get("TILLA_GROWTH_DAILY_MAX", "50"))
+
+# ---------- Roadmap Phase 3: A2A commissioned-build escrow — DORMANT by default --
+# A buyer agent commissions a custom deliverable; the CommissionJob walks a lifecycle
+# (open -> budget_set -> funded -> submitted -> completed, + cancelled/disputed) with
+# buyer protection and an optional evaluator that gates release. This is Tilla's only
+# custodial-ADJACENT surface, so it is opt-in and phase-gated OFF: every /api/escrow/*
+# endpoint 503s until TILLA_ESCROW is flipped (the MPP/ACP dormant-mount pattern).
+# NON-CUSTODIAL (INV, above all): Tilla holds no keys, sends no funds, and never auto-
+# releases. The two fund-relevant transitions (funded, completed) are each driven by
+# VERIFYING a user-signed on-chain USDT0 transfer and RECORDING its tx hash — the exact
+# self_serve/refunds verify-only pattern. The state machine only tracks state; no fund-
+# moving code exists here, so flipping the flag exposes a tracker, never a spender.
+ESCROW_ENABLED = _flag("TILLA_ESCROW")
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,39}$"
 SLUG_MAX_LEN = 40  # keep in sync with SLUG_PATTERN's length bound
+
+# ---------- M18 cross-chain checkout honesty (18.3) ----------
+# Optional operator-configured third-party "Bridge funds to X Layer" link on the
+# checkout page. Default empty => the affordance is ABSENT. Operator config ONLY
+# (never merchant/LLM content, INV-3); validated to an http(s) URL so a malformed or
+# hostile value (javascript:/data:) can never render as a link — anything else is
+# dropped (loud) and the affordance stays absent. No bridge code, no bridge state.
+_BRIDGE_RAW = os.environ.get("TILLA_BRIDGE_URL", "").strip()
+BRIDGE_URL = _BRIDGE_RAW if re.match(r"^https?://\S+$", _BRIDGE_RAW) else ""
+if _BRIDGE_RAW and not BRIDGE_URL:
+    logging.getLogger("tilla").warning(
+        "TILLA_BRIDGE_URL is not an http(s) URL — bridge affordance disabled"
+    )
 
 # Reserved so a merchant's generated slug can never collide with an app route
 # or a future well-known path.

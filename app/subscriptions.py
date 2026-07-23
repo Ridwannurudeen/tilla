@@ -147,6 +147,24 @@ def _subscription_idem_key(sig: str) -> str:
     return "0x" + hashlib.sha256(basis.encode()).hexdigest()
 
 
+def _payer_from_terms(sig: str) -> str | None:
+    """``terms.payer`` from the buyer's decoded PAYMENT-SIGNATURE, lowercased — used
+    only to RECORD from_addr at first settle, where the on-chain facilitator settle
+    has already bound termsSignature -> terms.payer (EIP-712 SubscriptionTerms
+    includes ``payer``), so the recorded value is authentic. This field is NOT an
+    authenticator on replay: it is plaintext in a public envelope and anyone can
+    resubmit it, so replay never trusts it (goods are gated behind the wallet
+    session instead — see ``_subscription_body(include_gated=...)``)."""
+    try:
+        decoded = json.loads(base64.b64decode(sig))
+        inner = decoded.get("payload") if isinstance(decoded, dict) else None
+        terms = inner.get("terms") if isinstance(inner, dict) else None
+        payer = terms.get("payer") if isinstance(terms, dict) else None
+        return payer.lower() if isinstance(payer, str) and payer else None
+    except Exception:
+        return None
+
+
 async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
     """With a PAYMENT-SIGNATURE: rebuild the requirements SERVER-SIDE from ctx (so
     verify/settle bind the buyer's signature to the STORE's payTo/amount/period,
@@ -156,7 +174,8 @@ async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
     a facilitator settle failure / 503 -> the same status, NO Order; only a
     facilitator success creates the Order + delivers."""
     idem_key = _subscription_idem_key(sig)
-    replay = await asyncio.to_thread(_subscription_replay, ctx, idem_key)
+    payer = _payer_from_terms(sig)
+    replay = await asyncio.to_thread(_subscription_replay, ctx, idem_key, payer)
     if replay is not None:
         return JSONResponse(replay, headers=_SUB_HEADERS)
 
@@ -190,13 +209,26 @@ async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
             "subscription settle failed",
         )
     reference = _safe_json(sresp).get("facilitator")
-    body_out = await asyncio.to_thread(_fulfill_subscription, ctx, reference, idem_key)
+    body_out = await asyncio.to_thread(
+        _fulfill_subscription, ctx, reference, idem_key, payer
+    )
     return JSONResponse(body_out, headers=_SUB_HEADERS)
 
 
-def _subscription_body(session, order: Order, ctx: dict) -> dict:
-    """Build the subscribe response body for an order, delivering through the exact
-    M3/M4 ``checkout.deliver`` path (idempotent, so it is identical on a replay)."""
+def _subscription_body(session, order: Order, ctx: dict, include_gated: bool) -> dict:
+    """Build the subscribe response body, delivering through the exact M3/M4
+    ``checkout.deliver`` path (idempotent).
+
+    ``include_gated`` mirrors ``main._order_response``: the FIRST settle is
+    authenticated by the on-chain facilitator settle (termsSignature bound to the
+    payer), so it may return the gated goods inline. A REPLAY carries only a public,
+    re-submittable envelope — it is NOT re-authenticated, so for an entitlement-
+    backed deliverable the payload is withheld and replaced by the neutral claim
+    message; the real payer retrieves the goods via the wallet-session ``/api/library``
+    (personal_sign as ``from_addr``), which an envelope-replayer cannot forge. A
+    legacy text order (no entitlement) passes through unchanged."""
+    from app.models import Entitlement
+
     product = session.get(Product, ctx["product_id"])
     delivery_row = checkout.deliver(session, order)
     body = {
@@ -206,21 +238,35 @@ def _subscription_body(session, order: Order, ctx: dict) -> dict:
         "amount_micro": ctx["amount_per_period_micro"],
         "period_sec": ctx["period_sec"],
         "kind": delivery_row.kind if delivery_row else "text",
-        "delivery": delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY,
     }
-    agentic._augment_agent_gated(session, order, body)
+    ent = session.scalar(select(Entitlement).where(Entitlement.order_id == order.id))
+    if include_gated:
+        body["delivery"] = (
+            delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY
+        )
+        agentic._augment_agent_gated(session, order, body)
+    elif ent is not None:
+        # Unauthenticated replay + entitlement-backed goods: gate behind the wallet
+        # session. Delivery.payload IS the license key / text secret, so never echo
+        # it and never mint a download token here.
+        from app.main import CLAIM_DELIVERY_MESSAGE
+
+        body["delivery"] = CLAIM_DELIVERY_MESSAGE
+        body["claim"] = True
+    else:
+        body["delivery"] = (
+            delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY
+        )
     return body
 
 
-def _subscription_replay(ctx: dict, idem_key: str) -> dict | None:
+def _subscription_replay(ctx: dict, idem_key: str, payer: str | None) -> dict | None:
     """Return the existing order's body for a replayed PAYMENT-SIGNATURE (keyed on
     the terms signature), or None on a first submission. Prevents a replay from
     re-hitting the facilitator and minting a duplicate order + delivery."""
     with SessionLocal() as session:
         # Scope the replay lookup to this store: a terms-signature bound to store A
         # must never replay against store B and hand over another store's goods.
-        # (Payer-binding within a single store remains a documented flag-flip
-        # blocker — see docs/spikes.md.)
         order = session.scalar(
             select(Order).where(
                 Order.x402_nonce == idem_key,
@@ -229,12 +275,17 @@ def _subscription_replay(ctx: dict, idem_key: str) -> dict | None:
         )
         if order is None:
             return None
-        body = _subscription_body(session, order, ctx)
+        # A replay is NOT re-authenticated (the envelope is public and re-submittable),
+        # so entitlement-backed goods are withheld here — the real payer claims them via
+        # the wallet-session /api/library. include_gated=False.
+        body = _subscription_body(session, order, ctx, include_gated=False)
         session.commit()
         return body
 
 
-def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
+def _fulfill_subscription(
+    ctx: dict, reference, idem_key: str, payer: str | None
+) -> dict:
     """Record the settled subscription as an agent Order and deliver through the
     exact M3/M4 ``checkout.deliver`` path. Runs ONLY after a real facilitator settle
     success — never on a mocked/failed settle. The terms-signature idempotency key
@@ -251,6 +302,7 @@ def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
             status="confirmed",
             channel="agent",
             x402_nonce=idem_key,
+            from_addr=payer,
             paid_at=checkout._now(),
         )
         session.add(order)
@@ -266,7 +318,10 @@ def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
             )
             if existing is None:
                 raise
-            body = _subscription_body(session, existing, ctx)
+            # Lost the settle race to a concurrent request: the winner already
+            # delivered. Treat like a replay — withhold gated goods (claim via
+            # wallet session). include_gated=False.
+            body = _subscription_body(session, existing, ctx, include_gated=False)
             session.commit()
             return body
         log_event(
@@ -277,7 +332,9 @@ def _fulfill_subscription(ctx: dict, reference, idem_key: str) -> dict:
             order_id=order.id,
             data={"reference": reference} if isinstance(reference, dict) else None,
         )
-        body = _subscription_body(session, order, ctx)
+        # First settle: the on-chain facilitator settle authenticated the payer, so
+        # the gated goods may be returned inline. include_gated=True.
+        body = _subscription_body(session, order, ctx, include_gated=True)
         session.commit()
         return body
 

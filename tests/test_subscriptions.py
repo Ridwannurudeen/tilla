@@ -6,6 +6,7 @@ verify/settle path — only a mocked facilitator settle SUCCESS creates an Order
 verify reject, a settle failure, or an unreachable sidecar creates NOTHING.
 """
 
+import json
 import httpx
 import respx
 from fastapi.testclient import TestClient
@@ -244,6 +245,133 @@ def test_replayed_signature_is_idempotent(monkeypatch):
     assert r1.json()["order_id"] == r2.json()["order_id"]
     assert len(_orders()) == 1
     assert settle.call_count == 1  # the replay never re-hit the facilitator
+
+
+# --------------------------------------------------------------- payer binding
+# A real period PAYMENT-SIGNATURE is a base64 JSON envelope carrying the buyer's
+# signed terms; the recovered signer is terms.payer. _subscription_idem_key keys the
+# replay on termsSignature, so a captured (public) terms-signature collides with the
+# first-settle order even when an attacker swaps in their own payer field.
+def _sub_sig(payer: str, terms_sig: str) -> str:
+    import base64
+    import json
+
+    envelope = {"payload": {"terms": {"payer": payer}, "termsSignature": terms_sig}}
+    return base64.b64encode(json.dumps(envelope).encode()).decode()
+
+
+def _mock_settle(sub_id: str):
+    return respx.post(f"{SIDECAR}/subscriptions/settle").mock(
+        return_value=httpx.Response(
+            200, json={"settled": True, "facilitator": {"subscriptionId": sub_id}}
+        )
+    )
+
+
+PAYER = "0x" + "b" * 40
+ATTACKER = "0x" + "e" * 40
+TERMS_SIG = "0xdeadbeef"
+
+
+def _add_license_deliverable(store_id: int) -> None:
+    from app.models import Deliverable
+
+    with SessionLocal() as s:
+        s.add(Deliverable(store_id=store_id, kind="license", active=True))
+        s.commit()
+
+
+@respx.mock
+def test_replay_withholds_entitlement_goods(monkeypatch):
+    # The real defense: an entitlement-backed subscription (license key) is delivered
+    # INLINE only on first settle (authenticated by the on-chain facilitator settle).
+    # A replay of the PUBLIC envelope — by ANYONE, incl. an attacker swapping the
+    # plaintext payer field — is NOT re-authenticated, so the secret is withheld and
+    # replaced by the claim message; the real payer retrieves it via the wallet-session
+    # /api/library (personal_sign as from_addr), which a replayer cannot forge.
+    sid = _sub_store("sb1")
+    _add_license_deliverable(sid)
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    settle = _mock_settle("sub_b1")
+    reqs = {"requirements": {"scheme": "period"}}
+    r1 = client.post(
+        "/s/sb1/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER, TERMS_SIG)},
+        json=reqs,
+    )
+    assert r1.status_code == 200
+    first = r1.json()
+    assert first.get("license_key")  # first settle delivers the secret inline
+    secret = first["license_key"]
+    assert _orders()[0].from_addr == PAYER  # recorded from the on-chain-bound settle
+
+    # Attacker replays with their own payer field swapped in — still same order (idem
+    # on termsSignature), but the secret is gone.
+    r2 = client.post(
+        "/s/sb1/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig(ATTACKER, TERMS_SIG)},
+        json=reqs,
+    )
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert "license_key" not in body2  # secret withheld on replay
+    assert body2.get("claim") is True
+    assert secret not in json.dumps(body2)  # the key never leaks anywhere in the body
+    assert body2["order_id"] == first["order_id"]  # same order, no duplicate
+    assert len(_orders()) == 1
+    assert settle.call_count == 1  # replay never re-hit the facilitator
+
+
+@respx.mock
+def test_recharge_by_bound_payer_allowed(monkeypatch):
+    # The bound payer re-presenting the same terms-signature is delivered the same
+    # order idempotently (a legit re-charge), never refused.
+    _sub_store("sb2")
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    settle = _mock_settle("sub_b2")
+    args = dict(
+        headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER, TERMS_SIG)},
+        json={"requirements": {"scheme": "period"}},
+    )
+    r1 = client.post("/s/sb2/subscribe", **args)
+    r2 = client.post("/s/sb2/subscribe", **args)
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["order_id"] == r2.json()["order_id"]
+    assert r2.json()["delivery"] == "subscriber content"
+    assert len(_orders()) == 1
+    assert settle.call_count == 1
+
+
+@respx.mock
+def test_checksum_cased_payer_matches_binding(monkeypatch):
+    # Binding is checksum-agnostic: the same wallet in mixed case still matches.
+    _sub_store("sb3")
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    _mock_settle("sub_b3")
+    r1 = client.post(
+        "/s/sb3/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER.lower(), TERMS_SIG)},
+        json={"requirements": {"scheme": "period"}},
+    )
+    r2 = client.post(
+        "/s/sb3/subscribe",
+        headers={"PAYMENT-SIGNATURE": _sub_sig("0x" + "B" * 40, TERMS_SIG)},
+        json={"requirements": {"scheme": "period"}},
+    )
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["order_id"] == r2.json()["order_id"]
 
 
 @respx.mock

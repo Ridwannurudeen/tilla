@@ -1,13 +1,19 @@
-# Tilla contracts — StoreRegistry (PREPARED, NOT DEPLOYED)
+# Tilla contracts — StoreRegistry (DEPLOYED on X Layer mainnet)
 
 A minimal Foundry project for `StoreRegistry.sol`: an owner-gated, fund-less on-chain
 index binding a Tilla store slug (`storeId = keccak256(slug)`) to its merchant wallet
 and a content metadata hash.
 
-> **Status: PREPARED, NOT DEPLOYED.** This ships as source only. Nothing at runtime in
-> the Tilla backend depends on it. Deploying is an on-chain contract creation (gas +
-> key) and is an **explicit user-gated runbook step** — build agents never sign,
-> deploy, or broadcast.
+> **Status: DEPLOYED (2026-07-23) on X Layer mainnet (chainId 196).**
+> - Address: `0x4507701110396B8B4204698ABf760Dd5418BfCe6`
+> - Deploy tx: `0x0ce676bc…8cc27056` (see explorer for the full hash)
+> - Owner/registrar: `0x03d134c36425F312aEFE28Ab08BF471A61cf4ebb` (operator registrar for the demo)
+> - Compiler: solc 0.8.24, optimizer on, runs 200 (matches `foundry.toml`)
+> - 5 live stores registered on-chain (billable, invoice-flow, highland-roast, sync, leaf-ember), read-back verified.
+>
+> Nothing at runtime in the Tilla backend depends on it — it remains a public,
+> verifiable index only. Source-verification on OKLink is an optional follow-up
+> (paste this source, solc 0.8.24 / optimizer 200, constructor arg = the registrar address).
 
 ## Layout
 

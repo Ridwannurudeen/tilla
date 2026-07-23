@@ -10,8 +10,10 @@ are separately validated against a strict hex pattern with a safe fallback.
 import re
 from typing import Mapping
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import FileSystemLoader, select_autoescape
+from jinja2.sandbox import SandboxedEnvironment
 
+from app import config, payment
 from app.config import PUBLIC_BASE_URL, THEMES_DIR
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{3,8}$")
@@ -23,7 +25,12 @@ DEFAULT_PALETTE = {
     "text": "#F5F5FA",
 }
 
-_env = Environment(
+# SandboxedEnvironment (not plain Environment): a theme is third-party code once
+# M15.2 lets an external author supply one, and autoescape only escapes OUTPUT —
+# it does NOT stop template EXECUTION. The sandbox blocks the attribute-access
+# gadget chains (``__init__.__globals__.__builtins__`` …) that would otherwise
+# give an installed theme in-process RCE, keeping INV-1 (declarative-only) true.
+_env = SandboxedEnvironment(
     loader=FileSystemLoader(str(THEMES_DIR)),
     autoescape=select_autoescape(["html"], default_for_string=True, default=True),
 )
@@ -116,14 +123,23 @@ def _dna_ctx(content: Mapping) -> dict:
     }
 
 
-def _seo_ctx(content: Mapping, slug: str) -> dict:
+def _seo_ctx(content: Mapping, slug: str, base_url: str | None = None) -> dict:
     """Canonical URL, OG image path, meta description and a schema.org/Product
     JSON-LD object for the theme <head>. The JSON-LD is emitted with `| tojson`
     (which unicode-escapes `<`, `>`, `&`) so untrusted copy can't break out of
-    the <script type="application/ld+json"> block."""
-    base = PUBLIC_BASE_URL.rstrip("/")
-    canonical = f"{base}/s/{slug}/"
-    og_image = f"{base}/s/{slug}/og.png"
+    the <script type="application/ld+json"> block.
+
+    ``base_url`` overrides the platform base for a Phase 4 custom-domain render: the
+    store is served at the domain root, so canonical/OG resolve to ``https://<domain>/``
+    (and its ``og.png``), never the ``/s/<slug>/`` platform path."""
+    if base_url is not None:
+        base = base_url.rstrip("/")
+        canonical = f"{base}/"
+        og_image = f"{base}/og.png"
+    else:
+        base = PUBLIC_BASE_URL.rstrip("/")
+        canonical = f"{base}/s/{slug}/"
+        og_image = f"{base}/s/{slug}/og.png"
     store_name = str(content.get("store_name", "My Store"))
     description = str(content.get("hero_subcopy") or content.get("tagline") or "")
     product_name = str(content.get("product_name", "")) or store_name
@@ -197,10 +213,14 @@ def _products_ctx(content: Mapping) -> dict:
     return {"PRODUCTS": products}
 
 
-def render(content: Mapping, addr: str, slug: str, theme: str = "original.html") -> str:
-    """Render a store theme from generator output. `content` is untrusted
-    (LLM-produced); `addr`/`slug` are our own already-validated values."""
-    ctx = {
+def _store_ctx(
+    content: Mapping, addr: str, slug: str, base_url: str | None = None
+) -> dict:
+    """The full 15-token store-theme context (+ additive palette/SEO). Shared by
+    :func:`render` and the M15.2 install-time :func:`render_source` check so a
+    candidate theme is exercised with the exact context a live one receives.
+    ``base_url`` (Phase 4 custom domains) re-points canonical/OG at the domain root."""
+    return {
         "SLUG": slug,
         "STORE_NAME": str(content.get("store_name", "My Store")),
         "TAGLINE": str(content.get("tagline", "")),
@@ -212,13 +232,40 @@ def render(content: Mapping, addr: str, slug: str, theme: str = "original.html")
         "PRICE": str(content.get("price_usdt", 0)),
         "EMOJI": str(content.get("emoji", "🛍️")),
         "ADDR": addr,
+        # 18.3 checkout chain honesty: the canonical settlement chain the order is
+        # pinned to (v1 mints every order on X Layer 196), named explicitly on the
+        # page, plus the optional operator-configured bridge link (empty => absent).
+        "CHAIN_NAME": "X Layer",
+        "CHAIN_ID": payment.CANONICAL_CHAIN.chain_id,
+        "BRIDGE_URL": config.BRIDGE_URL,
         **_palette_ctx(content),
         **_dna_ctx(content),
         **_products_ctx(content),
-        **_seo_ctx(content, slug),
+        **_seo_ctx(content, slug, base_url),
     }
+
+
+def render(
+    content: Mapping,
+    addr: str,
+    slug: str,
+    theme: str = "original.html",
+    base_url: str | None = None,
+) -> str:
+    """Render a store theme from generator output. `content` is untrusted
+    (LLM-produced); `addr`/`slug` are our own already-validated values. ``base_url``
+    (Phase 4 custom domains) re-points canonical/OG at ``https://<domain>/``."""
     template = _env.get_template(theme)
-    return template.render(**ctx)
+    return template.render(**_store_ctx(content, addr, slug, base_url))
+
+
+def render_source(source: str, content: Mapping, addr: str, slug: str) -> str:
+    """Render an UNTRUSTED candidate theme *source string* through the same
+    autoescaped env (M15.2 install-time XSS-corpus gate) — `{% include %}` still
+    resolves against the loader-owned ``themes/``, and string autoescape is on
+    (``default_for_string=True``), so a candidate theme never renders under
+    weaker escaping than a live one. Never used on the request path."""
+    return _env.from_string(source).render(**_store_ctx(content, addr, slug))
 
 
 def render_shell(template: str) -> str:
@@ -227,6 +274,23 @@ def render_shell(template: str) -> str:
     every store/order/refund string is fetched client-side and written via
     textContent — so this is purely to serve it from the one hardened env."""
     return _env.get_template(template).render()
+
+
+def render_profile(address: str, stores: list) -> str:
+    """Render the PUBLIC link-in-bio merchant profile — a shareable list of a
+    merchant's live, public stores. ``stores`` is a list of ``{slug, name,
+    description, url}`` dicts whose name/description are screened LLM copy, rendered
+    through the same autoescaped env as the store themes so they stay inert text
+    (an SSTI/XSS payload in a store name renders as literal characters, never
+    markup or a template expression). ``address`` is a pre-validated, lowercased
+    EVM address — already public (every store's on-chain receive wallet)."""
+    return _env.get_template("_profile.html").render(
+        ADDRESS=address,
+        ADDRESS_SHORT=f"{address[:6]}…{address[-4:]}",
+        BASE_URL=PUBLIC_BASE_URL.rstrip("/"),
+        STORES=stores,
+        STORE_COUNT=len(stores),
+    )
 
 
 def render_og(content: Mapping, slug: str) -> str:

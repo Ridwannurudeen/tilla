@@ -2,7 +2,7 @@
 
 A signed-in merchant describes a store; the description is screened BEFORE any
 payment is offered (fail-closed: only a clear verdict lets a payment be created, so
-a merchant is never charged for content that would be blocked). They pay 1 USDT to
+a merchant is never charged for content that would be blocked). They pay the create-store fee to
 Tilla's rail from their own wallet using the same on-chain USDT0 transfer the
 storefront checkout uses, then submit the tx hash. The payment is verified on-chain
 — exactly the create-store fee, to Tilla's pay_to, from the merchant's wallet, not
@@ -103,7 +103,7 @@ def _verify_payment(
         if decoded["to"] == want_to and decoded["from"] == want_from:
             total += decoded["value"]
     if total != expected_micro:
-        raise CreationError(400, "payment does not match the 1 USDT create-store fee")
+        raise CreationError(400, "payment does not match the create-store fee")
 
 
 def pay_and_create(

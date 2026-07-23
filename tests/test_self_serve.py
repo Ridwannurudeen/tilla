@@ -19,7 +19,7 @@ from app.screening import ScreeningBlocked
 client = TestClient(main.app)
 
 TILLA = "0x" + "f" * 40  # Tilla's create-store fee address (PAY_TO_ADDRESS)
-FEE = 1_000_000  # 1 USDT in micro
+FEE = 50_000  # 0.05 USDT in micro
 
 
 @pytest.fixture(autouse=True)

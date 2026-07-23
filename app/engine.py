@@ -26,7 +26,7 @@ from pydantic import (
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app import config, screening
+from app import config, providers, screening
 from app.db import SessionLocal
 from app.delivery import mint_manage_key
 from app.models import (
@@ -161,8 +161,13 @@ class GeneratedContent(BaseModel):
 
 def _resolve_theme(name: str | None) -> str:
     """Map a short theme name (API- or LLM-supplied) to its template filename,
-    falling back to the default for anything outside the allowed set."""
-    return f"{name}.html" if name in config.ALLOWED_THEMES else config.DEFAULT_THEME
+    falling back to the default for anything outside the allowed set (built-ins
+    ∪ active theme plugins, per M15.2)."""
+    return (
+        f"{name}.html"
+        if name in providers.allowed_theme_names()
+        else config.DEFAULT_THEME
+    )
 
 
 _RSVG_BIN = shutil.which("rsvg-convert")
@@ -233,6 +238,24 @@ def resync_catalog(session, store, extras_override=None) -> None:
         content["product_blurb"] = primary["blurb"]
         content["cta_text"] = primary["cta_text"]
         content["price_usdt"] = primary["price_usdt"]
+    store.content = content
+    flag_modified(store, "content")
+    d = STORES_DIR / store.slug
+    d.mkdir(parents=True, exist_ok=True)
+    _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+
+
+def update_store_copy(session, store, updates: dict) -> None:
+    """Merge plain-language copy edits (tagline / hero_subcopy) into a LIVE store's
+    persisted ``content`` and re-render its static pages — WITHOUT an LLM
+    regeneration. Only the caller-supplied, already-screened copy keys change; the
+    catalog, palette, theme, and Design DNA are preserved untouched. Mirrors
+    :func:`resync_catalog`'s persist+re-render contract; runs inside the caller's
+    transaction (the commit is the caller's job)."""
+    from sqlalchemy.orm.attributes import flag_modified
+
+    content = dict(store.content or {})
+    content.update(updates)
     store.content = content
     flag_modified(store, "content")
     d = STORES_DIR / store.slug

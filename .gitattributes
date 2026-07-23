@@ -3,3 +3,6 @@ deploy/tilla-watchdog.service text eol=lf
 deploy/tilla-watchdog.timer text eol=lf
 deploy/tilla-api-override.conf text eol=lf
 deploy/logrotate-tilla text eol=lf
+# M15.2 theme-plugin fixture: the manifest sha256 pins the template's exact bytes,
+# so it MUST check out LF on every platform or the hash gate would false-mismatch.
+tests/fixtures/themes/** text eol=lf

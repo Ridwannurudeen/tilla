@@ -62,7 +62,16 @@ def _seed(
         return store.id
 
 
-def _order(store_id, status, expected_micro=9_500_100, channel="web", oid=None):
+def _order(
+    store_id,
+    status,
+    expected_micro=9_500_100,
+    channel="web",
+    oid=None,
+    from_addr=None,
+    paid_at=None,
+    eval_status="none",
+):
     import uuid
 
     with SessionLocal() as s:
@@ -75,6 +84,9 @@ def _order(store_id, status, expected_micro=9_500_100, channel="web", oid=None):
                 expected_micro=expected_micro,
                 status=status,
                 channel=channel,
+                from_addr=from_addr,
+                paid_at=paid_at,
+                eval_status=eval_status,
             )
         )
         s.commit()
@@ -94,6 +106,19 @@ def test_agent_card_shape():
     assert card["discovery"]["resources"] == "/discovery/resources"
 
 
+def test_agent_card_skills_carry_input_schema_and_sla():
+    card = client.get("/.well-known/agent-card.json").json()
+    skills = {s["id"]: s for s in card["skills"]}
+    cs = skills["create-store"]
+    # the create-store input contract is the real CreateStoreBody schema
+    assert "description" in cs["input_schema"]["properties"]
+    assert "description" in cs["input_schema"]["required"]
+    assert cs["sample_request"]["description"]
+    assert isinstance(cs["sla_minutes"], int) and cs["sla_minutes"] > 0
+    # buy advertises the optional product_id selector
+    assert "product_id" in skills["buy"]["input_schema"]["properties"]
+
+
 # ------------------------------------------------------------ feed.json
 def test_feed_validates_against_pinned_schema():
     _seed(slug="feedshop", price_micro=9_500_000)
@@ -106,8 +131,132 @@ def test_feed_validates_against_pinned_schema():
     assert body["store"]["slug"] == "feedshop"
     p = body["products"][0]
     assert p["price"] == {"amount": "9.5", "currency": "USDT"}
+    assert p["sla_minutes"] == 10  # platform default when no per-product override
     assert p["x402"]["endpoint"] == f"/s/feedshop/buy/{p['id']}"
     assert p["x402"]["asset"] == config.USDT0
+
+
+def _set_product_sla(slug, minutes):
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        product = s.scalar(select(Product).where(Product.store_id == store.id))
+        product.sla_minutes = minutes
+        s.commit()
+
+
+def test_sla_default_and_per_product_override():
+    _seed(slug="slashop", price_micro=2_000_000)
+    # default: every purchasable surface carries the platform ETA
+    feed = client.get("/s/slashop/feed.json").json()["products"][0]
+    assert feed["sla_minutes"] == 10
+    gp = _mcp(
+        "slashop",
+        "tools/call",
+        {"name": "list_products"},
+    ).json()["result"]["structuredContent"]["products"][0]
+    assert gp["sla_minutes"] == 10
+    cc = client.post("/api/checkout/slashop").json()
+    assert cc["sla_minutes"] == 10
+
+    # per-product override wins everywhere
+    _set_product_sla("slashop", 30)
+    assert client.get("/s/slashop/feed.json").json()["products"][0]["sla_minutes"] == 30
+    pid = gp["id"]
+    detail = _mcp(
+        "slashop",
+        "tools/call",
+        {"name": "get_product", "arguments": {"product_id": pid}},
+    ).json()["result"]["structuredContent"]
+    assert detail["sla_minutes"] == 30
+    assert client.post("/api/checkout/slashop").json()["sla_minutes"] == 30
+
+
+def _pid(slug):
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        return s.scalar(select(Product).where(Product.store_id == store.id)).id
+
+
+def test_feed_required_funds_equals_the_real_x402_charge():
+    # requiredFunds MUST be byte-identical to what the x402 buy endpoint demands:
+    # the resolvers the payment middleware calls per request are the single source of
+    # truth. Derive both from them and assert the feed matches — never a hardcode.
+    from app import agentic
+
+    pay_to = "0x" + "b" * 40
+    _seed(slug="rf", pay_to=pay_to, price_micro=7_250_000)
+    pid = _pid("rf")
+    p = client.get("/s/rf/feed.json").json()["products"][0]
+    rf = p["requiredFunds"]
+    path = f"/s/rf/buy/{pid}"
+    charge = agentic.resolve_price(path)  # what the 402 challenge advertises + settles
+    assert rf["amount_micro"] == int(charge.amount) == 7_250_000
+    assert rf["amount"] == "7.25"
+    assert rf["asset"] == charge.asset == config.USDT0
+    assert rf["network"] == "eip155:196"
+    # NON-CUSTODIAL: pay_to is the merchant, exactly what resolve_pay_to returns.
+    assert rf["pay_to"] == agentic.resolve_pay_to(path, "0x" + "0" * 40) == pay_to
+
+
+def test_feed_next_actions_name_reachable_actions():
+    _seed(slug="na", price_micro=3_000_000)
+    pid = _pid("na")
+    p = client.get("/s/na/feed.json").json()["products"][0]
+    actions = {a["type"]: a for a in p["nextActions"]}
+    # the x402 buy action names the exact per-product endpoint the agent POSTs to
+    assert actions["x402_buy"]["endpoint"] == f"/s/na/buy/{pid}"
+    assert actions["x402_buy"]["method"] == "POST"
+    # the MCP action names a reachable JSON-RPC server (initialize returns 200)
+    assert actions["mcp"]["endpoint"] == "/s/na/mcp"
+    assert (
+        _mcp("na", "initialize", {"protocolVersion": "2025-06-18"}).status_code == 200
+    )
+
+
+def test_get_product_offering_envelope_matches_charge():
+    from app import agentic
+
+    pay_to = "0x" + "c" * 40
+    _seed(slug="gpenv", pay_to=pay_to, price_micro=4_000_000)
+    pid = _pid("gpenv")
+    sc = _mcp(
+        "gpenv", "tools/call", {"name": "get_product", "arguments": {"product_id": pid}}
+    ).json()["result"]["structuredContent"]
+    rf = sc["requiredFunds"]
+    charge = agentic.resolve_price(f"/s/gpenv/buy/{pid}")
+    assert rf["amount_micro"] == int(charge.amount) == 4_000_000
+    assert rf["pay_to"] == pay_to  # merchant, non-custodial
+    assert any(a["endpoint"] == f"/s/gpenv/buy/{pid}" for a in sc["nextActions"])
+
+
+def test_agent_card_offering_envelope():
+    card = client.get("/.well-known/agent-card.json").json()
+    skills = {s["id"]: s for s in card["skills"]}
+    # create-store carries a fixed requiredFunds equal to the real /create-store 402
+    # charge (PAYMENT_AMOUNT = 0.05 USDT); its nextActions POST /create-store.
+    from app.payment import PAYMENT_AMOUNT
+
+    cs = skills["create-store"]
+    assert cs["requiredFunds"]["amount_micro"] == int(PAYMENT_AMOUNT) == 50_000
+    assert cs["requiredFunds"]["asset"] == config.USDT0
+    assert any(a["endpoint"] == "/create-store" for a in cs["nextActions"])
+    # the buy skill routes to per-store surfaces for the per-offering requiredFunds
+    buy_actions = {a["type"]: a for a in skills["buy"]["nextActions"]}
+    assert buy_actions["x402_buy"]["endpoint"] == "/s/{slug}/buy"
+
+
+def test_discovery_row_next_actions_route_to_store_surfaces():
+    _seed(slug="disc-na", price_micro=2_000_000)
+    row = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "disc-na"
+    )
+    actions = {a["type"]: a for a in row["nextActions"]}
+    assert actions["feed"]["endpoint"] == "/s/disc-na/feed.json"
+    assert actions["x402_buy"]["endpoint"] == "/s/disc-na/buy"
+    # discovery still never bulk-exports the merchant wallet
+    assert "pay_to" not in row
 
 
 def test_feed_404_for_non_live():
@@ -187,6 +336,7 @@ def test_mcp_ping_and_tools_list():
     assert {t["name"] for t in tools} == {
         "list_products",
         "get_product",
+        "preview_order",
         "create_checkout",
         "pay",
     }
@@ -336,6 +486,59 @@ def test_mcp_create_checkout_unknown_product_id_is_tool_error(make_store):
     assert "not found" in r["structuredContent"]["error"]
 
 
+# ---- Phase 4 butler flow: read-only preview + confirmation summary ----
+def test_mcp_preview_order_summarizes_without_charging():
+    # The read-only preview carries price/total/ETA/store/rail and a human line, and
+    # creates NO order — money only ever moves on the explicit pay step.
+    sid = _seed(slug="mcp-preview", price_micro=4_000_000)
+    res = _mcp("mcp-preview", "tools/call", {"name": "preview_order"}).json()["result"]
+    assert res.get("isError") is not True
+    sc = res["structuredContent"]
+    s = sc["summary"]
+    assert s["unit_price"] == "4" and s["unit_price_micro"] == 4_000_000
+    assert s["quantity"] == 1
+    assert s["total"] == "4" and s["total_micro"] == 4_000_000
+    assert s["sla_minutes"] == 10
+    assert s["store"]["name"] == "Shoppe" and s["store"]["slug"] == "mcp-preview"
+    assert s["product"]["name"] == "Thing"
+    assert s["currency"] == "USDT" and s["network"] == "eip155:196"
+    assert s["settlement"] == "non_custodial" and s["pay_to"] == "0x" + "a" * 40
+    assert "Thing" in s["line"] and "USDT" in s["line"]
+    assert "nothing is charged" in sc["next_step"]
+    # read-only: no order reserved by a preview
+    with SessionLocal() as db:
+        assert db.scalars(select(Order).where(Order.store_id == sid)).all() == []
+
+
+def test_mcp_preview_order_unknown_product_id_is_tool_error(make_store):
+    make_store(slug="mcp-preview-nope", price_micro=1_000_000)
+    r = _mcp(
+        "mcp-preview-nope",
+        "tools/call",
+        {"name": "preview_order", "arguments": {"product_id": 999999}},
+    ).json()["result"]
+    assert r["isError"] is True
+    assert "not found" in r["structuredContent"]["error"]
+
+
+def test_mcp_create_checkout_returns_confirmation_summary():
+    # create_checkout enriches its result with the same confirm-before-pay summary
+    # and a next_step making the two-step (reserve -> pay) contract explicit.
+    _seed(slug="mcp-ccsum", pay_to="0x" + "c" * 40, price_micro=7_000_000)
+    sc = _mcp("mcp-ccsum", "tools/call", {"name": "create_checkout"}).json()["result"][
+        "structuredContent"
+    ]
+    # existing top-level contract is unchanged (exact amount includes the offset)
+    assert 7_000_001 <= sc["amount_micro"] <= 7_004_999
+    assert sc["pay_to"] == "0x" + "c" * 40
+    s = sc["summary"]
+    assert s["unit_price"] == "7" and s["total"] == "7"
+    assert s["total_micro"] == 7_000_000  # goods price, not the payment offset
+    assert s["sla_minutes"] == 10
+    assert s["store"]["slug"] == "mcp-ccsum"
+    assert "amount_micro" in sc["next_step"] and "UNPAID" in sc["next_step"]
+
+
 # ------------------------------------------------------------ discovery
 def test_discovery_resources_live_only_and_caps():
     _seed(slug="live-a")
@@ -365,6 +568,263 @@ def test_discovery_sold_count_counts_only_delivered():
     assert row["sold_count"] == 2
 
 
+def test_discovery_reputation_fields():
+    from datetime import datetime
+
+    sid = _seed(slug="repshop")
+    _order(sid, "delivered", from_addr="0x" + "1" * 40, paid_at=datetime(2026, 1, 1))
+    _order(sid, "delivered", from_addr="0x" + "2" * 40, paid_at=datetime(2026, 3, 1))
+    # repeat buyer 0x1 — must not double-count
+    _order(sid, "delivered", from_addr="0x" + "1" * 40, paid_at=datetime(2026, 2, 1))
+    _order(sid, "refunded", from_addr="0x" + "3" * 40)
+    _order(sid, "canceled", from_addr="0x" + "4" * 40)  # abandoned — excluded
+    _seed(slug="emptyshop")
+
+    rows = client.get("/discovery/resources").json()["resources"]
+    rep = next(x for x in rows if x["slug"] == "repshop")
+    assert rep["sold_count"] == 3
+    assert rep["unique_buyer_count"] == 2  # 0x1 counted once
+    # 3 delivered / (3 delivered + 1 refunded) = 0.75; canceled/pending excluded
+    assert rep["success_rate"] == 0.75
+    assert rep["last_sale_at"].startswith("2026-03-01")  # most recent delivery
+
+    none = next(x for x in rows if x["slug"] == "emptyshop")
+    assert none["sold_count"] == 0
+    assert none["success_rate"] is None
+    assert none["unique_buyer_count"] == 0
+    assert none["last_sale_at"] is None
+
+
+def test_discovery_sort_by_success_rate():
+    # A: perfect but low volume; B: high volume, lower clean-delivery rate.
+    a = _seed(slug="cleanshop")
+    _order(a, "delivered", from_addr="0x" + "1" * 40)
+    b = _seed(slug="busyshop")
+    for i in range(3):
+        _order(b, "delivered", from_addr="0x" + str(i) * 40)
+        _order(b, "refunded", from_addr="0x" + str(i) * 40)
+
+    default = [
+        x["slug"] for x in client.get("/discovery/resources").json()["resources"]
+    ]
+    assert default.index("busyshop") < default.index("cleanshop")  # sold desc: B first
+
+    body = client.get("/discovery/resources?sort=success").json()
+    assert body["sort"] == "success"
+    order = [x["slug"] for x in body["resources"]]
+    # rate desc: A (1.0) ahead of B (0.5), despite B's higher volume
+    assert order.index("cleanshop") < order.index("busyshop")
+
+
+def test_discovery_sort_unknown_falls_back_to_sold():
+    body = client.get("/discovery/resources?sort=bogus").json()
+    assert body["sort"] == "sold"
+    assert set(body["sorts"]) == {"sold", "success", "buyers", "recent", "new"}
+
+
+def test_discovery_trust_tier_graduation_and_demote():
+    def deliver(sid, n):
+        for i in range(n):
+            _order(sid, "delivered", from_addr="0x" + str(i) * 40, oid=f"{sid}d{i}")
+
+    _seed(slug="tier-new")  # 0 sales
+    emerging = _seed(slug="tier-emerging")
+    deliver(emerging, 1)
+    established = _seed(slug="tier-established")
+    deliver(established, 3)
+    trusted = _seed(slug="tier-trusted")
+    deliver(trusted, 8)
+    # high volume but refund-heavy -> demoted to 'watch' despite the sales
+    watch = _seed(slug="tier-watch")
+    deliver(watch, 2)
+    for i in range(3):
+        _order(watch, "refunded", from_addr="0x" + str(i) * 40, oid=f"{watch}r{i}")
+
+    rows = {
+        r["slug"]: r for r in client.get("/discovery/resources").json()["resources"]
+    }
+    assert rows["tier-new"]["trust_tier"] == "new"
+    assert rows["tier-emerging"]["trust_tier"] == "emerging"
+    assert rows["tier-established"]["trust_tier"] == "established"
+    assert rows["tier-trusted"]["trust_tier"] == "trusted"
+    assert rows["tier-watch"]["trust_tier"] == "watch"  # auto-demoted (refunds)
+
+
+def test_discovery_eval_window_excludes_pending_and_counts_disputes():
+    from datetime import timedelta
+
+    from app import checkout
+    from app.agentic import EVAL_WINDOW_DAYS
+
+    recent = checkout._now()
+    old = checkout._now() - timedelta(days=EVAL_WINDOW_DAYS + 1)
+    sid = _seed(slug="evalshop")
+    # buyer-confirmed -> good
+    _order(
+        sid, "delivered", from_addr="0x" + "1" * 40, eval_status="confirmed", oid="ev1"
+    )
+    # pending, still inside the window -> not yet counted (auto-confirm pending)
+    _order(
+        sid,
+        "delivered",
+        from_addr="0x" + "2" * 40,
+        paid_at=recent,
+        eval_status="pending",
+        oid="ev2",
+    )
+    # pending but past the window -> auto-confirmed at read -> good
+    _order(
+        sid,
+        "delivered",
+        from_addr="0x" + "3" * 40,
+        paid_at=old,
+        eval_status="pending",
+        oid="ev3",
+    )
+    # buyer-rejected -> a failure the rate must reflect
+    _order(
+        sid, "delivered", from_addr="0x" + "4" * 40, eval_status="rejected", oid="ev4"
+    )
+
+    row = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "evalshop"
+    )
+    assert row["sold_count"] == 4  # raw delivered count is unchanged
+    assert row["pending_eval_count"] == 1  # only the in-window pending
+    assert row["disputed_count"] == 1
+    # good = confirmed + window-elapsed = 2; settled = good + rejected = 3 -> 0.6667
+    assert row["success_rate"] == round(2 / 3, 4)
+
+
+def test_library_evaluate_confirm_then_locks():
+    from app import delivery
+
+    buyer = "0x" + "b" * 40
+    sid = _seed(slug="evalep")
+    _order(sid, "delivered", from_addr=buyer, eval_status="pending", oid="epord")
+    auth = {"Authorization": f"Bearer {delivery.mint_session_token(buyer)}"}
+
+    r = client.post(
+        "/api/library/evaluate",
+        json={"order_id": "epord", "verdict": "confirm"},
+        headers=auth,
+    )
+    assert r.status_code == 200 and r.json()["eval_status"] == "confirmed"
+    # a settled evaluation is not re-opened
+    r2 = client.post(
+        "/api/library/evaluate",
+        json={"order_id": "epord", "verdict": "reject"},
+        headers=auth,
+    )
+    assert r2.status_code == 409
+
+
+def test_library_evaluate_reject_feeds_success_rate():
+    from app import delivery
+
+    buyer = "0x" + "b" * 40
+    sid = _seed(slug="evalrej")
+    _order(sid, "delivered", from_addr=buyer, eval_status="pending", oid="rejord")
+    # a fresh pending delivery is not yet counted -> rate is None
+    row0 = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "evalrej"
+    )
+    assert row0["success_rate"] is None and row0["pending_eval_count"] == 1
+
+    auth = {"Authorization": f"Bearer {delivery.mint_session_token(buyer)}"}
+    client.post(
+        "/api/library/evaluate",
+        json={"order_id": "rejord", "verdict": "reject"},
+        headers=auth,
+    )
+    row1 = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "evalrej"
+    )
+    # now settled as a dispute: good 0 / settled 1 -> 0.0, and no longer pending
+    assert row1["disputed_count"] == 1 and row1["pending_eval_count"] == 0
+    assert row1["success_rate"] == 0.0
+
+
+def test_library_evaluate_rejects_foreign_and_unauthed():
+    from app import delivery
+
+    buyer = "0x" + "b" * 40
+    sid = _seed(slug="evalep2")
+    _order(sid, "delivered", from_addr=buyer, eval_status="pending", oid="epord2")
+    # a different wallet cannot evaluate someone else's order -> opaque 404
+    foreign = {
+        "Authorization": f"Bearer {delivery.mint_session_token('0x' + 'c' * 40)}"
+    }
+    r = client.post(
+        "/api/library/evaluate",
+        json={"order_id": "epord2", "verdict": "reject"},
+        headers=foreign,
+    )
+    assert r.status_code == 404
+    # no session at all -> 401
+    r2 = client.post(
+        "/api/library/evaluate", json={"order_id": "epord2", "verdict": "confirm"}
+    )
+    assert r2.status_code == 401
+
+
+# ------------------------------------------------------------ hidden/sandbox (1.7)
+def _set_visibility(slug, vis):
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        store.visibility = vis
+        s.commit()
+
+
+def test_hidden_store_excluded_from_bulk_but_reachable_directly():
+    _seed(slug="pubshop")
+    _seed(slug="hidshop")
+    _set_visibility("hidshop", "hidden")
+
+    # bulk surfaces all skip the hidden store...
+    slugs = {r["slug"] for r in client.get("/discovery/resources").json()["resources"]}
+    assert "pubshop" in slugs and "hidshop" not in slugs
+    assert client.get("/discovery/search?q=hidshop").json()["resources"] == []
+    browse = _root_call("browse_stores")["result"]["structuredContent"]["resources"]
+    assert "hidshop" not in {r["slug"] for r in browse}
+    assert "/s/hidshop/" not in client.get("/sitemap.xml").text
+    agg = client.get("/feeds/openai.json").json()["products"]
+    assert all(p["store"] != "hidshop" for p in agg)
+
+    # ...but it stays fully reachable by direct link (owner + agent preview)
+    assert client.get("/s/hidshop/feed.json").status_code == 200
+    assert _mcp("hidshop", "tools/list").status_code == 200
+
+
+def test_hidden_store_graduates_to_public_on_first_sale():
+    from app import checkout
+
+    sid = _seed(slug="gradshop")
+    _set_visibility("gradshop", "hidden")
+    with SessionLocal() as s:
+        order = Order(
+            id="gradord",
+            store_id=sid,
+            pay_to="0x" + "a" * 40,
+            amount_micro=9_500_000,
+            expected_micro=9_500_100,
+            status="confirmed",
+        )
+        s.add(order)
+        s.commit()
+        checkout.deliver(s, order)
+        s.commit()
+    # the first delivered sale clears the threshold -> now shown in discovery
+    slugs = {r["slug"] for r in client.get("/discovery/resources").json()["resources"]}
+    assert "gradshop" in slugs
+
+
 def test_discovery_search_escapes_like_and_bounds_query():
     _seed(slug="alpha", description="widgets and gadgets")
     # length bounds
@@ -378,3 +838,83 @@ def test_discovery_search_escapes_like_and_bounds_query():
     r2 = client.get("/discovery/search?q=a%25")  # 'a%'
     assert r2.status_code == 200
     assert r2.json()["resources"] == []
+
+
+# ------------------------------------------------------------ root MCP (concierge)
+def _root_mcp(method, params=None, req_id=1):
+    body = {"jsonrpc": "2.0", "id": req_id, "method": method}
+    if params is not None:
+        body["params"] = params
+    return client.post("/mcp", json=body)
+
+
+def _root_call(name, arguments=None, req_id=1):
+    params = {"name": name}
+    if arguments is not None:
+        params["arguments"] = arguments
+    return _root_mcp("tools/call", params, req_id=req_id).json()
+
+
+def test_root_mcp_initialize_and_tools_list():
+    r = _root_mcp("initialize", {"protocolVersion": "2025-06-18"})
+    assert r.status_code == 200
+    res = r.json()["result"]
+    assert res["protocolVersion"] == "2025-06-18"
+    assert res["serverInfo"]["name"] == "tilla"  # Tilla-wide, not per-store
+    tools = _root_mcp("tools/list").json()["result"]["tools"]
+    assert {t["name"] for t in tools} == {
+        "browse_stores",
+        "search_stores",
+        "list_products",
+    }
+
+
+def test_root_mcp_browse_stores_ranks_and_carries_endpoints():
+    a = _seed(slug="rootclean")
+    _order(a, "delivered", from_addr="0x" + "1" * 40)
+    b = _seed(slug="rootbusy")
+    for i in range(3):
+        _order(b, "delivered", from_addr="0x" + str(i) * 40)
+        _order(b, "refunded", from_addr="0x" + str(i) * 40)
+
+    default = _root_call("browse_stores")["result"]["structuredContent"]
+    slugs = [x["slug"] for x in default["resources"]]
+    assert slugs.index("rootbusy") < slugs.index("rootclean")  # sold desc
+    row = next(x for x in default["resources"] if x["slug"] == "rootclean")
+    assert row["mcp"] == "/s/rootclean/mcp" and row["buy"] == "/s/rootclean/buy"
+    assert "pay_to" not in row
+
+    ranked = _root_call("browse_stores", {"sort": "success"})["result"]
+    body = ranked["structuredContent"]
+    assert body["sort"] == "success"
+    order = [x["slug"] for x in body["resources"]]
+    assert order.index("rootclean") < order.index("rootbusy")  # rate desc
+
+
+def test_root_mcp_search_and_list_products():
+    sid = _seed(slug="rootsearch", description="rare vinyl records")
+    with SessionLocal() as s:
+        pid = s.scalar(select(Product.id).where(Product.store_id == sid))
+    found = _root_call("search_stores", {"query": "vinyl"})["result"]
+    assert {x["slug"] for x in found["structuredContent"]["resources"]} == {
+        "rootsearch"
+    }
+    lp = _root_call("list_products", {"slug": "rootsearch"})["result"]
+    assert lp["structuredContent"]["products"][0]["id"] == pid
+
+
+def test_root_mcp_list_products_dead_store_is_tool_error():
+    _seed(slug="rootpending", status="pending_screening")
+    for slug in ("ghosttown", "rootpending"):
+        res = _root_call("list_products", {"slug": slug})
+        assert res["result"]["isError"] is True
+
+
+def test_root_mcp_unknown_tool_and_bad_args():
+    assert _root_call("does_not_exist")["error"]["code"] == -32602
+    short = _root_call("search_stores", {"query": "a"})
+    assert short["result"]["isError"] is True  # min length enforced
+
+
+def test_root_mcp_get_is_405():
+    assert client.get("/mcp").status_code == 405

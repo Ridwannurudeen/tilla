@@ -56,6 +56,10 @@ class Store(Base):
             "('unlisted','prepared','submitted','listed','rejected')",
             name="ck_stores_marketplace_status",
         ),
+        # Phase 4 custom domains: one hostname → one store, so a verified domain can
+        # never be hijacked to a second store. SQLite treats the many unclaimed NULLs
+        # as distinct, so unclaimed stores are unaffected.
+        UniqueConstraint("custom_domain", name="uq_stores_custom_domain"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -76,6 +80,27 @@ class Store(Base):
     # sha256 hex of the per-store manage key (capability secret handed to the
     # paid create-store caller once). NULL for legacy stores until minted.
     manage_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase 1.7 sandbox/hidden mode: 'public' (default, every existing store) shows in
+    # discovery / the aggregate feed / the sitemap; 'hidden' keeps a live store out of
+    # those bulk surfaces while it stays fully reachable by direct link (owner + agent
+    # preview). A hidden store auto-graduates to 'public' on its first delivered sale —
+    # the "clears a threshold" gate — and the owner can toggle it from the dashboard.
+    visibility: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="public", server_default="public"
+    )
+    # Phase 4 custom domains (app-side up to the DNS/TLS/nginx gate). A merchant
+    # CLAIMS a hostname for their store; ownership is proven by a DNS TXT challenge.
+    # custom_domain is the validated, lowercased hostname (NULL until claimed);
+    # custom_domain_token is the per-claim challenge secret the owner publishes as a
+    # TXT record; custom_domain_verified_at is set ONLY once the TXT lookup matched.
+    # FAIL-CLOSED: host-based resolution serves a store only when verified_at is set,
+    # so an unverified (or merely claimed) domain serves nothing. The operator still
+    # provisions server_name + TLS out-of-band (docs/runbooks/custom-domains.md).
+    custom_domain: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    custom_domain_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    custom_domain_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     delivery: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -114,6 +139,11 @@ class Product(Base):
         String(12), nullable=False, default="one_time", server_default="one_time"
     )
     pricing_params: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Phase 1.3 SLA: the merchant's delivery-time promise in minutes, surfaced to
+    # buyer agents as an ETA (feed.json / MCP). NULL = no per-product override, so
+    # the agent surfaces fall back to the platform default DELIVERY_SLA_MINUTES;
+    # every pre-1.3 product is NULL, an unchanged instant-delivery promise.
+    sla_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -158,6 +188,14 @@ class Order(Base):
         ForeignKey("products.id"), nullable=True
     )
     pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
+    # M18 cross-chain: the settlement chain (CAIP-2) this order is pinned to at
+    # creation. Every verification path (sweeper matching, verify_txhash, refunds)
+    # resolves its RPC + asset from THIS value via payment.chain_for(), so a tx on
+    # any other chain can never confirm it. Defaults + backfills to the canonical
+    # X Layer ledger (eip155:196, INV-2); every pre-M18 order is that chain.
+    network: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="eip155:196", server_default="eip155:196"
+    )
     amount_micro: Mapped[int] = mapped_column(Integer, nullable=False)
     # The exact micro-USDT a buyer must send = price + unique offset; payment
     # matching is on this, not amount_micro. Backfilled to amount_micro for
@@ -190,6 +228,13 @@ class Order(Base):
     # idempotency/replay key. NULL for human orders (see the unique index above).
     x402_nonce: Mapped[str | None] = mapped_column(String(66), nullable=True)
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # M8 aggr_deferred reconciliation: the pending aggregated settle reference the
+    # facilitator returns for a deferred (async) settle that has NOT yet confirmed
+    # on-chain. Captured on the settling order so the reconciliation poller
+    # (app.reconcile) can query get_settle_status(settle_ref) and finalize the order
+    # only once its aggregated tx confirms. NULL for every other order (exact rail,
+    # human orders) — the poller only ever touches rows carrying it.
+    settle_ref: Mapped[str | None] = mapped_column(String(66), nullable=True)
     from_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
     # M13 affiliate attribution: the referring agent's payout wallet, captured at
     # order creation (first-write-wins, immutable afterwards). Lowercased + zero-
@@ -209,15 +254,34 @@ class Order(Base):
         DateTime, nullable=False, default=_utcnow
     )
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Phase 1.6 evaluation window: a delivered order's buyer-evaluation state, the
+    # basis for a dispute-aware success_rate. 'none' = untracked (every pre-1.6 order,
+    # counted as good — unchanged legacy reputation); a NEW delivery sets 'pending';
+    # the paying buyer may 'confirmed' (self-eval accept) or 'rejected' (dispute). A
+    # 'pending' order auto-confirms by TIME at read (paid_at older than the window =
+    # ACP 'skip' mode) — computed in the discovery query, so there is no poller and no
+    # crash-window to reconcile. Single writer per order (deliver, then one buyer act).
+    eval_status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="none", server_default="none"
+    )
     # M11 on-chain depth: the EAS receipt attestation for this order. attest_status
-    # walks none -> pending -> sent -> attested | failed, driven ONLY by the dormant
-    # attester worker (app.attest) — a single writer, so no CHECK constraint (which
-    # would force an orders-table rebuild and endanger ux_orders_active_amount). Every
-    # existing row stays 'none' (never queued), so enabling later attests only
-    # post-enable sales. attest_tx is the on-chain attestation tx; attestation_uid is
-    # the EAS UID parsed from its Attested log.
+    # walks none -> pending -> sending -> sent -> attested | failed, driven ONLY by the
+    # dormant attester worker (app.attest) — a single writer, so no CHECK constraint
+    # (which would force an orders-table rebuild and endanger ux_orders_active_amount).
+    # Every existing row stays 'none' (never queued), so enabling later attests only
+    # post-enable sales. 'sending' records the broadcast intent (attest_tx + attest_nonce)
+    # BEFORE the tx is broadcast, so a crash in the send window reconciles by nonce (at
+    # most one tx per nonce mines) instead of blind-re-broadcasting. attest_tx is the
+    # on-chain attestation tx; attest_nonce is the account nonce it was signed with;
+    # attestation_uid is the EAS UID parsed from its Attested log. content_hash is the
+    # sha256 (0x + 64 hex) of the delivered payload, computed by the attester at attest
+    # time and recorded here as part of the broadcast intent (alongside attest_tx +
+    # attest_nonce) so the receipt is provably bound to WHAT was delivered and a reconcile
+    # re-broadcast rebuilds the identical attestation. NULL for every non-attesting row.
     attestation_uid: Mapped[str | None] = mapped_column(String(66), nullable=True)
     attest_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    attest_nonce: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     attest_status: Mapped[str] = mapped_column(
         String(12), nullable=False, default="none", server_default="none"
     )
@@ -275,6 +339,15 @@ class Deliverable(Base):
     )
     # kind='license' only (default 3); NULL for file/text.
     max_activations: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Versioned releases (0028): the release number within a (store, product, kind)
+    # lineage. A plain replace inserts a fresh version 1 row (past buyers keep their
+    # bought version); publishing a NEW VERSION inserts version = prev + 1, and a past
+    # buyer's entitlement rolls forward to the highest active version of the same kind
+    # (main._current_version), so they re-download the newest release. Every pre-0028
+    # deliverable backfills to 1.
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
@@ -309,6 +382,38 @@ class Entitlement(Base):
     )
     license_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
+class Review(Base):
+    """Phase 3 verified-buyer review — un-fakeable by construction. A row can only be
+    written by the wallet that COMPLETED the purchase: the route requires an
+    authenticated buyer session whose address equals ``order.from_addr`` on a
+    TERMINAL_DELIVERED order. UNIQUE(order_id) caps it at one review per completed
+    order (a duplicate 409s, the Entitlement precedent), and ``body`` is Warden-
+    screened BEFORE insert so no unscreened text is ever stored or surfaced. Pure
+    reputation — no code turns a row here into a fund movement. ``rating`` is bounded
+    1..5 by a CHECK; ``product_id`` snapshots the ordered product (nullable, matching
+    Order.product_id)."""
+
+    __tablename__ = "reviews"
+    __table_args__ = (
+        UniqueConstraint("order_id", name="uq_reviews_order_id"),
+        CheckConstraint("rating >= 1 AND rating <= 5", name="ck_reviews_rating"),
+        Index("ix_reviews_store_id", "store_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id"), nullable=True
+    )
+    order_id: Mapped[str] = mapped_column(ForeignKey("orders.id"), nullable=False)
+    from_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -431,11 +536,15 @@ class ScreeningReceipt(Base):
 
 
 class ChainCursor(Base):
-    """Single-row sweep cursor: the last block the sweeper has fully processed.
-    Persisting it makes restarts resume gap-free."""
+    """Per-chain sweep cursor: the last block the sweeper has fully processed on the
+    chain whose ``chain_id`` is this row's primary key (``id`` == chain_id). One row
+    per chain the sweeper scans — the canonical X Layer ledger (id 196) always, plus
+    any flag+probe-enabled chain (18.2). Persisting it makes restarts resume gap-free,
+    and keying it per-chain means a second chain's cursor can never rewind the
+    canonical one. Pre-18.2 the table was a singleton pinned to id=1; migration
+    0018 repoints that row to the canonical chain_id (196)."""
 
     __tablename__ = "chain_cursor"
-    __table_args__ = (CheckConstraint("id = 1", name="ck_chain_cursor_singleton"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
     last_block: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -650,6 +759,207 @@ class AcpSession(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+
+
+class CommissionJob(Base):
+    """Roadmap Phase 3 A2A commissioned/custom-build job — the escrow pillar. A buyer
+    agent commissions a custom deliverable from a store's provider; the row walks a
+    lifecycle (open -> budget_set -> funded -> submitted -> completed, plus cancelled /
+    disputed terminals) with an OPTIONAL evaluator that gates release. State is tracked
+    here, NOT in any custody: this is the only custodial-adjacent surface in Tilla and
+    it is verify-only.
+
+    NON-CUSTODIAL by construction — no code turns a row here into a fund movement. The
+    two fund-relevant steps are each a VERIFIED on-chain USDT0 transfer the parties sign
+    themselves (the M9 Refund / self_serve pattern): ``funded_tx`` records the buyer's
+    deposit to ``escrow_addr`` (a holding wallet the parties designate; Tilla never holds
+    its keys) and ``released_tx`` records the release from ``escrow_addr`` to the provider
+    (``store.pay_to``). Tilla only verifies each tx landed with the exact ``budget_micro``
+    between the pinned wallets and records the hash — it NEVER sends, holds, or auto-
+    releases. UNIQUE(funded_tx) / UNIQUE(released_tx) make one on-chain transfer usable by
+    a single job ever (the ProcessedTransfer/Refund precedent; SQLite treats the many
+    unfunded NULLs as distinct). Every transition is a race-proof conditional UPDATE (the
+    M3 ``checkout.transition`` idiom), so no step ever runs twice."""
+
+    __tablename__ = "commission_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open','budget_set','funded','submitted','completed',"
+            "'cancelled','disputed')",
+            name="ck_commission_jobs_status",
+        ),
+        CheckConstraint(
+            "budget_micro IS NULL OR budget_micro > 0",
+            name="ck_commission_jobs_budget_positive",
+        ),
+        UniqueConstraint("funded_tx", name="uq_commission_jobs_funded_tx"),
+        UniqueConstraint("released_tx", name="uq_commission_jobs_released_tx"),
+        Index("ix_commission_jobs_store_id", "store_id"),
+        Index("ix_commission_jobs_buyer_addr", "buyer_addr"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # The commissioning buyer's on-chain wallet (lowercased). Authenticates every
+    # buyer-side action and is the pinned ``from`` of the verified deposit tx.
+    buyer_addr: Mapped[str] = mapped_column(String(42), nullable=False)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    # Screened at creation (Warden, fail-closed) BEFORE the row is written.
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    brief: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL until set_budget. Exact micro-USDT both verified transfers must match.
+    budget_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The holding wallet the buyer deposits into and the provider is released from —
+    # designated by the parties, NEVER Tilla (no keys held). Set at set_budget; the
+    # pinned ``to`` of the deposit tx and ``from`` of the release tx.
+    escrow_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    # Optional arbiter. When set, ONLY this wallet may authorize release (gates the
+    # submitted -> completed step); NULL leaves release to the buyer.
+    evaluator_addr: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="open", server_default="open"
+    )
+    # The verified deposit / release tx hashes (recorded, never sent). NULL until each
+    # step's on-chain transfer is verified.
+    funded_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # Block of the deposit transfer; the release transfer must not predate it (the M9
+    # refund block floor — a release can never precede the deposit it settles).
+    funded_block: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    released_tx: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # The provider's submitted deliverable reference/note — screened at submit time.
+    deliverable: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow, onupdate=_utcnow
+    )
+    funded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Plugin(Base):
+    """M15.1 provider registry row — the metadata + review-state surface for the
+    three formalized extension points (delivery / payment_rail / theme). Built-ins
+    are seeded ``source='builtin', status='active'``; any external plugin defaults
+    to ``pending_review`` and only an operator act flips it ``active`` (INV-1 keeps
+    external installs to the 'theme' kind until the out-of-process runner ships).
+    UNIQUE(kind, name) makes the seed idempotent and a re-register a conflict.
+    ``artifact_sha256`` is NULL for built-ins (no on-disk artifact) and pins the
+    external artifact's hash otherwise."""
+
+    __tablename__ = "plugins"
+    __table_args__ = (
+        UniqueConstraint("kind", "name", name="uq_plugins_kind_name"),
+        CheckConstraint(
+            "kind IN ('delivery','payment_rail','theme')", name="ck_plugins_kind"
+        ),
+        CheckConstraint("source IN ('builtin','external')", name="ck_plugins_source"),
+        CheckConstraint(
+            "status IN ('pending_review','active','disabled')",
+            name="ck_plugins_status",
+        ),
+        Index("ix_plugins_kind_status", "kind", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    version: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str] = mapped_column(String(10), nullable=False)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending_review",
+        server_default="pending_review",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+
+
+class GrowthDraft(Base):
+    """One queued piece of marketing copy — the M17 growth-agent outbox. Rows are
+    fanned from a screened growth kit (M17.1); a scheduled calendar will add
+    ``source='scheduled'`` rows later. INVARIANT (INV-1): NOTHING here ever sends —
+    ``mark-published`` only RECORDS that a human posted the copy elsewhere. A draft is
+    immutable after creation: ``approve`` flips ``status`` only and the
+    ``content_sha256`` taken at creation is the tamper anchor, so an approved draft can
+    never be silently mutated. A ``status='blocked'`` row (screening BLOCK) has its
+    ``body`` withheld from every read path."""
+
+    __tablename__ = "growth_drafts"
+    __table_args__ = (
+        CheckConstraint(
+            "channel IN ('social','email_subject','launch_tweet',"
+            "'email_body','product_update')",
+            name="ck_growth_drafts_channel",
+        ),
+        CheckConstraint(
+            "source IN ('manual','scheduled')", name="ck_growth_drafts_source"
+        ),
+        CheckConstraint(
+            "status IN ('pending','blocked','approved','published','discarded')",
+            name="ck_growth_drafts_status",
+        ),
+        Index("ix_growth_drafts_store_status", "store_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    store_id: Mapped[int] = mapped_column(ForeignKey("stores.id"), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="manual", server_default="manual"
+    )
+    status: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="pending", server_default="pending"
+    )
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    screening_status: Mapped[str] = mapped_column(String(10), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    performance_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class FederatedListing(Base):
+    """M16.4 federation ingest — one cached, READ-ONLY row per peer store,
+    discovered by fetching an operator-configured peer's /discovery/resources +
+    feed.json and schema-validating them against the frozen v1 protocol contract.
+    Peer content is DATA: it is never rendered as HTML, only re-emitted json-
+    encoded in the ``?include=federated`` discovery echo, and every ``url`` links
+    OUT to the PEER's own checkout — Tilla never proxies, quotes, or settles a
+    peer's sale (no fund-moving code touches this table). UNIQUE(origin, slug)
+    makes a re-ingest an idempotent upsert. Dormant by default (no peers => this
+    table stays empty)."""
+
+    __tablename__ = "federated_listings"
+    __table_args__ = (
+        UniqueConstraint("origin", "slug", name="uq_federated_listings_origin_slug"),
+        Index("ix_federated_listings_origin", "origin"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # The peer base URL this row came from (operator-configured origin).
+    origin: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Absolute OUTBOUND links into the peer's own surfaces (never a Tilla route).
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    feed_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    price_min_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price_max_micro: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    network: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=_utcnow
     )
 
 

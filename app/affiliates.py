@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config
+from app import chain, config, payment
 from app.models import (
     AffiliateAccrual,
     AffiliatePayout,
@@ -182,7 +182,10 @@ def verify_and_record_payout(
     if owed <= 0:
         raise PayoutError(409, "nothing is currently owed to this referrer")
 
-    receipt = chain.get_transaction_receipt(tx_hash)
+    # Payouts settle on the canonical USDT0 ledger (INV-2); pin the receipt lookup
+    # and asset filter to it via the registry.
+    cfg = payment.CANONICAL_CHAIN
+    receipt = chain.get_transaction_receipt(cfg, tx_hash)
     if receipt is None:
         raise PayoutError(400, "transaction not found")
     if str(receipt.get("status", "")).lower() != "0x1":
@@ -193,7 +196,7 @@ def verify_and_record_payout(
     new_logs: list[dict] = []
     total = 0
     for lg in receipt.get("logs", []):
-        if (lg.get("address", "") or "").lower() != config.USDT0:
+        if (lg.get("address", "") or "").lower() != cfg.asset:
             continue
         topics = lg.get("topics", [])
         if len(topics) < 3 or topics[0].lower() != config.TRANSFER_TOPIC:

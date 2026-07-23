@@ -13,6 +13,8 @@ discovery paths + the well-known agent card past the static ``/s/`` alias):
 - ``GET /s/{slug}/feed.json`` / ``llms.txt`` — machine-readable catalog.
 - ``GET /.well-known/agent-card.json`` — A2A card for Tilla as a whole.
 - ``GET /discovery/resources`` + ``/discovery/search`` — Tilla-wide store index.
+- ``POST /mcp`` — the Tilla-wide root MCP: browse/search stores + list a store's
+  products, so one agent runtime is the concierge across every store.
 
 Every JSON surface is a ``JSONResponse`` (json-encoded, no HTML context) and every
 text surface is ``text/plain``; all carry ``X-Content-Type-Options: nosniff``.
@@ -24,15 +26,16 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import timedelta
 from decimal import Decimal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Path, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -45,7 +48,7 @@ from x402.http.utils import (
 )
 from x402.schemas import AssetAmount
 
-from app import affiliates, chain, checkout, config, delivery, webhooks
+from app import affiliates, b2b, chain, checkout, config, delivery, federation, webhooks
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -54,10 +57,12 @@ from app.models import (
     Entitlement,
     Order,
     Product,
+    Review,
     Store,
     log_event,
 )
 from app.payment import (
+    PAYMENT_AMOUNT,
     PAYMENT_ASSET,
     PAYMENT_EIP712_NAME,
     PAYMENT_EIP712_VERSION,
@@ -75,6 +80,14 @@ ASSET = PAYMENT_ASSET  # USDT0 on X Layer
 SERVICE = "tilla"
 AGENT_ID = 6961  # Tilla's ERC-8004 agent id (OKX ASP #6961)
 TILLA_VERSION = "0.1.0"
+# Delivery-time promise surfaced to agent buyers (the ACP 'SLA' analog). Digital
+# goods deliver on payment confirmation and store generation completes within the
+# request, so 10 minutes is a conservative honest upper bound covering both.
+DELIVERY_SLA_MINUTES = 10
+# Phase 1.6: a delivered sale is provisional for this window — the buyer may confirm
+# or dispute it; if they do neither, it auto-confirms (ACP 'skip' mode) and counts
+# toward success_rate. Short, because digital delivery is validated fast.
+EVAL_WINDOW_DAYS = 3
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
 # Short cache + nosniff on every machine surface. Stored content is Warden-screened
@@ -250,9 +263,99 @@ def enabled_schemes(product: Product) -> list[str]:
     return schemes
 
 
+def _tier_quote(product: Product, agent_id: int) -> dict | None:
+    """The advisory wholesale quote fields for ``agent_id`` on ``product``, or None
+    when no tier matches or the agent owner is not verifiable (fail-to-base). The
+    tier price is disclosed ONLY per-request against a presented id (never in a
+    public feed); INV-1 still governs the actual grant at settle."""
+    tier_price = b2b.match_tier(product, agent_id)
+    if tier_price is None:
+        return None
+    owner = b2b.verify_agent_owner(agent_id)
+    if owner is None:
+        return None
+    return {
+        "tier_price_micro": tier_price,
+        "tier_price": _usdt_str(tier_price),
+        "owner": owner,
+        "requires": (
+            "settle payer wallet must equal the agent owner wallet; "
+            "otherwise the base price applies"
+        ),
+    }
+
+
 def _pricing_block(product: Product) -> dict:
-    params = product.pricing_params if isinstance(product.pricing_params, dict) else {}
-    return {"model": _pricing_model(product), "params": params}
+    raw = product.pricing_params if isinstance(product.pricing_params, dict) else {}
+    # M16: wholesale tier tables NEVER leak on a public surface (feed/MCP) — only an
+    # opt-in ``wholesale: true`` flag. Per-buyer prices come from /quote, per-request.
+    params = {k: v for k, v in raw.items() if k != "tiers"}
+    block: dict = {"model": _pricing_model(product), "params": params}
+    if raw.get("tiers"):
+        block["wholesale"] = True
+    return block
+
+
+# ============================================================================
+# Offering envelope: the two agent-buyer fields every purchasable offering carries.
+# `requiredFunds` = the exact x402 charge; `nextActions` = how to transact. Additive
+# (existing consumers ignore both keys); shared verbatim by feed.json, get_product,
+# and the agent card so an agent buyer sees one consistent shape everywhere.
+# ============================================================================
+def _required_funds(store: Store, product: Product) -> dict:
+    """The exact funds an agent must transfer to buy ``product`` — byte-identical to
+    what the x402 challenge on ``/s/{slug}/buy/{id}`` actually demands. The amount is
+    the base ``product.price_micro`` that :func:`resolve_price` returns for a public
+    request (per-buyer wholesale tiers are NEVER quoted on a public surface — M16
+    INV-B — so the advertised amount is always the one that settles); asset/network
+    are the canonical X Layer USDT0 rail; ``pay_to`` is the merchant wallet
+    :func:`resolve_pay_to` returns. NON-CUSTODIAL: pay_to is the merchant, never
+    Tilla."""
+    return {
+        "amount_micro": product.price_micro,
+        "amount": _usdt_str(product.price_micro),
+        "currency": CURRENCY,
+        "asset": ASSET,
+        "network": NETWORK,
+        "pay_to": store.pay_to,
+    }
+
+
+def _next_actions(slug: str, product: Product) -> list[dict]:
+    """The concrete steps an agent can take to acquire ``product``, most-direct
+    first: the x402 buy POST (pay + receive the deliverable in one call) and the MCP
+    confirm-before-pay path. Each names a real, reachable endpoint/tool on THIS
+    store."""
+    return [
+        {
+            "type": "x402_buy",
+            "method": "POST",
+            "endpoint": f"/s/{slug}/buy/{product.id}",
+            "protocol": "x402-v2",
+            "description": (
+                "POST an x402 payment to buy and receive the deliverable in-band."
+            ),
+        },
+        {
+            "type": "mcp",
+            "endpoint": f"/s/{slug}/mcp",
+            "tools": ["preview_order", "create_checkout", "pay"],
+            "description": (
+                "Confirm-before-pay: preview_order (read-only), then create_checkout "
+                "(reserve an exact amount), then pay (submit the tx hash)."
+            ),
+        },
+    ]
+
+
+def _offering_envelope(store: Store, slug: str, product: Product) -> dict:
+    """The offering envelope every agent-facing surface embeds per purchasable
+    product: ``requiredFunds`` (the exact x402 charge, non-custodial payTo=merchant)
+    and ``nextActions`` (how to transact)."""
+    return {
+        "requiredFunds": _required_funds(store, product),
+        "nextActions": _next_actions(slug, product),
+    }
 
 
 # ============================================================================
@@ -286,10 +389,39 @@ def resolve_pay_to(path: str, sentinel_pay_to: str) -> str:
         return sentinel_pay_to
 
 
-def resolve_price(path: str) -> AssetAmount:
+def payer_from_payment_header(header: str | None) -> str | None:
+    """The EIP-3009 ``from`` (payer) wallet carried in a PAYMENT-SIGNATURE /
+    X-PAYMENT header, lowercased. None when the header is absent or undecodable —
+    the price hook then resolves the base price (no verifiable payer ⇒ no tier)."""
+    if not header:
+        return None
+    try:
+        payload = decode_payment_signature_header(header)
+        auth = (
+            payload.payload.get("authorization")
+            if isinstance(payload.payload, dict)
+            else None
+        )
+        frm = auth.get("from") if isinstance(auth, dict) else None
+        return frm.lower() if isinstance(frm, str) and frm else None
+    except Exception:
+        return None
+
+
+def resolve_price(
+    path: str, agent_id: str | None = None, payer: str | None = None
+) -> AssetAmount:
     """Exact product price as an AssetAmount for the store in ``path``. Any
     unknown/non-live store, missing product, or DB error returns the sentinel
-    (amount '1') rather than raising."""
+    (amount '1') rather than raising.
+
+    M16 B2B: when the request presents an ``agent_id`` (query param) AND a payer
+    wallet is recoverable from the payment header, the price is the wholesale
+    TIER price — but only when :func:`b2b.effective_price_micro` verifies the
+    payer is the on-chain owner of that agent id (INV-1). Absent either, or on any
+    mismatch/RPC outage, this is byte-identical to the base-price path (fail-to-
+    base). The settle seam (:func:`record_settlement`) re-derives the same gate
+    with a fresh ownership read, so a tier never rides a stale positive cache."""
     try:
         slug = _slug_from_path(path)
         if slug is None:
@@ -301,8 +433,12 @@ def resolve_price(path: str) -> AssetAmount:
             product = _product_for_path(session, store, path)
             if product is None:
                 return _sentinel_price()
+            price_micro = product.price_micro
+            aid = b2b.parse_agent_id(agent_id) if agent_id else None
+            if aid is not None and payer:
+                price_micro, _ = b2b.effective_price_micro(product, aid, payer)
             return AssetAmount(
-                amount=str(product.price_micro),
+                amount=str(price_micro),
                 asset=ASSET,
                 extra={
                     "name": PAYMENT_EIP712_NAME,
@@ -375,6 +511,8 @@ def fulfill_agent_order(
     payer: str,
     nonce: str,
     referrer_addr: str | None = None,
+    agent_id: int | None = None,
+    signed_micro: int | None = None,
 ) -> tuple[Order, dict]:
     """Idempotently create + deliver an agent order. The (store, payer, nonce)
     triple is the idempotency key (see :func:`_assert_nonce_owner`): an existing
@@ -389,15 +527,33 @@ def fulfill_agent_order(
     stuck 'settling'."""
     existing = session.scalar(select(Order).where(Order.x402_nonce == nonce))
     if existing is not None:
+        # Nonce-scoped idempotency: a replay (even carrying a DIFFERENT agent_id)
+        # returns the stored order at its ORIGINAL price — the tier is never
+        # re-derived on a replayed authorization, so a replayed nonce cannot be
+        # re-quoted into a discount.
         _assert_nonce_owner(existing, store, payer)
         return existing, _agent_buy_body(session, existing, store, product)
+    # M16 B2B: the wholesale tier is granted only when the payer is the verified
+    # on-chain owner of the presented agent id (INV-1, capped <= base at write).
+    # Every other case returns product.price_micro — the order is born at the
+    # exact amount the 402 challenge demanded and that settles.
+    #
+    # Prefer the SIGNED authorization value (the amount the middleware matched to a
+    # verified requirement and actually settled) so the DB record can never drift
+    # from reality if the ownership cache expires between the price hook and here
+    # and an RPC read flips. Fall back to re-deriving only when no signed value is
+    # threaded through (internal callers / tests).
+    if signed_micro is not None and signed_micro > 0:
+        price_micro = signed_micro
+    else:
+        price_micro, _ = b2b.effective_price_micro(product, agent_id, payer)
     order = Order(
         id=uuid.uuid4().hex[:16],
         store_id=store.id,
         product_id=product.id,
         pay_to=store.pay_to,
-        amount_micro=product.price_micro,
-        expected_micro=product.price_micro,
+        amount_micro=price_micro,
+        expected_micro=price_micro,
         status="confirmed",
         channel="agent",
         x402_nonce=nonce,
@@ -439,12 +595,18 @@ def fulfill_agent_order(
 
 
 def _do_agent_buy(
-    request: Request, session: Session, slug: str, ref: str | None
+    request: Request,
+    session: Session,
+    slug: str,
+    ref: str | None,
+    agent_id: str | None,
 ) -> JSONResponse:
     """Shared body for POST /s/{slug}/buy and /s/{slug}/buy/{product_id}. The
     product is resolved from the request PATH (bare /buy = primary; /buy/{id} =
     that product), the SAME resolution ``resolve_price`` used to build the 402
-    challenge — so the price the agent paid always equals what is charged here."""
+    challenge — so the price the agent paid always equals what is charged here.
+    ``agent_id`` (M16 B2B) is the optional caller-presented agent identity, priced
+    off the SETTLED payer, never a client-asserted field."""
     # FAIL CLOSED: no verified payment (middleware absent — OKX_API_KEY unset — or
     # payment not provided) → 402. Goods are never served free.
     payload = getattr(request.state, "payment_payload", None)
@@ -484,13 +646,31 @@ def _do_agent_buy(
     )
     if not isinstance(auth, dict) or not auth.get("nonce"):
         raise HTTPException(400, "missing authorization nonce")
+    # M16 B2B: the tier is priced off the SETTLED payer (the EIP-3009 `from`), the
+    # same wallet the challenge's price hook verified — never a client-asserted
+    # field. A malformed agent_id parses to None → base price, no discount.
+    aid = b2b.parse_agent_id(agent_id) if agent_id else None
+    # The signed EIP-3009 `value` is the amount the middleware verified + settled;
+    # record the order at exactly that so the DB never drifts from what was paid.
+    try:
+        signed_micro = int(auth.get("value"))
+    except (TypeError, ValueError):
+        signed_micro = None
     order, body = fulfill_agent_order(
-        session, store, product, auth.get("from") or "", auth["nonce"], referrer_addr
+        session,
+        store,
+        product,
+        auth.get("from") or "",
+        auth["nonce"],
+        referrer_addr,
+        aid,
+        signed_micro,
     )
     session.commit()
-    # Shared scope["state"] hands the order id to the outer agent-guard middleware
-    # for settle-success tx_hash bookkeeping.
+    # Shared scope["state"] hands the order id (and the presented agent id) to the
+    # outer agent-guard middleware for settle-success bookkeeping + tier re-verify.
     request.state.agent_order_id = order.id
+    request.state.agent_buy_agent_id = aid
     return JSONResponse(body)
 
 
@@ -501,8 +681,9 @@ def agent_buy(
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
     session: Session = Depends(get_session),
     ref: str | None = None,
+    agent_id: str | None = None,
 ):
-    return _do_agent_buy(request, session, slug, ref)
+    return _do_agent_buy(request, session, slug, ref, agent_id)
 
 
 @router.post("/s/{slug}/buy/{product_id}")
@@ -513,8 +694,9 @@ def agent_buy_product(
     product_id: int = Path(..., ge=1),
     session: Session = Depends(get_session),
     ref: str | None = None,
+    agent_id: str | None = None,
 ):
-    return _do_agent_buy(request, session, slug, ref)
+    return _do_agent_buy(request, session, slug, ref, agent_id)
 
 
 @router.get("/s/{slug}/buy")
@@ -554,6 +736,30 @@ def agent_buy_product_get(
 # ============================================================================
 # Settlement-failed hook + reaper: void a provisional 'settling' when settle fails
 # ============================================================================
+def _void_settling(session: Session, order: Order, event: str) -> bool:
+    """Conditionally void a provisional 'settling' agent order (→ canceled), revoking
+    its entitlement (killing the minted download token / license key) and enqueuing an
+    ``order.voided`` webhook. The winning ``settling -> canceled`` transition is a
+    conditional UPDATE, so a settled order (already 'delivered') and a concurrent
+    voider are both no-ops. Does NOT commit — the caller owns the transaction.
+    Returns True on the winning void."""
+    if not checkout.transition(session, order.id, ("settling",), "canceled"):
+        return False
+    delivery.revoke_entitlement(session, order)
+    log_event(
+        session,
+        "agentic",
+        event,
+        store_id=order.store_id,
+        order_id=order.id,
+    )
+    store = session.get(Store, order.store_id)
+    if store is not None:
+        session.refresh(order)
+        webhooks.enqueue(session, store.merchant_id, "order.voided", order)
+    return True
+
+
 def settle_failed_core(nonce: str) -> dict:
     """Compensator for a settle failure on a just-delivered agent order. If the
     order is already in a terminal delivered status an earlier settle on this
@@ -579,19 +785,7 @@ def settle_failed_core(nonce: str) -> dict:
                 "order_id": order.id,
                 "message": CLAIM_DELIVERY_MESSAGE,
             }
-        if checkout.transition(session, order.id, ("settling",), "canceled"):
-            delivery.revoke_entitlement(session, order)
-            log_event(
-                session,
-                "agentic",
-                "agent_order.settle_failed",
-                store_id=order.store_id,
-                order_id=order.id,
-            )
-            store = session.get(Store, order.store_id)
-            if store is not None:
-                session.refresh(order)
-                webhooks.enqueue(session, store.merchant_id, "order.voided", order)
+        if _void_settling(session, order, "agent_order.settle_failed"):
             session.commit()
         return {"error": "settlement_failed"}
 
@@ -636,33 +830,37 @@ def reap_agent_orders(session: Session, now=None) -> int:
     now = now or checkout._now()
     cutoff = now - REAP_AFTER
     reaped = 0
+    # aggr_deferred orders (settle_ref set) are EXEMPT: their aggregated tx can
+    # confirm after the 15-min window and the M8 reconciliation poller owns their
+    # lifecycle — reaping them could void a genuinely-paid-but-slow order.
     orders = session.scalars(
         select(Order).where(
             Order.channel == "agent",
             Order.status == "settling",
+            Order.settle_ref.is_(None),
         )
     ).all()
     for o in orders:
         reached = checkout._naive(o.paid_at) or checkout._naive(o.created_at)
         if reached is not None and reached <= cutoff:
-            if checkout.transition(session, o.id, ("settling",), "canceled"):
-                delivery.revoke_entitlement(session, o)
-                log_event(
-                    session,
-                    "agentic",
-                    "agent_order.reaped",
-                    store_id=o.store_id,
-                    order_id=o.id,
-                )
-                store = session.get(Store, o.store_id)
-                if store is not None:
-                    session.refresh(o)
-                    webhooks.enqueue(session, store.merchant_id, "order.voided", o)
+            if _void_settling(session, o, "agent_order.reaped"):
                 reaped += 1
     return reaped
 
 
 def _reap_tick() -> None:
+    # A live OKX aggr_deferred settle carries NO tx hash, so those orders sit 'settling'
+    # with settle_ref NULL until the chain reconciler finds the facilitator transfer —
+    # the settle_ref exemption in reap_agent_orders does NOT protect them. The reaper
+    # needs no RPC but the reconciler does, so an RPC outage spanning the 15-min window
+    # could void a genuinely-paid order. Fail-closed: when the rail is live, reconcile
+    # first and skip reaping entirely if the chain is unreachable.
+    from app import reconcile
+
+    if config.AGGR_DEFERRED_ENABLED:
+        if not reconcile.chain_reachable():
+            return
+        reconcile.reconcile_chain_tick()
     with SessionLocal() as session:
         if reap_agent_orders(session):
             session.commit()
@@ -701,8 +899,70 @@ def _guard_store_status(slug: str) -> tuple[int, str] | None:
         return None
 
 
+def _settle_tier_data(session: Session, order: Order, agent_id: int | None) -> dict:
+    """Re-derive the wholesale tier at the SETTLE seam with a FRESH ownership read
+    (never the positive cache — INV-1 defense-in-depth). Returns the log payload
+    recording whether the tier is certified for this settled payer. When the order
+    settled BELOW base but a fresh read does NOT confirm the payer owns the agent
+    (e.g. a stale-cache exploit or an ownership transfer inside the 300s window),
+    the settlement is flagged: the funds already moved, so the honest record is the
+    price actually paid with ``tier_applied=False`` — never a certified discount."""
+    base = None
+    tier_applied = False
+    if agent_id is not None and order.product_id is not None:
+        product = session.get(Product, order.product_id)
+        if product is not None:
+            base = product.price_micro
+            _, tier_applied = b2b.effective_price_micro(
+                product, agent_id, order.from_addr, fresh=True
+            )
+    data: dict = {"agent_id": agent_id, "tier_applied": tier_applied}
+    if base is not None and order.expected_micro < base and not tier_applied:
+        data["tier_discrepancy"] = True
+        data["base_micro"] = base
+        data["paid_micro"] = order.expected_micro
+    return data
+
+
+def _finalize_settled(
+    session: Session, order: Order, tx: str | None, settle_data: dict | None
+) -> bool:
+    """Flip a provisional 'settling' agent order to terminal 'delivered' on a confirmed
+    settle — exposing the goods to the out-of-band claim paths — recording the settle
+    ``tx_hash`` when present, then firing the paid/delivered webhooks (suppressed in
+    ``checkout.deliver`` for agent orders), queueing the M11 EAS attestation, and
+    accruing the M13 affiliate rev-share. Every downstream effect is written ONLY on the
+    winning ``settling -> delivered`` transition, so a voided/reaped order never reaches
+    them. Idempotent: the conditional UPDATE is a no-op once the order has left
+    'settling'. Does NOT commit — the caller owns the transaction. Returns True on the
+    winning flip."""
+    fields = {"tx_hash": tx} if tx else {}
+    if not checkout.transition(session, order.id, ("settling",), "delivered", **fields):
+        return False
+    log_event(
+        session,
+        "agentic",
+        "agent_order.settled",
+        store_id=order.store_id,
+        order_id=order.id,
+        data=settle_data,
+    )
+    store = session.get(Store, order.store_id)
+    if store is not None:
+        session.refresh(order)
+        if config.ATTEST_ENABLED:
+            order.attest_status = "pending"
+        webhooks.enqueue(session, store.merchant_id, "order.paid", order)
+        webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
+        affiliates.accrue(session, order, store)
+    return True
+
+
 def record_settlement(
-    order_id: str, payment_response_header: str, scheme: str | None = None
+    order_id: str,
+    payment_response_header: str,
+    scheme: str | None = None,
+    agent_id: int | None = None,
 ) -> None:
     """A served 200 with a PAYMENT-RESPONSE header IS the settle-success signal, so
     flip the provisional 'settling' order to 'delivered' — exposing the goods to
@@ -721,17 +981,30 @@ def record_settlement(
     before TILLA_AGGR_DEFERRED is ever enabled.) Idempotent (the conditional
     transition is a no-op once the order has left 'settling')."""
     tx = None
+    status = None
     try:
         settle = decode_payment_response_header(payment_response_header)
         tx = settle.transaction or None
+        status = settle.status
     except Exception:
         logger.exception("record_settlement: undecodable PAYMENT-RESPONSE")
     with SessionLocal() as session:
         order = session.get(Order, order_id)
         if order is None or order.channel != "agent":
             return
-        if scheme == PAYMENT_SCHEME_AGGR_DEFERRED and tx is None:
+        # aggr_deferred is UNCONFIRMED at serve time when there is no decoded tx OR the
+        # facilitator marks the aggregated tx 'pending' — in both cases the on-chain tx
+        # is not yet final, so we do NOT flip to a terminal 'delivered' or log
+        # 'agent_order.settled' (which would claim settlement with no evidence). The
+        # order stays provisional 'settling' with the 'agent_order.settle_pending'
+        # marker; when a pending aggregated ref IS present we persist it so the
+        # reconciliation poller (app.reconcile) can later finalize on its confirmed tx.
+        if scheme == PAYMENT_SCHEME_AGGR_DEFERRED and (
+            tx is None or status == "pending"
+        ):
             if order.status == "settling":
+                if tx is not None and order.settle_ref != tx:
+                    order.settle_ref = tx
                 log_event(
                     session,
                     "agentic",
@@ -741,33 +1014,19 @@ def record_settlement(
                 )
                 session.commit()
             return
-        fields = {"tx_hash": tx} if tx else {}
-        if checkout.transition(session, order.id, ("settling",), "delivered", **fields):
-            log_event(
-                session,
-                "agentic",
-                "agent_order.settled",
-                store_id=order.store_id,
-                order_id=order_id,
-                data=None if tx else {"tx": "unparsed"},
-            )
-            # Fire the paid/delivered webhooks here (suppressed in checkout.deliver
-            # for agent orders): the settle is now confirmed on-chain, so the
-            # merchant's consumer counts revenue only for a settled buy.
-            store = session.get(Store, order.store_id)
-            if store is not None:
-                session.refresh(order)
-                # M11: queue for EAS attestation ONLY here, on the settling->delivered
-                # flip — a voided/reaped agent order (which never reaches this branch)
-                # is therefore never attested. Flag OFF => stays 'none', never queued.
-                if config.ATTEST_ENABLED:
-                    order.attest_status = "pending"
-                webhooks.enqueue(session, store.merchant_id, "order.paid", order)
-                webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
-                # M13 affiliate accrual: written ONLY here, on the settling->delivered
-                # flip — a voided/reaped agent order (which never reaches this branch)
-                # is therefore never accrued, the same guarantee as EAS queueing.
-                affiliates.accrue(session, order, store)
+        # INV-1 settle re-verify: for a tiered buy re-derive the tier with a FRESH
+        # ownership read (never the positive cache) BEFORE the terminal flip, so a
+        # discount can never ride a stale cache entry. tier_applied is recorded on
+        # the settled event; a below-base settle a fresh read cannot certify is
+        # flagged. No agent id ⇒ the log payload is byte-identical to the pre-M16
+        # exact-buy path.
+        if agent_id is not None:
+            settle_data: dict | None = _settle_tier_data(session, order, agent_id)
+            if not tx:
+                settle_data["tx"] = "unparsed"
+        else:
+            settle_data = None if tx else {"tx": "unparsed"}
+        if _finalize_settled(session, order, tx, settle_data):
             session.commit()
 
 
@@ -801,7 +1060,8 @@ async def agent_guard_dispatch(request: Request, call_next):
         order_id = getattr(request.state, "agent_order_id", None)
         if pr and order_id:
             scheme = _payment_scheme(request)
-            await asyncio.to_thread(record_settlement, order_id, pr, scheme)
+            aid = getattr(request.state, "agent_buy_agent_id", None)
+            await asyncio.to_thread(record_settlement, order_id, pr, scheme, aid)
     return response
 
 
@@ -813,6 +1073,15 @@ _MCP_NO_CONTENT = object()
 
 class _GetProductArgs(BaseModel):
     product_id: int
+    # M16 B2B: an optional ERC-8004 agent id to receive an advisory wholesale
+    # quote (same gate as GET /s/{slug}/quote — INV-1 governs at settle).
+    agent_id: str | None = None
+
+
+class _PreviewOrderArgs(BaseModel):
+    # Optional: which active product to preview. Omitted -> the store's primary
+    # product. Read-only, so no `ref` attribution (nothing is reserved to attribute).
+    product_id: int | None = None
 
 
 class _CreateCheckoutArgs(BaseModel):
@@ -872,6 +1141,81 @@ def _rpc_tool_error(req_id, message: str) -> dict:
     )
 
 
+# Phase 4 butler flow: the two-step "summarize -> then pay" contract, stated in-band
+# so a concierge agent can show a human what will happen before any settlement. The
+# summary is read-only; funds move ONLY on the explicit pay step (or the x402 buy
+# POST), and always settle to the merchant's payTo (non-custodial).
+_PREVIEW_NEXT_STEP = (
+    "Preview only — nothing is reserved and nothing is charged. To buy, call "
+    "create_checkout to lock an exact amount, then pay with the on-chain tx hash "
+    "(x402 agents can POST the store's buy endpoint instead). Funds move only on "
+    "that explicit pay step and settle to the merchant's payTo (non-custodial)."
+)
+_CHECKOUT_NEXT_STEP = (
+    "Checkout reserved but UNPAID — nothing has been charged yet. Send exactly "
+    "amount_micro of USDT to pay_to on X Layer, then call pay with the tx hash "
+    "(x402 agents can POST the store's buy endpoint instead). Funds move only on "
+    "that explicit pay step and settle to the merchant (non-custodial)."
+)
+
+
+def _order_summary(store: Store, product: Product) -> dict:
+    """The confirm-before-pay summary a concierge agent shows a human before any
+    settlement: what is bought, the unit price + quantity + total (USDT), the
+    delivery ETA (sla_minutes), the store, the payment rail, and a one-line human
+    string. Side-effect-free — the price of the goods, not a payment instruction; the
+    exact on-chain amount (with its unique matching offset) is create_checkout's
+    amount_micro. Quantity is 1 (one checkout buys one unit)."""
+    unit_micro = product.price_micro
+    quantity = 1
+    total_micro = unit_micro * quantity
+    sla = _effective_sla(product)
+    store_name = _store_name(store)
+    return {
+        "store": {"name": store_name, "slug": store.slug},
+        "product": {"id": product.id, "name": product.name},
+        "quantity": quantity,
+        "unit_price": _usdt_str(unit_micro),
+        "unit_price_micro": unit_micro,
+        "total": _usdt_str(total_micro),
+        "total_micro": total_micro,
+        "currency": CURRENCY,
+        "network": NETWORK,
+        "asset": ASSET,
+        "pay_to": store.pay_to,
+        "sla_minutes": sla,
+        "settlement": "non_custodial",
+        "line": (
+            f"{quantity} x {product.name} from {store_name} for "
+            f"{_usdt_str(total_micro)} {CURRENCY}, delivered within ~{sla} min "
+            f"(paid direct to the merchant on X Layer)."
+        ),
+    }
+
+
+def _resolve_active_product(
+    session: Session, store: Store, product_id: int | None
+) -> Product:
+    """The active product a buy targets: the given ``product_id`` (validated to be an
+    active product of THIS store) or the store's primary product. Raises _ToolError
+    exactly like the callers did inline, so tool behaviour is unchanged."""
+    if product_id is not None:
+        product = session.scalar(
+            select(Product).where(
+                Product.id == product_id,
+                Product.store_id == store.id,
+                Product.active.is_(True),
+            )
+        )
+        if product is None:
+            raise _ToolError("product not found")
+        return product
+    product = _active_product(session, store.id)
+    if product is None:
+        raise _ToolError("store has no active product")
+    return product
+
+
 def _mcp_tools() -> list[dict]:
     return [
         {
@@ -887,23 +1231,47 @@ def _mcp_tools() -> list[dict]:
             "name": "get_product",
             "description": (
                 "Get one product's detail, deliverable kind, and the x402 buy "
-                "endpoint (x402-capable agents can POST straight to /s/{slug}/buy)."
+                "endpoint (x402-capable agents can POST straight to /s/{slug}/buy). "
+                "Pass an optional ERC-8004 `agent_id` to receive an advisory "
+                "wholesale quote; buy at that tier with POST /s/{slug}/buy?agent_id="
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "product_id": {"type": "integer"},
+                    "agent_id": {"type": "string"},
+                },
+                "required": ["product_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "preview_order",
+            "description": (
+                "Read-only confirmation summary for a would-be buy — product, unit "
+                "price + quantity + total (USDT), delivery ETA (sla_minutes), store, "
+                "payment rail, and a one-line human string — WITHOUT reserving or "
+                "charging anything. Use it to show a human what will happen before "
+                "paying: nothing settles until create_checkout + pay (or the x402 buy "
+                "POST). Pass an optional product_id; omit for the store's primary "
+                "product."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {"product_id": {"type": "integer"}},
-                "required": ["product_id"],
                 "additionalProperties": False,
             },
         },
         {
             "name": "create_checkout",
             "description": (
-                "Create a unique-amount on-chain checkout (for agents that pay the "
-                "merchant themselves and submit the tx hash via `pay`). Pass an "
-                "optional product_id to check out a specific product; omit it for "
-                "the store's primary product. Pass an optional `ref` (a 0x EVM "
-                "address) to attribute the sale to a referring agent's payout wallet."
+                "Reserve a unique-amount on-chain checkout (for agents that pay the "
+                "merchant themselves and submit the tx hash via `pay`). Returns a "
+                "confirmation `summary` plus the exact amount to send — but charges "
+                "nothing: money moves only on the explicit `pay` step. Pass an "
+                "optional product_id to check out a specific product; omit it for the "
+                "store's primary product. Pass an optional `ref` (a 0x EVM address) to "
+                "attribute the sale to a referring agent's payout wallet."
             ),
             "inputSchema": {
                 "type": "object",
@@ -948,6 +1316,7 @@ def _tool_list_products(session: Session, store: Store) -> dict:
                 "price_micro": p.price_micro,
                 "currency": CURRENCY,
                 "network": NETWORK,
+                "sla_minutes": _effective_sla(p),
             }
             for p in products
         ]
@@ -955,7 +1324,11 @@ def _tool_list_products(session: Session, store: Store) -> dict:
 
 
 def _tool_get_product(
-    session: Session, store: Store, slug: str, product_id: int
+    session: Session,
+    store: Store,
+    slug: str,
+    product_id: int,
+    agent_id: str | None = None,
 ) -> dict:
     product = session.scalar(
         select(Product).where(
@@ -972,7 +1345,7 @@ def _tool_get_product(
         .order_by(Deliverable.id.desc())
         .limit(1)
     )
-    return {
+    result = {
         "id": product.id,
         "name": product.name,
         "description": _product_description(store),
@@ -980,6 +1353,7 @@ def _tool_get_product(
         "price_micro": product.price_micro,
         "currency": CURRENCY,
         "network": NETWORK,
+        "sla_minutes": _effective_sla(product),
         "deliverable_kind": deliverable.kind if deliverable else "text",
         "pricing": _pricing_block(product),
         "x402": {
@@ -988,7 +1362,27 @@ def _tool_get_product(
             "asset": ASSET,
             "schemes": enabled_schemes(product),
         },
+        **_offering_envelope(store, slug, product),
     }
+    # M16 B2B: echo the advisory wholesale quote for a presented agent id. Pass it
+    # to /buy as ?agent_id=<id> to have the tier priced into the 402 (INV-1 grants
+    # it at settle only if the payer wallet is that agent's on-chain owner).
+    aid = b2b.parse_agent_id(agent_id) if agent_id else None
+    if aid is not None:
+        quote_fields = _tier_quote(product, aid)
+        if quote_fields is not None:
+            result["quote"] = {"agent_id": aid, **quote_fields}
+    return result
+
+
+def _tool_preview_order(
+    session: Session, store: Store, product_id: int | None = None
+) -> dict:
+    """Read-only confirm-before-pay preview: the order summary and the next step, with
+    NO order created and NO charge. The whole point of the two-step butler flow —
+    show the human first, settle only on the explicit pay."""
+    product = _resolve_active_product(session, store, product_id)
+    return {"summary": _order_summary(store, product), "next_step": _PREVIEW_NEXT_STEP}
 
 
 def _tool_create_checkout(
@@ -997,20 +1391,7 @@ def _tool_create_checkout(
     product_id: int | None = None,
     referrer_addr: str | None = None,
 ) -> dict:
-    if product_id is not None:
-        product = session.scalar(
-            select(Product).where(
-                Product.id == product_id,
-                Product.store_id == store.id,
-                Product.active.is_(True),
-            )
-        )
-        if product is None:
-            raise _ToolError("product not found")
-    else:
-        product = _active_product(session, store.id)
-        if product is None:
-            raise _ToolError("store has no active product")
+    product = _resolve_active_product(session, store, product_id)
     try:
         order = checkout.create_order(session, store, product, referrer_addr)
     except checkout.AmountUnavailable as exc:
@@ -1025,6 +1406,8 @@ def _tool_create_checkout(
         "expires_at": order.expires_at.isoformat() + "Z",
         "network": "X Layer (chainId 196)",
         "token": "USDT",
+        "summary": _order_summary(store, product),
+        "next_step": _CHECKOUT_NEXT_STEP,
     }
 
 
@@ -1065,7 +1448,12 @@ def _mcp_tools_call(session: Session, store: Store, slug: str, req_id, params) -
             result = _tool_list_products(session, store)
         elif name == "get_product":
             args = _GetProductArgs.model_validate(raw_args)
-            result = _tool_get_product(session, store, slug, args.product_id)
+            result = _tool_get_product(
+                session, store, slug, args.product_id, args.agent_id
+            )
+        elif name == "preview_order":
+            pargs = _PreviewOrderArgs.model_validate(raw_args)
+            result = _tool_preview_order(session, store, pargs.product_id)
         elif name == "create_checkout":
             args = _CreateCheckoutArgs.model_validate(raw_args)
             result = _tool_create_checkout(session, store, args.product_id, args.ref)
@@ -1155,8 +1543,193 @@ async def mcp_get(
 
 
 # ============================================================================
+# Root MCP: a Tilla-wide JSON-RPC server so any agent runtime is the concierge —
+# browse/search across every live store and route to the right one. Buying then
+# happens on the per-store endpoints each result advertises (its `mcp` / `buy`).
+# NOTE (deploy): a new root path needs an nginx proxy location, like /ready —
+# see deploy/nginx-m15.snippet. Until then it is reachable in-app / via tests.
+# ============================================================================
+class _BrowseArgs(BaseModel):
+    sort: str = "sold"
+    limit: int = 20
+    offset: int = 0
+
+
+class _SearchStoresArgs(BaseModel):
+    query: str
+    limit: int = 20
+
+
+class _StoreSlugArgs(BaseModel):
+    slug: str
+
+
+def _root_mcp_tools() -> list[dict]:
+    return [
+        {
+            "name": "browse_stores",
+            "description": (
+                "List live Tilla stores ranked by performance. Each result carries "
+                "its page URL, per-store MCP + x402 buy endpoints, and reputation "
+                "(sold_count, success_rate, unique_buyer_count, last_sale_at)."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sort": {"type": "string", "enum": list(DISCOVERY_SORTS)},
+                    "limit": {"type": "integer"},
+                    "offset": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "search_stores",
+            "description": "Keyword-search live stores by slug or description.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "list_products",
+            "description": (
+                "List one store's active products by slug; then buy via that "
+                "store's mcp/buy endpoint from browse_stores."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def _root_mcp_tools_call(session: Session, req_id, params) -> dict:
+    if not isinstance(params, dict):
+        return _rpc_error(req_id, -32602, "params must be an object")
+    name = params.get("name")
+    raw_args = params.get("arguments") or {}
+    if not isinstance(raw_args, dict):
+        return _rpc_error(req_id, -32602, "arguments must be an object")
+    try:
+        if name == "browse_stores":
+            a = _BrowseArgs.model_validate(raw_args)
+            sort = a.sort if a.sort in DISCOVERY_SORTS else "sold"
+            rows = _discovery_rows(
+                session,
+                [],
+                max(1, min(a.limit, 50)),
+                max(0, min(a.offset, 100_000)),
+                sort,
+            )
+            result = {"resources": rows, "sort": sort}
+        elif name == "search_stores":
+            a = _SearchStoresArgs.model_validate(raw_args)
+            q = a.query.strip()
+            if len(q) < 2 or len(q) > 100:
+                raise _ToolError("query must be 2 to 100 characters")
+            result = {
+                "resources": _search_discovery(session, q, max(1, min(a.limit, 50)))
+            }
+        elif name == "list_products":
+            a = _StoreSlugArgs.model_validate(raw_args)
+            store = session.scalar(select(Store).where(Store.slug == a.slug))
+            if store is None or store.status != "live":
+                raise _ToolError("store not found")
+            result = _tool_list_products(session, store)
+        else:
+            return _rpc_error(req_id, -32602, f"unknown tool: {name}")
+    except ValidationError as exc:
+        return _rpc_error(
+            req_id, -32602, "invalid tool arguments", data=json.loads(exc.json())
+        )
+    except _ToolError as exc:
+        return _rpc_tool_error(req_id, str(exc))
+    return _rpc_result(
+        req_id,
+        {
+            "content": [{"type": "text", "text": json.dumps(result)}],
+            "structuredContent": result,
+        },
+    )
+
+
+def _handle_root_mcp(payload):
+    """Sync JSON-RPC dispatch for the Tilla-wide root MCP (no slug)."""
+    with SessionLocal() as session:
+        if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+            req_id = payload.get("id") if isinstance(payload, dict) else None
+            return _rpc_error(req_id, -32600, "invalid JSON-RPC request")
+        method = payload.get("method")
+        req_id = payload.get("id")
+        params = payload.get("params") or {}
+        if method == "notifications/initialized":
+            return _MCP_NO_CONTENT
+        if method == "initialize":
+            proto = (
+                params.get("protocolVersion") if isinstance(params, dict) else None
+            ) or MCP_PROTOCOL_VERSION
+            return _rpc_result(
+                req_id,
+                {
+                    "protocolVersion": proto,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "tilla", "version": TILLA_VERSION},
+                },
+            )
+        if method == "ping":
+            return _rpc_result(req_id, {})
+        if method == "tools/list":
+            return _rpc_result(req_id, {"tools": _root_mcp_tools()})
+        if method == "tools/call":
+            return _root_mcp_tools_call(session, req_id, params)
+        return _rpc_error(req_id, -32601, "method not found")
+
+
+@router.post("/mcp")
+@limiter.limit("30/minute")
+async def root_mcp_post(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            _rpc_error(None, -32700, "parse error"), headers=_AGENT_HEADERS
+        )
+    result = await asyncio.to_thread(_handle_root_mcp, payload)
+    if result is _MCP_NO_CONTENT:
+        return Response(status_code=202)
+    return JSONResponse(result, headers=_AGENT_HEADERS)
+
+
+@router.get("/mcp")
+async def root_mcp_get(request: Request):
+    return JSONResponse(
+        {"error": "method not allowed; use POST"},
+        status_code=405,
+        headers={"Allow": "POST", **_AGENT_HEADERS},
+    )
+
+
+# ============================================================================
 # Feeds: feed.json (ACP product-feed shape) + llms.txt
 # ============================================================================
+def _effective_sla(product: Product) -> int:
+    """The delivery-time promise (minutes) a buyer agent should expect: the
+    merchant's per-product override, else the platform default. Always an int, so
+    every purchasable action carries an ETA an agent can rank on."""
+    return (
+        product.sla_minutes if product.sla_minutes is not None else DELIVERY_SLA_MINUTES
+    )
+
+
 def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> dict:
     return {
         "id": str(product.id),
@@ -1165,6 +1738,7 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
         "link": store_url,
         "price": {"amount": _usdt_str(product.price_micro), "currency": CURRENCY},
         "availability": "in_stock",
+        "sla_minutes": _effective_sla(product),
         "pricing": _pricing_block(product),
         "x402": {
             "endpoint": f"/s/{slug}/buy/{product.id}",
@@ -1172,7 +1746,66 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
             "asset": ASSET,
             "schemes": enabled_schemes(product),
         },
+        **_offering_envelope(store, slug, product),
+        # Phase 1.2: the typed contract an agent supplies to the x402 buy endpoint.
+        # The product is fixed by the x402 endpoint path and payment rides the x402
+        # header, so the only request-shaping inputs are the buy route's two optional
+        # query params (ref/agent_id) — mirrors the agent-card 'buy' input_schema.
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": (
+                        "optional 0x affiliate wallet to attribute the sale to"
+                    ),
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": (
+                        "optional ERC-8004 agent id to price a wholesale tier; "
+                        "granted at settle only if the payer wallet is its owner"
+                    ),
+                },
+            },
+        },
     }
+
+
+@router.get("/s/{slug}/quote")
+@limiter.limit("30/minute")
+def quote(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    agent_id: str = Query(..., max_length=40),
+    session: Session = Depends(get_session),
+):
+    """M16 B2B: an advisory wholesale quote for a presented ERC-8004 agent id. The
+    tier price is returned ONLY when a tier matches AND the agent id's on-chain
+    owner is verifiable (read-only registry eth_call) — the quote also states that
+    the discount is GRANTED at settle only if the payer wallet equals that owner
+    (INV-1). Any unverifiable claim / RPC outage / no matching tier => base price
+    only (fail-to-base). Public + rate-limited; reveals no other buyer's terms."""
+    store = _live_store(session, slug)
+    if store is None:
+        raise HTTPException(404, "store not found")
+    product = _active_product(session, store.id)
+    if product is None:
+        raise HTTPException(404, "no active product")
+    aid = b2b.parse_agent_id(agent_id)
+    if aid is None:
+        raise HTTPException(422, "agent_id must be a numeric ERC-8004 id")
+    base = product.price_micro
+    body: dict = {
+        "agent_id": aid,
+        "base_price_micro": base,
+        "base_price": _usdt_str(base),
+        "currency": CURRENCY,
+    }
+    quote_fields = _tier_quote(product, aid)
+    if quote_fields is not None:
+        body.update(quote_fields)
+    return JSONResponse(body, headers=_AGENT_HEADERS)
 
 
 @router.get("/s/{slug}/feed.json")
@@ -1199,6 +1832,51 @@ def feed_json(
             "url": store_url,
         },
         "products": [_feed_product(store, slug, p, store_url) for p in products],
+    }
+    return JSONResponse(body, headers=_AGENT_HEADERS)
+
+
+@router.get("/s/{slug}/reviews")
+@limiter.limit("60/minute")
+def store_reviews(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    limit: int = 20,
+    session: Session = Depends(get_session),
+):
+    """Public, screened verified-buyer reviews for a store, newest first, plus the
+    aggregate (avg rating + count). Every listed body was Warden-screened before it
+    was stored, so nothing unscreened is ever served; the reviewer wallet is surfaced
+    only in an abbreviated 0x1234…cdef form (no full-wallet dump). JSON-only surface
+    (no HTML context to escape), 404 for any non-live store."""
+    store = _live_store(session, slug)
+    if store is None:  # 404 for ANY non-live store (never leak pending)
+        raise HTTPException(404, "store not found")
+    limit = max(1, min(limit, 100))
+    ravg, rcount = session.execute(
+        select(func.avg(Review.rating), func.count(Review.id)).where(
+            Review.store_id == store.id
+        )
+    ).one()
+    rows = session.scalars(
+        select(Review)
+        .where(Review.store_id == store.id)
+        .order_by(Review.created_at.desc(), Review.id.desc())
+        .limit(limit)
+    ).all()
+    body = {
+        "slug": store.slug,
+        "review_avg": round(float(ravg), 2) if ravg is not None else None,
+        "review_count": rcount or 0,
+        "reviews": [
+            {
+                "rating": r.rating,
+                "body": r.body,
+                "buyer": f"{r.from_addr[:6]}…{r.from_addr[-4:]}",
+                "created_at": r.created_at.isoformat() + "Z",
+            }
+            for r in rows
+        ],
     }
     return JSONResponse(body, headers=_AGENT_HEADERS)
 
@@ -1245,6 +1923,27 @@ def llms_txt(
 @limiter.limit("60/minute")
 def agent_card(request: Request):
     base = config.PUBLIC_BASE_URL.rstrip("/")
+    # Lazy import avoids the agentic<-main circular import at module load. Advertising
+    # create-store's exact input contract lets an agent hiring Tilla self-serve without
+    # trial and error (the ACP 'requirement schema' idea, applied to our own service).
+    from app.main import CreateStoreBody
+
+    # create-store's requiredFunds is the fixed platform charge — amount derived from
+    # the SAME PAYMENT_AMOUNT constant build_payment_option feeds the /create-store
+    # x402 route, so it can never drift from the real 402. payTo is Tilla's own rail
+    # wallet (Tilla earning its service fee); omitted when PAY_TO_ADDRESS is unset
+    # (no middleware — e.g. tests) rather than advertising a wallet we cannot honor.
+    create_store_funds: dict = {
+        "amount_micro": int(PAYMENT_AMOUNT),
+        "amount": _usdt_str(int(PAYMENT_AMOUNT)),
+        "currency": CURRENCY,
+        "asset": ASSET,
+        "network": NETWORK,
+    }
+    tilla_pay_to = os.environ.get("PAY_TO_ADDRESS")
+    if tilla_pay_to:
+        create_store_funds["pay_to"] = tilla_pay_to
+
     body = {
         "name": "Tilla",
         "description": (
@@ -1258,13 +1957,80 @@ def agent_card(request: Request):
                 "id": "create-store",
                 "name": "Create a storefront",
                 "description": "Spin up a live one-product crypto store.",
-                "x402": {"endpoint": "/create-store", "price": "1 USDT"},
+                "x402": {"endpoint": "/create-store", "price": "0.05 USDT"},
+                "input_schema": CreateStoreBody.model_json_schema(),
+                "sample_request": {
+                    "description": "single-origin coffee beans, roasted to order",
+                    "theme": "original",
+                },
+                "sla_minutes": DELIVERY_SLA_MINUTES,
+                "requiredFunds": create_store_funds,
+                "nextActions": [
+                    {
+                        "type": "x402_buy",
+                        "method": "POST",
+                        "endpoint": "/create-store",
+                        "protocol": "x402-v2",
+                        "description": (
+                            "POST {description, theme} with an x402 payment (0.05 USDT) "
+                            "to spin up a live store."
+                        ),
+                    }
+                ],
             },
             {
                 "id": "buy",
                 "name": "Buy from a store",
-                "description": "Purchase a store's product; payTo is the merchant.",
+                "description": (
+                    "Purchase a store's product; payTo is the merchant. Confirm "
+                    "before pay: the store's MCP preview_order returns a read-only "
+                    "summary, create_checkout reserves an exact amount, and money "
+                    "moves only on the explicit pay step."
+                ),
                 "x402": {"endpoint": "/s/{slug}/buy"},
+                "input_schema": {
+                    "type": "object",
+                    "required": ["slug"],
+                    "properties": {
+                        "slug": {"type": "string", "description": "store slug"},
+                        "product_id": {
+                            "type": "integer",
+                            "description": (
+                                "product to buy; omit for the primary product"
+                            ),
+                        },
+                    },
+                },
+                "sla_minutes": DELIVERY_SLA_MINUTES,
+                # requiredFunds is per-offering (varies by store/product), so it is
+                # resolved from the store's own feed.json / get_product envelope —
+                # nextActions names exactly how to reach it and then pay.
+                "nextActions": [
+                    {
+                        "type": "discover",
+                        "method": "GET",
+                        "endpoint": "/discovery/resources",
+                        "description": "List live stores to pick a slug.",
+                    },
+                    {
+                        "type": "feed",
+                        "method": "GET",
+                        "endpoint": "/s/{slug}/feed.json",
+                        "description": (
+                            "Fetch a store's per-product requiredFunds + buy endpoints."
+                        ),
+                    },
+                    {
+                        "type": "x402_buy",
+                        "method": "POST",
+                        "endpoint": "/s/{slug}/buy",
+                        "protocol": "x402-v2",
+                        "description": (
+                            "POST an x402 payment; payTo is the merchant "
+                            "(non-custodial)."
+                        ),
+                    },
+                ],
             },
         ],
         "payment": {
@@ -1278,6 +2044,7 @@ def agent_card(request: Request):
         "discovery": {
             "resources": "/discovery/resources",
             "search": "/discovery/search",
+            "mcp": "/mcp",
         },
     }
     return JSONResponse(body, headers=_AGENT_HEADERS)
@@ -1286,7 +2053,57 @@ def agent_card(request: Request):
 # ============================================================================
 # Discovery: Tilla-wide index of live stores (no merchant wallets leaked)
 # ============================================================================
-def _discovery_row(store: Store, pmin, pmax, sold) -> dict:
+# Graduation-style trust ladder (Phase 1.5). Thresholds sit below Virtuals' 10-sale
+# graduation, matched to Tilla's volume. It is computed ONLY from terminal,
+# un-fakeable outcomes: delivered count = earned volume; success_rate (delivered vs
+# refunded) = quality. A refund-heavy store is demoted to 'watch' regardless of
+# volume — the auto-demote. Checkout expiries are deliberately NOT an input: an
+# expired checkout is buyer abandonment, not store fault (the same reason they are
+# excluded from success_rate), so they can never unfairly demote a store.
+TRUST_TIERS = ("new", "watch", "emerging", "established", "trusted")
+
+
+def _trust_tier(sold: int, success_rate: float | None) -> str:
+    if sold == 0:
+        return "new"
+    # sold >= 1 => at least one delivery => success_rate is a real float here.
+    if success_rate is not None and success_rate < 0.5:
+        return "watch"
+    if sold >= 8 and success_rate is not None and success_rate >= 0.95:
+        return "trusted"
+    if sold >= 3 and success_rate is not None and success_rate >= 0.9:
+        return "established"
+    return "emerging"
+
+
+def _discovery_row(
+    store: Store,
+    pmin,
+    pmax,
+    sold,
+    buyers,
+    last_sale,
+    refunded,
+    rejected,
+    pending,
+    review_avg,
+    review_count,
+) -> dict:
+    # Reputation signals an agent buyer can rank on, computed from terminal orders:
+    # sold_count = delivered count; success_rate = good / (good + rejected + refunded)
+    # where good = delivered minus buyer-rejected minus still-in-window (Phase 1.6);
+    # unique_buyer_count = distinct payer addresses; last_sale_at = most recent delivery;
+    # pending_eval_count = fresh sales inside the dispute window (not yet counted);
+    # disputed_count = buyer-rejected deliveries; trust_tier = the graduation ladder above.
+    # review_avg/review_count = Phase 3 verified-buyer reviews (one per delivered order).
+    # Abandoned/expired checkouts are the buyer's doing, not the store's, so excluded.
+    sold = sold or 0
+    refunded = refunded or 0
+    rejected = rejected or 0
+    pending = pending or 0
+    good = sold - rejected - pending
+    settled = good + rejected + refunded
+    success_rate = round(good / settled, 4) if settled else None
     return {
         "slug": store.slug,
         "name": _store_name(store),
@@ -1300,18 +2117,81 @@ def _discovery_row(store: Store, pmin, pmax, sold) -> dict:
         "price_max_micro": pmax,
         "currency": CURRENCY,
         "network": NETWORK,
-        "sold_count": sold or 0,
+        "sold_count": sold,
+        "success_rate": success_rate,
+        "unique_buyer_count": buyers or 0,
+        "last_sale_at": (last_sale.isoformat() + "Z") if last_sale else None,
+        "pending_eval_count": pending,
+        "disputed_count": rejected,
+        "trust_tier": _trust_tier(good, success_rate),
+        "review_avg": round(float(review_avg), 2) if review_avg is not None else None,
+        "review_count": review_count or 0,
         "created_at": store.created_at.isoformat() + "Z",
+        # nextActions routes an agent to the per-store surfaces that carry each
+        # offering's exact requiredFunds (feed.json / MCP get_product). A store-level
+        # requiredFunds cannot be exact here (a store may list several products) and
+        # the merchant wallet is deliberately never bulk-exported in discovery, so
+        # the envelope's funds half is resolved one hop deeper, per offering.
+        "nextActions": [
+            {
+                "type": "feed",
+                "method": "GET",
+                "endpoint": f"/s/{store.slug}/feed.json",
+                "description": (
+                    "Fetch per-product requiredFunds + x402 buy endpoints."
+                ),
+            },
+            {
+                "type": "mcp",
+                "method": "POST",
+                "endpoint": f"/s/{store.slug}/mcp",
+                "tools": ["list_products", "get_product", "create_checkout", "pay"],
+                "description": "Browse products and check out via JSON-RPC.",
+            },
+            {
+                "type": "x402_buy",
+                "method": "POST",
+                "endpoint": f"/s/{store.slug}/buy",
+                "protocol": "x402-v2",
+                "description": "Buy the primary product; payTo is the merchant.",
+            },
+        ],
     }
 
 
-def _discovery_rows(session: Session, where_clauses, limit: int, offset: int):
-    sold_sq = (
+# Discovery sort keys an agent buyer can pass. 'sold' is the default and preserves
+# the prior order (most-sold first); an unknown value falls back to it.
+DISCOVERY_SORTS = ("sold", "success", "buyers", "recent", "new")
+
+
+def _discovery_rows(
+    session: Session, where_clauses, limit: int, offset: int, sort: str = "sold"
+):
+    delivered = Order.status.in_(checkout.TERMINAL_DELIVERED)
+    # Phase 1.6: a delivery counts toward the rate only once it is settled-evaluated —
+    # rejected is a failure; still 'pending' AND inside the dispute window (or with an
+    # unknown delivery time) is not yet counted. 'none'/'confirmed'/window-elapsed all
+    # fall through to good. cutoff = now - window, so the auto-confirm is a read-time
+    # comparison (no poller).
+    cutoff = checkout._now() - timedelta(days=EVAL_WINDOW_DAYS)
+    rejected_case = delivered & (Order.eval_status == "rejected")
+    pending_case = (
+        delivered
+        & (Order.eval_status == "pending")
+        & or_(Order.paid_at.is_(None), Order.paid_at >= cutoff)
+    )
+    metrics_sq = (
         select(
             Order.store_id.label("sid"),
-            func.count(Order.id).label("sold"),
+            func.count(case((delivered, Order.id))).label("sold"),
+            func.count(func.distinct(case((delivered, Order.from_addr)))).label(
+                "buyers"
+            ),
+            func.max(case((delivered, Order.paid_at))).label("last_sale"),
+            func.count(case((Order.status == "refunded", Order.id))).label("refunded"),
+            func.count(case((rejected_case, Order.id))).label("rejected"),
+            func.count(case((pending_case, Order.id))).label("pending"),
         )
-        .where(Order.status.in_(checkout.TERMINAL_DELIVERED))
         .group_by(Order.store_id)
         .subquery()
     )
@@ -1325,23 +2205,65 @@ def _discovery_rows(session: Session, where_clauses, limit: int, offset: int):
         .group_by(Product.store_id)
         .subquery()
     )
-    stmt = (
-        select(Store, price_sq.c.pmin, price_sq.c.pmax, sold_sq.c.sold)
-        .outerjoin(price_sq, price_sq.c.sid == Store.id)
-        .outerjoin(sold_sq, sold_sq.c.sid == Store.id)
-        .where(Store.status == "live", *where_clauses)
-        .order_by(
-            func.coalesce(sold_sq.c.sold, 0).desc(),
-            Store.created_at.desc(),
-            Store.id.desc(),
+    # Phase 3 verified-buyer reviews: avg rating + count per store. Un-fakeable — a
+    # review row only exists for a delivered order paid by the reviewer wallet.
+    reviews_sq = (
+        select(
+            Review.store_id.label("sid"),
+            func.avg(Review.rating).label("ravg"),
+            func.count(Review.id).label("rcount"),
         )
+        .group_by(Review.store_id)
+        .subquery()
+    )
+    sold_c = func.coalesce(metrics_sq.c.sold, 0)
+    rejected_c = func.coalesce(metrics_sq.c.rejected, 0)
+    pending_c = func.coalesce(metrics_sq.c.pending, 0)
+    refunded_c = func.coalesce(metrics_sq.c.refunded, 0)
+    # good = delivered, not rejected, not still-in-window; settled excludes in-window
+    # pending, so a store's rate reflects only buyer-validated (or window-elapsed) sales.
+    good_c = sold_c - rejected_c - pending_c
+    settled_c = good_c + rejected_c + refunded_c
+    # Untried stores (nothing settled) sort last on 'success' via a -1 sentinel.
+    success_c = case((settled_c > 0, good_c * 1.0 / settled_c), else_=-1.0)
+    sorts = {
+        "sold": [sold_c.desc(), Store.created_at.desc(), Store.id.desc()],
+        "success": [success_c.desc(), sold_c.desc(), Store.id.desc()],
+        "buyers": [
+            func.coalesce(metrics_sq.c.buyers, 0).desc(),
+            sold_c.desc(),
+            Store.id.desc(),
+        ],
+        "recent": [metrics_sq.c.last_sale.desc(), Store.id.desc()],
+        "new": [Store.created_at.desc(), Store.id.desc()],
+    }
+    order_by = sorts.get(sort) or sorts["sold"]
+    stmt = (
+        select(
+            Store,
+            price_sq.c.pmin,
+            price_sq.c.pmax,
+            metrics_sq.c.sold,
+            metrics_sq.c.buyers,
+            metrics_sq.c.last_sale,
+            metrics_sq.c.refunded,
+            metrics_sq.c.rejected,
+            metrics_sq.c.pending,
+            reviews_sq.c.ravg,
+            reviews_sq.c.rcount,
+        )
+        .outerjoin(price_sq, price_sq.c.sid == Store.id)
+        .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
+        .outerjoin(reviews_sq, reviews_sq.c.sid == Store.id)
+        # Phase 1.7: hidden (sandbox) stores stay out of bulk discovery.
+        .where(Store.status == "live", Store.visibility == "public", *where_clauses)
+        .order_by(*order_by)
         .limit(limit)
         .offset(offset)
     )
-    return [
-        _discovery_row(s, pmin, pmax, sold)
-        for s, pmin, pmax, sold in session.execute(stmt).all()
-    ]
+    # The SELECT column order matches _discovery_row's parameter order, so each Row
+    # (row[0]=Store, then the scalar aggregates) unpacks straight into it.
+    return [_discovery_row(*row) for row in session.execute(stmt).all()]
 
 
 @router.get("/discovery/resources")
@@ -1350,25 +2272,48 @@ def discovery_resources(
     request: Request,
     limit: int = 20,
     offset: int = 0,
+    include: str = "",
+    sort: str = "sold",
     session: Session = Depends(get_session),
 ):
     limit = max(1, min(limit, 50))
     offset = max(0, min(offset, 100_000))
+    sort = sort if sort in DISCOVERY_SORTS else "sold"
     total = session.scalar(
         select(func.count()).select_from(Store).where(Store.status == "live")
     )
-    resources = _discovery_rows(session, [], limit, offset)
-    return JSONResponse(
-        {
-            "service": SERVICE,
-            "agent_card": "/.well-known/agent-card.json",
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "resources": resources,
-        },
-        headers=_AGENT_HEADERS,
+    resources = _discovery_rows(session, [], limit, offset, sort)
+    body: dict = {
+        "service": SERVICE,
+        "agent_card": "/.well-known/agent-card.json",
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort,
+        "sorts": list(DISCOVERY_SORTS),
+        "resources": resources,
+    }
+    # M16.4: opt-in federated peer listings. Each row is labeled
+    # {"origin", "federated": true} and links OUT to the peer's own checkout —
+    # Tilla never proxies, quotes, or settles a peer's sale. Dormant (empty) when
+    # no peers are configured. Peer content is re-emitted json-encoded, never
+    # rendered, so there is no HTML context to escape.
+    if include == "federated":
+        body["federated"] = federation.federated_rows(session, limit)
+    return JSONResponse(body, headers=_AGENT_HEADERS)
+
+
+def _search_discovery(session: Session, q: str, limit: int) -> list[dict]:
+    """Keyword search over live stores (slug + merchant description). LIKE
+    metacharacters are escaped so a '%'/'_' in the query is a literal, not a
+    wildcard. Shared by /discovery/search and the root MCP search_stores tool."""
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    like = f"%{esc}%"
+    clause = or_(
+        Store.slug.like(like, escape="\\"),
+        Store.description.like(like, escape="\\"),
     )
+    return _discovery_rows(session, [clause], limit, 0)
 
 
 @router.get("/discovery/search")
@@ -1382,16 +2327,7 @@ def discovery_search(
     q = q.strip()
     if len(q) < 2 or len(q) > 100:
         raise HTTPException(422, "q must be 2 to 100 characters")
-    limit = max(1, min(limit, 50))
-    # Escape LIKE metacharacters so a '%'/'_' in the query is a literal, not a
-    # wildcard (ESCAPE clause), then match slug or merchant description.
-    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    like = f"%{esc}%"
-    clause = or_(
-        Store.slug.like(like, escape="\\"),
-        Store.description.like(like, escape="\\"),
-    )
-    resources = _discovery_rows(session, [clause], limit, 0)
+    resources = _search_discovery(session, q, max(1, min(limit, 50)))
     return JSONResponse(
         {
             "service": SERVICE,

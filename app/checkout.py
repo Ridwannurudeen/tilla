@@ -22,7 +22,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import affiliates, chain, config, delivery, webhooks
+from app import affiliates, chain, config, delivery, payment, webhooks
 from app.db import SessionLocal
 from app.models import (
     ChainCursor,
@@ -139,9 +139,20 @@ def deliver(session: Session, order: Order):
     txn (begin_nested + UNIQUE(order_id), same idempotency as the Delivery row)
     and the Delivery payload is the text secret / license key / a short file-ready
     message. With no deliverable the behaviour is EXACTLY the legacy text path."""
-    if not transition(session, order.id, READY_TO_DELIVER, "delivered", paid_at=_now()):
+    if not transition(
+        session,
+        order.id,
+        READY_TO_DELIVER,
+        "delivered",
+        paid_at=_now(),
+        eval_status="pending",
+    ):
         return session.scalar(select(Delivery).where(Delivery.order_id == order.id))
     store = session.get(Store, order.store_id)
+    # Phase 1.7: a hidden (sandbox) store graduates to public on its first real sale —
+    # it has cleared the proof threshold, so it may now show in bulk discovery.
+    if store is not None and store.visibility == "hidden":
+        store.visibility = "public"
     deliverable = _active_deliverable(session, order.store_id, order.product_id)
     if deliverable is None:
         kind = "text"
@@ -242,7 +253,7 @@ def _current_head() -> int | None:
     if not config.SWEEP_ENABLED:
         return None
     try:
-        return chain.block_number()
+        return chain.block_number(payment.CANONICAL_CHAIN)
     except (httpx.HTTPError, chain.ChainError, ValueError):
         return None
 
@@ -252,6 +263,7 @@ def create_order(
     store: Store,
     product: Product,
     referrer_addr: str | None = None,
+    price_micro_override: int | None = None,
 ) -> Order:
     """Insert a pending order with a unique per-address expected_micro. Redraws
     the offset on collision (app check) or IntegrityError (index backstop);
@@ -259,12 +271,24 @@ def create_order(
 
     ``referrer_addr`` (M13, additive) is the referring agent's payout wallet, already
     validated + lowercased by the caller. First-write-wins: it is set once here and
-    never mutated, so attribution is immutable after order creation."""
+    never mutated, so attribution is immutable after order creation.
+
+    ``price_micro_override`` (storefront depth, additive) is the buyer-chosen price for a
+    membership tier or a pay-what-you-want product — a positive micro-USDT int the CALLER
+    has already validated against the product's pricing_params (tier price / >= PWYW
+    floor). None keeps the product's list price, byte-identical to the pre-override flow.
+    It is recorded on ``amount_micro`` (so the paid amount maps back to the chosen tier),
+    while ``expected_micro`` still carries the unique matching offset."""
     now = _now()
     created_block = _current_head()
+    base_price = (
+        price_micro_override
+        if price_micro_override is not None
+        else product.price_micro
+    )
     for _ in range(config.AMOUNT_ALLOC_RETRIES):
         offset = random.randint(config.AMOUNT_OFFSET_MIN, config.AMOUNT_OFFSET_MAX)
-        expected = product.price_micro + offset
+        expected = base_price + offset
         if _amount_taken(session, store.pay_to, expected, now):
             continue
         order = Order(
@@ -272,7 +296,8 @@ def create_order(
             store_id=store.id,
             product_id=product.id,
             pay_to=store.pay_to,
-            amount_micro=product.price_micro,
+            network=payment.CANONICAL_CHAIN.caip2,
+            amount_micro=base_price,
             expected_micro=expected,
             status="pending",
             referrer_addr=referrer_addr,
@@ -291,13 +316,16 @@ def create_order(
 
 # --------------------------------------------------------- payment matching
 def _match_order(
-    session: Session, pay_to: str, value: int, now: datetime
+    session: Session, network: str, pay_to: str, value: int, now: datetime
 ) -> Order | None:
-    """Exact-amount match. Precedence: in-flight orders first, then a
-    quarantined expired order (→ late_paid)."""
+    """Exact-amount match, pinned to the chain being swept. Precedence: in-flight
+    orders first, then a quarantined expired order (→ late_paid). The ``network``
+    filter is the wrong-chain fund-loss guard: a transfer seen on one chain can
+    only ever credit an order created on THAT chain, never one pinned elsewhere."""
     order = session.scalar(
         select(Order)
         .where(
+            Order.network == network,
             Order.pay_to == pay_to,
             Order.expected_micro == value,
             Order.status.in_(IN_FLIGHT),
@@ -310,6 +338,7 @@ def _match_order(
     quarantine = timedelta(hours=config.QUARANTINE_HOURS)
     for o in session.scalars(
         select(Order).where(
+            Order.network == network,
             Order.pay_to == pay_to,
             Order.expected_micro == value,
             Order.status == "expired",
@@ -433,9 +462,21 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
         quarantine = timedelta(hours=config.QUARANTINE_HOURS)
         if exp is None or exp + quarantine <= _now():
             raise TxVerificationError("order expired past the payment window")
-    receipt = chain.get_transaction_receipt(tx_hash, config.RPC_TIMEOUT_REQUEST)
+    # Pin verification to the chain THIS order was created on: its RPC and asset
+    # only. A receipt that exists on any other chain is never fetched (single RPC
+    # host) and a transfer of any other asset is skipped, so a wrong-chain or
+    # wrong-asset payment can never confirm the order.
+    cfg = payment.chain_for(order.network)
+    receipt = chain.get_transaction_receipt(cfg, tx_hash, config.RPC_TIMEOUT_REQUEST)
     if receipt is None:
-        raise TxVerificationError("transaction not found")
+        # A syntactically valid hash that does not resolve on THIS order's pinned RPC.
+        # We never search any other chain's RPC for it — a cross-chain lookup would
+        # legitimize (and appear to reward) a wrong-chain send, the exact fund-loss
+        # this pin prevents. The buyer-facing hint names the one chain we watch.
+        raise TxVerificationError(
+            f"transaction not found — was it sent on chainId {cfg.chain_id}? "
+            f"Tilla only detects this order's payment on that chain."
+        )
     if str(receipt.get("status", "")).lower() != "0x1":
         raise TxVerificationError("transaction did not succeed on-chain")
 
@@ -444,7 +485,7 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
     new_logs: list[dict] = []
     total = 0
     for lg in receipt.get("logs", []):
-        if (lg.get("address", "") or "").lower() != config.USDT0:
+        if (lg.get("address", "") or "").lower() != cfg.asset:
             continue
         topics = lg.get("topics", [])
         if len(topics) < 3 or topics[0].lower() != config.TRANSFER_TOPIC:
@@ -479,7 +520,7 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
         # the transfer's true owner order can still consume it.
         raise TxVerificationError("transfer amount does not match the exact total due")
 
-    head = chain.block_number(config.RPC_TIMEOUT_REQUEST)
+    head = chain.block_number(cfg, config.RPC_TIMEOUT_REQUEST)
     for d in new_logs:
         _record_transfer(
             session,
@@ -508,7 +549,8 @@ def _receipt_still_valid(order: Order) -> bool:
     are only ever reached via the depth-0 fast path (the sweeper ingests at
     safe_head and delivers immediately), so an order maturing from either state
     must be re-checked against a reorg before it delivers."""
-    receipt = chain.get_transaction_receipt(order.tx_hash)
+    cfg = payment.chain_for(order.network)
+    receipt = chain.get_transaction_receipt(cfg, order.tx_hash)
     if receipt is None:
         return False
     if str(receipt.get("status", "")).lower() != "0x1":
@@ -518,7 +560,7 @@ def _receipt_still_valid(order: Order) -> bool:
         return False
     want_to = chain.pad_address(order.pay_to).lower()
     for lg in receipt.get("logs", []):
-        if (lg.get("address", "") or "").lower() != config.USDT0:
+        if (lg.get("address", "") or "").lower() != cfg.asset:
             continue
         topics = lg.get("topics", [])
         if len(topics) < 3 or topics[0].lower() != config.TRANSFER_TOPIC:
@@ -559,7 +601,9 @@ def refresh_order(session: Session, order: Order):
 
     if order.status in ("detected", "late_paid") and order.block_number is not None:
         try:
-            head = chain.block_number(config.RPC_TIMEOUT_REQUEST)
+            head = chain.block_number(
+                payment.chain_for(order.network), config.RPC_TIMEOUT_REQUEST
+            )
         except (httpx.HTTPError, chain.ChainError, ValueError):
             logger.warning("refresh_order: block_number unavailable for %s", order.id)
             return
@@ -584,20 +628,22 @@ def refresh_order(session: Session, order: Order):
 
 
 # ----------------------------------------------------------- the sweeper
-def _get_or_init_cursor(session: Session, safe_head: int) -> int:
-    row = session.get(ChainCursor, 1)
+def _get_or_init_cursor(session: Session, chain_id: int, safe_head: int) -> int:
+    """The last fully-swept block for ``chain_id`` (cursor keyed per-chain, so a
+    second chain's progress can never rewind the canonical one)."""
+    row = session.get(ChainCursor, chain_id)
     if row is None:
         # First boot: start at the current safe head — no historical backfill storm.
-        session.add(ChainCursor(id=1, last_block=safe_head, updated_at=_now()))
+        session.add(ChainCursor(id=chain_id, last_block=safe_head, updated_at=_now()))
         session.flush()
         return safe_head
     return row.last_block
 
 
-def _set_cursor(session: Session, block: int):
-    row = session.get(ChainCursor, 1)
+def _set_cursor(session: Session, chain_id: int, block: int):
+    row = session.get(ChainCursor, chain_id)
     if row is None:
-        session.add(ChainCursor(id=1, last_block=block, updated_at=_now()))
+        session.add(ChainCursor(id=chain_id, last_block=block, updated_at=_now()))
     else:
         row.last_block = block
         row.updated_at = _now()
@@ -644,12 +690,13 @@ def release_expired(session: Session):
             )
 
 
-def _active_addresses(session: Session, now: datetime) -> list[str]:
+def _active_addresses(session: Session, network: str, now: datetime) -> list[str]:
     quarantine = timedelta(hours=config.QUARANTINE_HOURS)
     addrs: set[str] = set()
     for pay_to, status, expires_at, created_at in session.execute(
         select(Order.pay_to, Order.status, Order.expires_at, Order.created_at).where(
-            Order.status.in_(("pending", "detected", "underpaid", "expired"))
+            Order.network == network,
+            Order.status.in_(("pending", "detected", "underpaid", "expired")),
         )
     ).all():
         if status != "expired":
@@ -661,7 +708,7 @@ def _active_addresses(session: Session, now: datetime) -> list[str]:
     return sorted(addrs)
 
 
-def _process_log(session: Session, log: dict, head: int, now: datetime):
+def _process_log(session: Session, network: str, log: dict, head: int, now: datetime):
     d = chain.decode_transfer_log(log)
     if session.scalar(
         select(ProcessedTransfer.id).where(
@@ -670,7 +717,7 @@ def _process_log(session: Session, log: dict, head: int, now: datetime):
         )
     ):
         return  # replayed window — no-op
-    order = _match_order(session, d["to"], d["value"], now)
+    order = _match_order(session, network, d["to"], d["value"], now)
     if order is None:
         # self-sends, dust, unrelated buyers, round-price payments missing the
         # offset — logged for support, never auto-confirms an order.
@@ -698,17 +745,34 @@ def _process_log(session: Session, log: dict, head: int, now: datetime):
     )
 
 
-def _promote_matured(session: Session, head: int):
-    """Deliver detected/late_paid orders whose depth has reached CONFIRMATIONS."""
+def _promote_matured(session: Session, network: str, head: int):
+    """Deliver detected/late_paid orders on ``network`` whose depth has reached
+    CONFIRMATIONS. Filtering by ``network`` is required once a second chain can mint
+    orders: ``head`` and ``block_number`` are only comparable WITHIN one chain, so a
+    chain-B order must never be matured against chain-A's head. The unregistered-
+    network skip (KeyError guard below) stays as defence-in-depth for a row whose
+    network vanishes from the registry mid-loop."""
     threshold = head - config.CONFIRMATIONS
     for o in session.scalars(
         select(Order).where(
+            Order.network == network,
             Order.status == "detected",
             Order.block_number.isnot(None),
             Order.block_number <= threshold,
         )
     ).all():
-        if not _receipt_still_valid(o):
+        try:
+            still_valid = _receipt_still_valid(o)
+        except KeyError:
+            # Order pinned to a network no longer in the registry: skip it (it
+            # stays detected until an operator resolves it) instead of letting
+            # one bad row kill the promote stage — and ALL confirmations — every
+            # tick. NOT a reorg: never cancel on a registry gap.
+            logger.warning(
+                "order %s pinned to unregistered network %r — skipped", o.id, o.network
+            )
+            continue
+        if not still_valid:
             _mark_reorged(session, o)
             continue
         over = (o.paid_micro or 0) - o.expected_micro
@@ -721,23 +785,75 @@ def _promote_matured(session: Session, head: int):
         deliver(session, o)
     for o in session.scalars(
         select(Order).where(
+            Order.network == network,
             Order.status == "late_paid",
             Order.block_number.isnot(None),
             Order.block_number <= threshold,
         )
     ).all():
-        if not _receipt_still_valid(o):
+        try:
+            still_valid = _receipt_still_valid(o)
+        except KeyError:
+            logger.warning(
+                "order %s pinned to unregistered network %r — skipped", o.id, o.network
+            )
+            continue
+        if not still_valid:
             _mark_reorged(session, o)
             continue
         deliver(session, o)
 
 
+def _sweep_chain(cfg, now: datetime):
+    """One chain's slice of a sweep tick: read ITS head, sweep ITS new blocks against
+    ITS own cursor, match transfers pinned to ITS network, promote ITS matured orders.
+    Own cursor + own head per chain (the 18.2 carry-over): a second chain minting
+    orders can never orphan them, and its head can never mature a canonical order."""
+    global LAST_HEAD_MONO
+    head = chain.block_number(cfg)
+    LAST_HEAD_MONO = time.monotonic()
+    safe_head = head - config.CONFIRMATIONS
+    if safe_head < 0:
+        return
+
+    with SessionLocal() as session:
+        cursor = _get_or_init_cursor(session, cfg.chain_id, safe_head)
+        session.commit()
+
+    if cursor < safe_head:
+        with SessionLocal() as session:
+            addresses = _active_addresses(session, cfg.caip2, now)
+        if not addresses:
+            with SessionLocal() as session:
+                _set_cursor(session, cfg.chain_id, safe_head)
+                session.commit()
+        else:
+            from_block = cursor + 1
+            windows = 0
+            while from_block <= safe_head and windows < config.SWEEP_MAX_WINDOWS:
+                to_block = min(from_block + config.GETLOGS_MAX_SPAN, safe_head)
+                logs = chain.get_logs(cfg, from_block, to_block, addresses)
+                with SessionLocal() as session:
+                    for log in logs:
+                        _process_log(session, cfg.caip2, log, head, now)
+                    _set_cursor(session, cfg.chain_id, to_block)
+                    session.commit()
+                from_block = to_block + 1
+                windows += 1
+
+    with SessionLocal() as session:
+        _promote_matured(session, cfg.caip2, head)
+        session.commit()
+
+
 def sweep_tick():
-    """One synchronous sweep: flip expiries, read head, sweep new blocks in
-    <=101-block windows (capped per tick), match transfers, promote matured
-    orders. Every RPC call is time-boxed; the cursor persists per window so a
-    crash mid-tick resumes gap-free."""
-    global LAST_TICK_MONO, LAST_HEAD_MONO
+    """One synchronous sweep: flip expiries once, then sweep each enabled chain in
+    turn (own cursor + own head — see :func:`_sweep_chain`), matching transfers and
+    promoting matured orders per-chain. Every RPC call is time-boxed; each chain's
+    cursor persists per window so a crash mid-tick resumes gap-free. With all
+    TILLA_CHAIN_* flags OFF, ``enabled_chains()`` is exactly ``[CANONICAL_CHAIN]``
+    (INV-2), so this is byte-identical to the single-chain sweep."""
+    global LAST_TICK_MONO
     LAST_TICK_MONO = time.monotonic()
     now = _now()
     with SessionLocal() as session:
@@ -745,40 +861,8 @@ def sweep_tick():
         release_expired(session)
         session.commit()
 
-    head = chain.block_number()
-    LAST_HEAD_MONO = time.monotonic()
-    safe_head = head - config.CONFIRMATIONS
-    if safe_head < 0:
-        return
-
-    with SessionLocal() as session:
-        cursor = _get_or_init_cursor(session, safe_head)
-        session.commit()
-
-    if cursor < safe_head:
-        with SessionLocal() as session:
-            addresses = _active_addresses(session, now)
-        if not addresses:
-            with SessionLocal() as session:
-                _set_cursor(session, safe_head)
-                session.commit()
-        else:
-            from_block = cursor + 1
-            windows = 0
-            while from_block <= safe_head and windows < config.SWEEP_MAX_WINDOWS:
-                to_block = min(from_block + config.GETLOGS_MAX_SPAN, safe_head)
-                logs = chain.get_logs(from_block, to_block, addresses)
-                with SessionLocal() as session:
-                    for log in logs:
-                        _process_log(session, log, head, now)
-                    _set_cursor(session, to_block)
-                    session.commit()
-                from_block = to_block + 1
-                windows += 1
-
-    with SessionLocal() as session:
-        _promote_matured(session, head)
-        session.commit()
+    for cfg in payment.enabled_chains():
+        _sweep_chain(cfg, now)
 
 
 async def sweeper_loop():
