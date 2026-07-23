@@ -849,6 +849,18 @@ def reap_agent_orders(session: Session, now=None) -> int:
 
 
 def _reap_tick() -> None:
+    # A live OKX aggr_deferred settle carries NO tx hash, so those orders sit 'settling'
+    # with settle_ref NULL until the chain reconciler finds the facilitator transfer —
+    # the settle_ref exemption in reap_agent_orders does NOT protect them. The reaper
+    # needs no RPC but the reconciler does, so an RPC outage spanning the 15-min window
+    # could void a genuinely-paid order. Fail-closed: when the rail is live, reconcile
+    # first and skip reaping entirely if the chain is unreachable.
+    from app import reconcile
+
+    if config.AGGR_DEFERRED_ENABLED:
+        if not reconcile.chain_reachable():
+            return
+        reconcile.reconcile_chain_tick()
     with SessionLocal() as session:
         if reap_agent_orders(session):
             session.commit()

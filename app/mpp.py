@@ -77,26 +77,20 @@ class _OKXGateway:
             passphrase=passphrase,
         )
 
-    async def open(self, payload: dict) -> dict:
-        from mpp_evm.saclient import SessionOpenPayload, SessionOpenRequest
+    # The SDK 0.1.0 SessionOpen/TopUp/Close payload models are LOSSY against the live
+    # SA API: they drop the ``cumulativeAmount`` + ``voucherSignature`` initial-voucher
+    # fields the SA requires and omit the challenge, so a model round-trip yields
+    # "incorrect params". We forward the buyer's full ``{challenge, payload, source}``
+    # SA request verbatim through the client transport instead (paths mirror the SDK's
+    # own _PATH_SESSION_* constants).
+    async def open(self, sa_request: dict) -> dict:
+        return await self._client._do_post("/api/v6/pay/mpp/session/open", sa_request)
 
-        req = SessionOpenRequest(payload=SessionOpenPayload.model_validate(payload))
-        receipt = await self._client.session_open(req)
-        return receipt.model_dump(by_alias=True)
+    async def top_up(self, sa_request: dict) -> dict:
+        return await self._client._do_post("/api/v6/pay/mpp/session/topUp", sa_request)
 
-    async def top_up(self, payload: dict) -> dict:
-        from mpp_evm.saclient import SessionTopUpPayload, SessionTopUpRequest
-
-        req = SessionTopUpRequest(payload=SessionTopUpPayload.model_validate(payload))
-        receipt = await self._client.session_top_up(req)
-        return receipt.model_dump(by_alias=True)
-
-    async def close(self, payload: dict) -> dict:
-        from mpp_evm.saclient import SessionClosePayload, SessionCloseRequest
-
-        req = SessionCloseRequest(payload=SessionClosePayload.model_validate(payload))
-        receipt = await self._client.session_close(req)
-        return receipt.model_dump(by_alias=True)
+    async def close(self, sa_request: dict) -> dict:
+        return await self._client._do_post("/api/v6/pay/mpp/session/close", sa_request)
 
     async def status(self, channel_id: str) -> dict:
         result = await self._client.session_status(channel_id)
@@ -461,18 +455,23 @@ async def mpp_open(
     _require_mpp_ready()
     ctx = await asyncio.to_thread(_metered_ctx, slug)
     body = await _json(request)
-    payload = body.get("payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(422, "payload (signed SessionIntent open) is required")
+    sa_request = body.get("sa_request")
+    if not isinstance(sa_request, dict) or not isinstance(
+        sa_request.get("payload"), dict
+    ):
+        raise HTTPException(
+            422, "sa_request ({challenge, payload, source} signed open) is required"
+        )
+    inner = sa_request["payload"]
     gateway = _get_gateway()
     if gateway is None:
         raise HTTPException(503, "mpp pay-as-you-go is not configured")
-    receipt = await _sa_call(gateway.open(payload))
-    channel_id = receipt.get("channelId") or payload.get("channelId")
+    receipt = await _sa_call(gateway.open(sa_request))
+    channel_id = receipt.get("channelId") or inner.get("channelId")
     if not channel_id:
         raise HTTPException(502, "settlement agent returned no channel id")
     deposit_micro = _receipt_deposit(receipt, ctx["min_deposit_micro"])
-    buyer_addr = _payload_buyer(payload)
+    buyer_addr = _payload_buyer(inner)
     row = await asyncio.to_thread(
         open_channel,
         store_id=ctx["store_id"],
@@ -534,15 +533,19 @@ async def mpp_topup(
     add_micro = _int_field(body, "additional_deposit_micro")
     if add_micro <= 0:
         raise HTTPException(422, "additional_deposit_micro must be positive")
-    payload = body.get("payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(422, "payload (signed SessionIntent topUp) is required")
+    sa_request = body.get("sa_request")
+    if not isinstance(sa_request, dict) or not isinstance(
+        sa_request.get("payload"), dict
+    ):
+        raise HTTPException(
+            422, "sa_request ({challenge, payload, source} signed topUp) is required"
+        )
     if not await asyncio.to_thread(_channel_exists, channel_id):
         raise HTTPException(404, "channel not found")
     gateway = _get_gateway()
     if gateway is None:
         raise HTTPException(503, "mpp pay-as-you-go is not configured")
-    receipt = await _sa_call(gateway.top_up(payload))
+    receipt = await _sa_call(gateway.top_up(sa_request))
     # Authoritative deposit increase comes from the SA receipt (as mpp_open derives
     # its deposit via _receipt_deposit), never the buyer's claimed number; the
     # validated client value is only the fallback when the SA omits it.
@@ -580,15 +583,19 @@ async def mpp_close(
         or final_spent < 0
     ):
         raise HTTPException(422, "final_spent_micro must be a non-negative integer")
-    payload = body.get("payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(422, "payload (signed SessionIntent close) is required")
+    sa_request = body.get("sa_request")
+    if not isinstance(sa_request, dict) or not isinstance(
+        sa_request.get("payload"), dict
+    ):
+        raise HTTPException(
+            422, "sa_request ({challenge, payload, source} signed close) is required"
+        )
     if not await asyncio.to_thread(_channel_exists, channel_id):
         raise HTTPException(404, "channel not found")
     gateway = _get_gateway()
     if gateway is None:
         raise HTTPException(503, "mpp pay-as-you-go is not configured")
-    receipt = await _sa_call(gateway.close(payload))
+    receipt = await _sa_call(gateway.close(sa_request))
     try:
         row = await asyncio.to_thread(
             close_channel, channel_id=channel_id, final_spent_micro=final_spent

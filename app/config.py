@@ -188,6 +188,26 @@ AGGR_DEFERRED_ENABLED = _flag("TILLA_AGGR_DEFERRED")
 # AGGR_DEFERRED_ENABLED AND OKX creds) — never in tests, which disable SWEEP_ENABLED.
 RECONCILE_INTERVAL = float(os.environ.get("TILLA_RECONCILE_INTERVAL", "30"))
 RECONCILE_MAX_PER_TICK = int(os.environ.get("TILLA_RECONCILE_MAX_PER_TICK", "20"))
+# CHAIN settlement detection for aggr_deferred: OKX's facilitator /settle returns a
+# 200 with an EMPTY transaction, so the real settlement is only observable on-chain —
+# a USDT0 Transfer from the buyer (order.from_addr) to the merchant (order.pay_to)
+# whose transaction was submitted by the OKX facilitator RELAYER below. Settlements
+# BATCH (N orders -> one summed transfer), so the poller attributes by accumulation
+# per (from_addr -> pay_to) pair. The relayer is pinned so a stray direct transfer can
+# never be mistaken for a settlement; overridable in the VPS .env if OKX rotates it.
+AGGR_FACILITATOR_RELAYER = os.environ.get(
+    "TILLA_AGGR_FACILITATOR_RELAYER",
+    "0x0596C8A60D30195CFAddD8bB61b13dBD2AA725B7",
+).lower()
+# How far back (in blocks) the chain poller scans for a pair's settlement transfer.
+# The facilitator settles ~30s after payment and the reaper voids a settling order
+# after 15 min, so a bounded recent window covers every finalizable order. Paged in
+# GETLOGS_MAX_SPAN-block windows (the X Layer 101-block cap), capped at
+# RECONCILE_MAX_WINDOWS windows per pair per tick.
+AGGR_SETTLE_LOOKBACK_BLOCKS = int(
+    os.environ.get("TILLA_AGGR_SETTLE_LOOKBACK_BLOCKS", "1200")
+)
+RECONCILE_MAX_WINDOWS = int(os.environ.get("TILLA_RECONCILE_MAX_WINDOWS", "12"))
 # MPP pay-as-you-go: /s/{slug}/mpp/* endpoints. OFF -> every endpoint 503s.
 MPP_ENABLED = _flag("TILLA_MPP_ENABLED")
 # Subscriptions (x402 period, JS sidecar): /s/{slug}/subscribe. OFF -> 503.

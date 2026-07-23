@@ -1,8 +1,17 @@
 # Tilla — Vision (Phase 3–4 forward design)
 
-> **STATUS: DESIGNED, NOT BUILT. Nothing below exists in code.** Cross-references to
-> shipped work point at `BUILD.md`; everything else is a forward design with named
-> preconditions.
+> **⚠️ HISTORICAL DOC — SUPERSEDED 2026-07-23.** This was written as forward design,
+> but the vision tier was subsequently BUILT + tested as modules **M15–M18**, and the
+> TypeScript SDK (§5) shipped. The per-section "DESIGNED, NOT BUILT" notes below are
+> now HISTORICAL. Actual built state (134 vision-tier tests green):
+> - **§1 Plugin/provider ecosystem → BUILT (M15):** `app/plugin_runner.py`, `app/providers.py` (tests: `test_providers`, `test_provider_conformance`, `test_theme_plugins`).
+> - **§2 Cross-chain checkout → BUILT (M18):** cross-chain surfacing in `app/checkout.py`/`config.py`/`render.py` (test: `test_crosschain`).
+> - **§3 B2B / marketplace-of-marketplaces → BUILT (M16):** `app/b2b.py` (ERC-8004 owner-gated wholesale tiers), `app/federation.py` (mirror-of-mirrors ingest) (tests: `test_b2b`, `test_federation`).
+> - **§4 Autonomous growth agent → BUILT (M17), LIVE on prod:** `app/growth.py` + `app/growth_scheduler.py` — outbox draft→approve→discard→mark-published queue, first-party performance aggregates, performance-aware content calendar + dormant scheduler, multi-channel drafts (5 growth test files). Endpoints live under `/api/stores/{slug}/growth/*`.
+> - **§5 TypeScript SDK → BUILT:** `sdk/typescript/src/` (client/signing/x402Codec/models).
+> - Also: ERC-8004 **verified-buyer reviews** live (`/api/library/review`, purchase-gated).
+>
+> The original forward-design text is retained below for context.
 
 This document is the honest, forward-looking design for the multi-quarter Phase 3–4
 "commerce OS" vision. It is deliberately **not** an implementation plan for a single
