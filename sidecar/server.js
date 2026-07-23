@@ -30,16 +30,15 @@ const {
   buildSubscriptionTermsTypedData,
   encodePaymentPayload,
 } = require("@okxweb3/app-x402-core/subscription");
-const { stringToHex } = require("viem");
+const { keccak256, stringToHex } = require("viem");
 const crypto = require("crypto");
 
-// The facilitator requires planId as a bytes32 but /detail returns it as a String,
-// so it is a bytes32-ENCODED string (right-padded), not a hash. Pass a 0x+64hex value
-// through unchanged; otherwise encode a readable id (<=31 bytes) as bytes32.
-function toBytes32PlanId(id) {
-  const s = String(id ?? "default");
-  if (/^0x[0-9a-fA-F]{64}$/.test(s)) return s;
-  return stringToHex(s.slice(0, 31), { size: 32 });
+// The on-chain planId is bytes32 = keccak256(utf8(plan.id)) — the hash of the seller's
+// business plan string (extra.plan.id, e.g. "pro-monthly"). It rides in `terms.planId`
+// on the wire but is NOT part of the signed 17-field terms digest; the facilitator
+// cross-checks the hash. The published SDK omits it, so we inject it (see buildWriteBody).
+function planIdHash(id) {
+  return keccak256(stringToHex(String(id ?? "default")));
 }
 // Real facilitator client — used ONLY by the creds-gated /health/creds and
 // /subscriptions/settle routes below. The challenge/verify routes keep the stub.
@@ -133,10 +132,7 @@ app.post("/subscriptions/challenge", async (req, res) => {
       periodSec: Number(period),
       periodMode: 0, // 0 = fixed_seconds
       maxPeriods: Number(maxPeriods ?? 0), // 0 = open-ended
-      plan: (() => {
-        const p = plan || { id: "default", tier: 1, name: "Default plan" };
-        return { ...p, id: toBytes32PlanId(p.id) };
-      })(),
+      plan: plan || { id: "default", tier: 1, name: "Default plan" },
     },
   };
 
@@ -270,11 +266,16 @@ function realFacilitator() {
   const origBuildWriteBody = client.buildWriteBody.bind(client);
   client.buildWriteBody = (payload, requirements, syncSettle) => {
     const body = origBuildWriteBody(payload, requirements, syncSettle);
-    const planId =
+    // app-x402@0.2.x omits planId; the live facilitator requires terms.planId =
+    // keccak256(utf8(plan.id)). It is not in the signed digest, so adding it here does
+    // not affect the buyer's signature.
+    const rawPlanId =
       requirements && requirements.extra && requirements.extra.plan
         ? requirements.extra.plan.id
         : undefined;
-    if (planId && body.planId === undefined) body.planId = planId;
+    if (rawPlanId && body.terms && body.terms.planId === undefined) {
+      body.terms.planId = planIdHash(rawPlanId);
+    }
     return body;
   };
   return client;
