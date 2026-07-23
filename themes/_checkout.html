@@ -302,9 +302,11 @@
     else if (productIndex != null && productIndex >= 0) payload.product_index = productIndex;
     return payload;
   }
-  // Storefront depth: read this product's membership tiers / pay-what-you-want floor
-  // from the public feed. Any failure returns null so a normal sale is never blocked.
-  async function loadOptions(productId, productIndex) {
+  // Storefront depth: read this product's pricing model + its membership tiers /
+  // pay-what-you-want floor from the public feed. Returns {model, opts}; opts is the
+  // tier/pwyw chooser data or null. Any failure returns null so a normal sale is
+  // never blocked (startCheckout falls through to a plain exact-price checkout).
+  async function loadProductPricing(productId, productIndex) {
     try {
       var r = await fetch("/s/" + SLUG + "/feed.json");
       if (!r.ok) return null;
@@ -314,12 +316,15 @@
       if (productId != null) for (i = 0; i < prods.length; i++) if (String(prods[i].id) === String(productId)) { p = prods[i]; break; }
       if (!p && productIndex != null && productIndex >= 0 && productIndex < prods.length) p = prods[productIndex];
       if (!p) p = prods[0];
-      var pr = p && p.pricing && p.pricing.params;
-      if (!pr) return null;
-      var tiers = Array.isArray(pr.membership_tiers) ? pr.membership_tiers : null;
-      var pwywMin = (typeof pr.pwyw_min_micro === "number") ? pr.pwyw_min_micro : null;
-      if ((tiers && tiers.length) || pwywMin != null) return { tiers: tiers, pwywMin: pwywMin };
-      return null;
+      if (!p || !p.pricing) return null;
+      var model = p.pricing.model || "one_time";
+      var opts = null, pr = p.pricing.params;
+      if (pr) {
+        var tiers = Array.isArray(pr.membership_tiers) ? pr.membership_tiers : null;
+        var pwywMin = (typeof pr.pwyw_min_micro === "number") ? pr.pwyw_min_micro : null;
+        if ((tiers && tiers.length) || pwywMin != null) opts = { tiers: tiers, pwywMin: pwywMin };
+      }
+      return { model: model, opts: opts };
     } catch (e) { return null; }
   }
   // Render the tier chooser / amount field. On confirm, _startPay is called with the
@@ -391,10 +396,13 @@
     byId("coManual").style.display = "";
     clearOptions();
     setStatus("Waiting for payment — verified automatically on-chain…");
-    // If this product offers membership tiers or pay-what-you-want, let the buyer
-    // choose FIRST; the choice is folded into the checkout call.
-    var opts = await loadOptions(productId, productIndex);
-    if (opts) { renderOptions(opts, productId, productIndex); return; }
+    // Subscription products settle on the x402 period rail (Permit2 + terms),
+    // a different browser flow — branch to it. Otherwise, if this product offers
+    // membership tiers or pay-what-you-want, let the buyer choose FIRST; the choice
+    // is folded into the checkout call.
+    var pricing = await loadProductPricing(productId, productIndex);
+    if (pricing && pricing.model === "subscription") { _startSubscribe(); return; }
+    if (pricing && pricing.opts) { renderOptions(pricing.opts, productId, productIndex); return; }
     _startPay(buildPayload(productId, productIndex));
   }
   async function _startPay(payload) {
@@ -429,6 +437,122 @@
     updatePayButton();
     startCountdown();
     poll();
+  }
+
+  // ---- subscription (x402 period rail): connect → prepare → approve USDT0 to
+  // Permit2 (one time) → sign Permit2 + terms → encode → settle first period.
+  // Fail-closed at every step: on any error nothing is delivered. ----
+  async function _startSubscribe() {
+    byId("coManual").style.display = "none";
+    byId("payWalletBtn").style.display = "none";
+    byId("coAmount").textContent = "…";
+    var provider = pickProvider();
+    if (!provider) { setStatus("Open this page in your wallet's browser to subscribe."); setBuysDisabled(false); return; }
+    var account;
+    try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
+    catch (e) { setStatus(isReject(e) ? "Connection declined — subscribing needs a wallet." : "Could not connect wallet — please retry."); setBuysDisabled(false); return; }
+    if (!account) { setBuysDisabled(false); return; }
+    CO.account = account;
+    if (!(await ensureChain(provider))) { setBuysDisabled(false); return; }
+    setStatus("Preparing your subscription…");
+    var prep;
+    try {
+      var pr = await fetch("/s/" + SLUG + "/subscribe/prepare", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ payer: account })
+      });
+      if (!pr.ok) throw new Error("prepare");
+      prep = await pr.json();
+    } catch (e) { setStatus("Could not start the subscription — please retry."); setBuysDisabled(false); return; }
+    var approval = prep.approval || {};
+    var perMicro = BigInt(approval.amount_per_period_micro || 0);
+    byId("coAmount").textContent = formatAmount(perMicro) + " USDT0 / period";
+    if (!(await ensureUsdtApproval(provider, account, approval, perMicro))) { setBuysDisabled(false); return; }
+    var permitSig, termsSig;
+    try {
+      setStatus("Sign the payment permit in your wallet…");
+      permitSig = await provider.request({ method: "eth_signTypedData_v4", params: [account, JSON.stringify(prep.permitTypedData)] });
+      setStatus("Sign the subscription terms in your wallet…");
+      termsSig = await provider.request({ method: "eth_signTypedData_v4", params: [account, JSON.stringify(prep.termsTypedData)] });
+    } catch (e) { setStatus(isReject(e) ? "Signature declined — click subscribe to try again." : "Could not sign — please retry."); setBuysDisabled(false); return; }
+    var paymentSignature;
+    try {
+      setStatus("Finalizing your first payment…");
+      var er = await fetch("/s/" + SLUG + "/subscribe/encode", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ permitSingle: prep.permitSingle, permitSingleSignature: permitSig, terms: prep.terms, termsSignature: termsSig })
+      });
+      if (!er.ok) throw new Error("encode");
+      paymentSignature = (await er.json()).paymentSignature;
+      if (!paymentSignature) throw new Error("encode");
+    } catch (e) { setStatus("Could not finalize the subscription — please retry."); setBuysDisabled(false); return; }
+    var d;
+    try {
+      setStatus("Settling your first period on X Layer…");
+      var sr = await fetch("/s/" + SLUG + "/subscribe", { method: "POST", headers: { "PAYMENT-SIGNATURE": paymentSignature } });
+      if (!sr.ok) throw new Error("settle");
+      d = await sr.json();
+    } catch (e) { setStatus("Subscription payment failed — nothing was delivered. Please retry."); setBuysDisabled(false); return; }
+    onSubscribed(d, perMicro);
+  }
+
+  // USDT0 must be approved to Permit2 once before the first pull. Read the current
+  // allowance; approve MAX_UINT256 only if it's below one period. Waits for the
+  // approval receipt so the settle that follows can pull the funds.
+  async function ensureUsdtApproval(provider, account, approval, perMicro) {
+    var token = approval.token || USDT0, permit2 = approval.permit2;
+    if (!permit2) { setStatus("Subscription setup incomplete — please retry."); return false; }
+    var allowance;
+    try {
+      var data = "0xdd62ed3e" + account.slice(2).toLowerCase().padStart(64, "0") + permit2.slice(2).toLowerCase().padStart(64, "0");
+      var res = await provider.request({ method: "eth_call", params: [{ to: token, data: data }, "latest"] });
+      allowance = BigInt(res && res !== "0x" ? res : "0x0");
+    } catch (e) { allowance = 0n; }
+    if (perMicro > 0n && allowance >= perMicro) return true;
+    setStatus("Approve USDT0 (one time)…");
+    var txHash;
+    try {
+      var adata = "0x095ea7b3" + permit2.slice(2).toLowerCase().padStart(64, "0") + "f".repeat(64);
+      txHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: account, to: token, value: "0x0", data: adata }] });
+    } catch (e) { setStatus(isReject(e) ? "Approval declined — subscribing needs a one-time USDT0 approval." : "Could not approve USDT0 — please retry."); return false; }
+    setStatus("Confirming the approval on X Layer…");
+    return await waitForReceipt(provider, txHash);
+  }
+
+  function waitForReceipt(provider, txHash) {
+    return new Promise(function (resolve) {
+      var tries = 0;
+      (function step() {
+        tries++;
+        provider.request({ method: "eth_getTransactionReceipt", params: [txHash] }).then(function (r) {
+          if (r && r.blockNumber) {
+            if (r.status === "0x0") { setStatus("The approval transaction failed — please retry."); resolve(false); return; }
+            resolve(true); return;
+          }
+          if (tries > 60) { setStatus("Approval is taking long to confirm — retry once it lands."); resolve(false); return; }
+          setTimeout(step, 3000);
+        }).catch(function () {
+          if (tries > 60) { setStatus("Could not confirm the approval — please retry."); resolve(false); return; }
+          setTimeout(step, 3000);
+        });
+      })();
+    });
+  }
+
+  function onSubscribed(d, perMicro) {
+    CO.paid = true;
+    byId("payWalletBtn").style.display = "none";
+    byId("coManual").style.display = "none";
+    byId("coCountdown").textContent = "";
+    CO.cid = d.order_id;
+    CO.productName = d.product || CO.productName || "";
+    CO.amountStr = formatAmount(perMicro);
+    CO.txHash = null;
+    setStatus("Subscription active — first period settled on X Layer");
+    renderReceipt(d);
+    byId("coPrintBtn").style.display = "";
+    var del = byId("coDelivery");
+    del.style.display = "block";
+    del.textContent = d.delivery || "Delivered — thank you!";
   }
 
   function updatePayButton() {
