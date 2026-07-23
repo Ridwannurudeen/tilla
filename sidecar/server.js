@@ -30,17 +30,16 @@ const {
   buildSubscriptionTermsTypedData,
   encodePaymentPayload,
 } = require("@okxweb3/app-x402-core/subscription");
-const { keccak256, stringToHex } = require("viem");
+const { stringToHex } = require("viem");
 const crypto = require("crypto");
 
-// The facilitator requires planId as a bytes32; merchants set a human plan id
-// (e.g. "pro-monthly"). Pass a 0x+64hex value through unchanged; otherwise derive a
-// stable bytes32 via keccak256 so any readable id is accepted ("invalid_bytes32:
-// planId" otherwise).
+// The facilitator requires planId as a bytes32 but /detail returns it as a String,
+// so it is a bytes32-ENCODED string (right-padded), not a hash. Pass a 0x+64hex value
+// through unchanged; otherwise encode a readable id (<=31 bytes) as bytes32.
 function toBytes32PlanId(id) {
   const s = String(id ?? "default");
   if (/^0x[0-9a-fA-F]{64}$/.test(s)) return s;
-  return keccak256(stringToHex(s));
+  return stringToHex(s.slice(0, 31), { size: 32 });
 }
 // Real facilitator client — used ONLY by the creds-gated /health/creds and
 // /subscriptions/settle routes below. The challenge/verify routes keep the stub.
@@ -259,12 +258,26 @@ function realFacilitator() {
   const secretKey = process.env.OKX_SECRET_KEY;
   const passphrase = process.env.OKX_PASSPHRASE;
   if (!apiKey || !secretKey || !passphrase) return null;
-  return new OKXFacilitatorClient({
+  const client = new OKXFacilitatorClient({
     apiKey,
     secretKey,
     passphrase,
     baseUrl: OKX_FACILITATOR_BASE_URL,
   });
+  // Version gap: app-x402-core@0.2.1 omits planId from the subscribe body, but the
+  // live X Layer facilitator requires it as a bytes32 ("invalid_bytes32: planId"
+  // otherwise). Inject it from the requirements' (already-bytes32) plan id.
+  const origBuildWriteBody = client.buildWriteBody.bind(client);
+  client.buildWriteBody = (payload, requirements, syncSettle) => {
+    const body = origBuildWriteBody(payload, requirements, syncSettle);
+    const planId =
+      requirements && requirements.extra && requirements.extra.plan
+        ? requirements.extra.plan.id
+        : undefined;
+    if (planId && body.planId === undefined) body.planId = planId;
+    return body;
+  };
+  return client;
 }
 
 // GET /health/creds — read-only creds probe (the orchestrator's JS-side check).
