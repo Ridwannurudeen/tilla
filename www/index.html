@@ -41,7 +41,20 @@
     --hairline:color-mix(in srgb,var(--text) 16%,transparent);
     --tint:color-mix(in srgb,var(--primary) 8%,var(--bg));
   }
+  /* Light theme: override the 4 base tokens; every derived color-mix var recomputes.
+     A warm paper (not stark white) to match the store editorial surface. */
+  :root{ color-scheme:dark; }
+  :root[data-theme="light"]{
+    color-scheme:light;
+    --bg:#F4F2EC; --text:#191922; --primary:#5A4FD6; --accent:#0C9077;
+  }
   @property --tint{ syntax:'<color>'; inherits:true; initial-value:transparent; }
+  .theme-toggle{ appearance:none; background:transparent; border:1px solid var(--hairline);
+    color:var(--text); width:32px; height:32px; border-radius:4px; cursor:pointer;
+    font-size:15px; line-height:1; display:inline-flex; align-items:center; justify-content:center;
+    transition:border-color .15s ease, background .15s ease; }
+  .theme-toggle:hover{ border-color:var(--text); background:var(--surface); }
+  .theme-toggle:focus-visible{ outline:2px solid var(--primary); outline-offset:2px; }
 
   *{ box-sizing:border-box; margin:0; padding:0; }
   html{ scroll-padding-top:80px; scroll-behavior:smooth; }
@@ -330,6 +343,10 @@
     *, *::before, *::after{ transition:none !important; animation:none !important; }
   }
 </style>
+<script>
+/* Set the theme before first paint (no flash): saved choice, else OS preference. */
+(function(){try{var k="tilla-theme",s=localStorage.getItem(k),m=window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches,t=(s==="light"||s==="dark")?s:(m?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();
+</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -343,6 +360,7 @@
     <a class="rail-link mono aux" href="/#agents">For agents</a>
   </nav>
   <div class="rail-right">
+    <button class="theme-toggle mono" id="themeToggle" type="button" aria-label="Switch light or dark theme" title="Switch theme">◐</button>
     <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · chainId 196</span>
     <a class="rail-link mono" href="/dashboard">Open dashboard <span class="arr" aria-hidden="true">→</span></a>
   </div>
@@ -608,6 +626,24 @@
   });
   drawMosaic();
 
+  /* ---- theme toggle: persist choice + re-color the mosaic ---- */
+  (function () {
+    var root = document.documentElement, KEY = "tilla-theme";
+    var btn = document.getElementById("themeToggle");
+    if (!btn) return;
+    function sync() { btn.setAttribute("aria-pressed", root.getAttribute("data-theme") === "light" ? "true" : "false"); }
+    sync();
+    btn.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem(KEY, next); } catch (e) {}
+      var tc = document.querySelector('meta[name="theme-color"]');
+      if (tc) tc.setAttribute("content", next === "light" ? "#F4F2EC" : "#0B0B12");
+      drawMosaic();
+      sync();
+    });
+  })();
+
   if (reduce) return;
   document.documentElement.classList.add("motion");
 
@@ -652,6 +688,11 @@
       });
     }, { threshold: 0.12 });
     els.forEach(function (el) { io.observe(el); });
+    /* Failsafe: guarantee no section can stay permanently hidden if the observer
+       misses one (threshold edge cases, throttling). Reveals anything not yet shown. */
+    setTimeout(function () {
+      els.forEach(function (el) { if (!el.classList.contains("in")) el.classList.add("in"); });
+    }, 3000);
   } else {
     els.forEach(function (el) { el.classList.add("in"); });
   }
