@@ -30,7 +30,18 @@ const {
   buildSubscriptionTermsTypedData,
   encodePaymentPayload,
 } = require("@okxweb3/app-x402-core/subscription");
+const { keccak256, stringToHex } = require("viem");
 const crypto = require("crypto");
+
+// The facilitator requires planId as a bytes32; merchants set a human plan id
+// (e.g. "pro-monthly"). Pass a 0x+64hex value through unchanged; otherwise derive a
+// stable bytes32 via keccak256 so any readable id is accepted ("invalid_bytes32:
+// planId" otherwise).
+function toBytes32PlanId(id) {
+  const s = String(id ?? "default");
+  if (/^0x[0-9a-fA-F]{64}$/.test(s)) return s;
+  return keccak256(stringToHex(s));
+}
 // Real facilitator client — used ONLY by the creds-gated /health/creds and
 // /subscriptions/settle routes below. The challenge/verify routes keep the stub.
 const { OKXFacilitatorClient } = require("@okxweb3/app-x402-core");
@@ -123,7 +134,10 @@ app.post("/subscriptions/challenge", async (req, res) => {
       periodSec: Number(period),
       periodMode: 0, // 0 = fixed_seconds
       maxPeriods: Number(maxPeriods ?? 0), // 0 = open-ended
-      plan: plan || { id: "default", tier: 1, name: "Default plan" },
+      plan: (() => {
+        const p = plan || { id: "default", tier: 1, name: "Default plan" };
+        return { ...p, id: toBytes32PlanId(p.id) };
+      })(),
     },
   };
 
@@ -335,13 +349,11 @@ app.post("/subscriptions/settle", async (req, res) => {
       const detail =
         (result && (result.error_message || result.msg || result.detailMsg)) ||
         `code ${code}`;
-      return res
-        .status(402)
-        .json({
-          settled: false,
-          error: `facilitator rejected: ${detail}`,
-          facilitator: result,
-        });
+      return res.status(402).json({
+        settled: false,
+        error: `facilitator rejected: ${detail}`,
+        facilitator: result,
+      });
     }
     return res.json({ settled: true, localVerify, facilitator: result });
   } catch (e) {
