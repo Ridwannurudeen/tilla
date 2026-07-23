@@ -519,3 +519,74 @@ def test_encode_returns_signature(monkeypatch):
     )
     assert r.status_code == 200, r.text
     assert r.json()["paymentSignature"] == "B64SIG"
+
+
+# ── cancel proxy (subscribe -> charge -> CANCEL lifecycle) ──
+_SUBID = "0x" + "1" * 64
+
+
+def test_cancel_prepare_503_when_flag_off():
+    r = client.post("/s/anystore/subscribe/cancel/prepare", json={"subId": _SUBID})
+    assert r.status_code == 503
+
+
+def test_cancel_prepare_bad_subid_422(monkeypatch):
+    _enable(monkeypatch)
+    r = client.post("/s/anystore/subscribe/cancel/prepare", json={"subId": "nope"})
+    assert r.status_code == 422
+
+
+@respx.mock
+def test_cancel_prepare_relays(monkeypatch):
+    _enable(monkeypatch)
+    respx.post(f"{SIDECAR}/subscriptions/cancel-prepare").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "cancelTypedData": {"primaryType": "CancelAuth"},
+                "cancelAuth": {"action": 0, "subId": _SUBID, "initiator": 0},
+            },
+        )
+    )
+    r = client.post("/s/anystore/subscribe/cancel/prepare", json={"subId": _SUBID})
+    assert r.status_code == 200, r.text
+    assert r.json()["cancelAuth"]["subId"] == _SUBID
+
+
+def test_cancel_missing_signature_422(monkeypatch):
+    _enable(monkeypatch)
+    r = client.post(
+        "/s/anystore/subscribe/cancel",
+        json={"subId": _SUBID, "cancelAuth": {"action": 0}},
+    )
+    assert r.status_code == 422
+
+
+@respx.mock
+def test_cancel_submits_and_relays(monkeypatch):
+    _enable(monkeypatch)
+    respx.post(f"{SIDECAR}/subscriptions/cancel").mock(
+        return_value=httpx.Response(
+            200,
+            json={"canceled": True, "facilitator": {"code": "0", "data": {"state": 3}}},
+        )
+    )
+    r = client.post(
+        "/s/anystore/subscribe/cancel",
+        json={"subId": _SUBID, "cancelAuth": {"action": 0, "signature": "0xsig"}},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["canceled"] is True
+
+
+@respx.mock
+def test_cancel_facilitator_reject_402(monkeypatch):
+    _enable(monkeypatch)
+    respx.post(f"{SIDECAR}/subscriptions/cancel").mock(
+        return_value=httpx.Response(402, json={"canceled": False, "error": "rejected"})
+    )
+    r = client.post(
+        "/s/anystore/subscribe/cancel",
+        json={"subId": _SUBID, "cancelAuth": {"action": 0, "signature": "0xsig"}},
+    )
+    assert r.status_code == 402

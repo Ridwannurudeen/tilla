@@ -29,6 +29,7 @@ const {
   computePermitSingleStructHash,
   buildSubscriptionTermsTypedData,
   encodePaymentPayload,
+  buildCancelAuthTypedData,
 } = require("@okxweb3/app-x402-core/subscription");
 const { keccak256, stringToHex } = require("viem");
 const crypto = require("crypto");
@@ -451,6 +452,81 @@ app.post("/subscriptions/encode", (req, res) => {
     return res.json({ paymentSignature });
   } catch (e) {
     return res.status(400).json({ error: `encode failed: ${e.message}` });
+  }
+});
+
+// The A2APaySubscription EIP-712 domain (same contract the terms bind to) — used to
+// build the buyer's CancelAuth signature.
+function subscriptionDomain() {
+  return {
+    name: "A2APaySubscription",
+    version: "1",
+    chainId: Number(NETWORK.split(":")[1]),
+    verifyingContract: SUBSCRIPTION_CONTRACT,
+  };
+}
+
+// POST /subscriptions/cancel-prepare — build the CancelAuth typed data the buyer signs
+// to cancel a subscription. Body: { subId }. Pure/local. Returns the envelope + the
+// unsigned cancelAuth message (the client adds `signature` and calls /cancel).
+app.post("/subscriptions/cancel-prepare", (req, res) => {
+  const { subId } = req.body || {};
+  if (!subId) return res.status(400).json({ error: "subId is required" });
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const nonce = "0x" + crypto.randomBytes(32).toString("hex");
+    const deadline = now + 3600;
+    const envelope = buildCancelAuthTypedData({
+      domain: subscriptionDomain(),
+      subId,
+      initiator: "payer",
+      nonce,
+      deadline,
+    });
+    return res.json({
+      cancelTypedData: envelope,
+      cancelAuth: { action: 0, subId, initiator: 0, nonce, deadline },
+    });
+  } catch (e) {
+    return res
+      .status(400)
+      .json({ error: `cancel-prepare failed: ${e.message}` });
+  }
+});
+
+// POST /subscriptions/cancel — submit the buyer's signed CancelAuth to the facilitator.
+// Body: { subId, cancelAuth } (cancelAuth = the cancel-prepare message + `signature`).
+// Fail-closed on any non-"0" facilitator code (same contract as /settle).
+app.post("/subscriptions/cancel", async (req, res) => {
+  const fac = realFacilitator();
+  if (!fac) {
+    return res.status(503).json({ error: "OKX creds not set" });
+  }
+  const { subId, cancelAuth } = req.body || {};
+  if (!subId || !cancelAuth || !cancelAuth.signature) {
+    return res
+      .status(400)
+      .json({ error: "subId and a signed cancelAuth are required" });
+  }
+  try {
+    const result = await fac.cancelSubscription(subId, cancelAuth, true);
+    const code = result && (result.code ?? result.error_code);
+    if (String(code) !== "0") {
+      const detail =
+        (result && (result.error_message || result.msg)) || `code ${code}`;
+      return res
+        .status(402)
+        .json({
+          canceled: false,
+          error: `facilitator rejected: ${detail}`,
+          facilitator: result,
+        });
+    }
+    return res.json({ canceled: true, facilitator: result });
+  } catch (e) {
+    return res
+      .status(502)
+      .json({ error: `facilitator cancel failed: ${e.message}` });
   }
 });
 
