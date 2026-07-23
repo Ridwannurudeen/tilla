@@ -450,6 +450,11 @@
     <p class="small muted">Exactly what a buyer-agent sees: your machine endpoints, the feed it reads (with delivery ETA), the tools it can call, and how you rank in agent discovery.</p>
     <div id="agentView" class="card"></div>
 
+    <h3 class="sec-h">Growth</h3>
+    <p class="small muted">Generate screened launch copy, approve what you like, then mark each post published as you post it yourself — Tilla drafts, but never posts on your behalf.</p>
+    <div id="growthMsg" class="small hide" aria-live="polite"></div>
+    <div id="growth" class="card"></div>
+
     <h3 class="sec-h">Orders</h3>
     <div id="storeOrders" class="card scroll" tabindex="0" aria-label="Orders"></div>
   </div>
@@ -969,6 +974,7 @@
     await loadProducts(slug);
     await loadDeliverables(slug);
     await loadAgentView(slug);
+    await loadGrowth(slug);
   }
 
   // ---- agent's-eye view (Phase 1.8): the same outputs a buyer-agent consumes,
@@ -1001,6 +1007,160 @@
     });
     var tools = (data.mcp_tools || []).map(function (t) { return t.name; }).join(", ");
     box.appendChild(el("div", "muted small", "MCP tools: " + tools));
+  }
+
+  // ---- growth (M17): draft outbox + content calendar + first-party performance.
+  // Every draft is copy a HUMAN publishes; mark-published only RECORDS it (INV-1: the
+  // dashboard never triggers an external send). Live stores only (409 otherwise). ----
+  function gmsg(text, isErr) {
+    var m = byId("growthMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+
+  async function loadGrowth(slug) {
+    var box = byId("growth"); clear(box);
+    var head = el("div", "row head");
+    head.appendChild(el("strong", null, "Draft outbox"));
+    var gen = el("button", "primary", "Generate launch copy");
+    gen.onclick = async function () {
+      gen.disabled = true; gmsg("Generating screened copy…");
+      try {
+        await api("/api/stores/" + encodeURIComponent(slug) + "/growth-kit", { method: "POST" });
+        gmsg("New drafts added to your outbox."); await loadGrowth(slug);
+      } catch (e) {
+        gen.disabled = false;
+        gmsg(e.status === 429 ? "Hourly limit reached — try again later."
+          : e.status === 422 ? "The generated copy didn't pass screening — try again."
+          : e.status === 503 ? "Copy generation isn't configured on this store."
+          : (e.message || "Could not generate copy."), true);
+      }
+    };
+    head.appendChild(gen); box.appendChild(head);
+
+    var data;
+    try { data = await api("/api/stores/" + encodeURIComponent(slug) + "/growth/outbox"); }
+    catch (e) {
+      box.appendChild(el("div", "muted small", e.status === 409
+        ? "Growth tools unlock once the store is live." : "Could not load the outbox."));
+      return;
+    }
+    var drafts = (data.drafts || []).filter(function (d) { return d.status !== "discarded"; });
+    if (!drafts.length) box.appendChild(el("div", "muted small", "No drafts yet — generate launch copy to start."));
+    else drafts.forEach(function (d) { box.appendChild(growthDraft(slug, d)); });
+
+    box.appendChild(growthCalendar(slug));
+    loadGrowthPerformance(slug, box);
+  }
+
+  function growthDraft(slug, d) {
+    var item = el("div", "pitem");
+    var row = el("div", "prow");
+    row.appendChild(el("span", "pill", d.channel));
+    var cls = d.status === "published" ? "pill on" : d.status === "blocked" ? "pill off" : "pill";
+    row.appendChild(el("span", cls, d.status));
+    item.appendChild(row);
+    if (d.body) { var body = el("div", "small"); body.textContent = d.body; body.style.margin = "8px 0"; item.appendChild(body); }
+    else item.appendChild(el("div", "muted small", "Body withheld by content screening."));
+
+    var actions = el("div", "row"); actions.style.marginTop = "6px";
+    if (d.status === "pending") {
+      var ap = el("button", "primary", "Approve");
+      ap.onclick = function () { growthAction(slug, d.id, "approve", null); };
+      var di = el("button", "ghost", "Discard");
+      di.onclick = function () { growthAction(slug, d.id, "discard", null); };
+      actions.appendChild(ap); actions.appendChild(di);
+    } else if (d.status === "approved") {
+      var urlIn = el("input"); urlIn.placeholder = "receipt URL (optional)"; urlIn.maxLength = 500; urlIn.style.flex = "1";
+      var mp = el("button", "primary", "Mark published");
+      mp.onclick = function () { growthAction(slug, d.id, "mark-published", (urlIn.value || "").trim()); };
+      var di2 = el("button", "ghost", "Discard");
+      di2.onclick = function () { growthAction(slug, d.id, "discard", null); };
+      actions.appendChild(urlIn); actions.appendChild(mp); actions.appendChild(di2);
+    } else if (d.status === "published") {
+      actions.appendChild(el("span", "muted small", "Published " + (d.published_at || "").slice(0, 19).replace("T", " ")));
+    }
+    item.appendChild(actions);
+    return item;
+  }
+
+  async function growthAction(slug, id, action, url) {
+    var opts = { method: "POST" };
+    if (action === "mark-published" && url) {
+      opts.headers = { "content-type": "application/json" };
+      opts.body = JSON.stringify({ url: url });
+    }
+    try {
+      await api("/api/stores/" + encodeURIComponent(slug) + "/growth/outbox/" + id + "/" + action, opts);
+      gmsg(action === "approve" ? "Draft approved — ready to publish."
+        : action === "discard" ? "Draft discarded."
+        : "Recorded as published (Tilla sent nothing).");
+      await loadGrowth(slug);
+    } catch (e) { gmsg(e.message || "That action couldn't be applied.", true); }
+  }
+
+  function growthCheckbox(label) {
+    var l = el("label"); l.style.display = "inline-flex"; l.style.alignItems = "center";
+    l.style.gap = "6px"; l.style.marginRight = "14px";
+    var i = document.createElement("input"); i.type = "checkbox";
+    l.appendChild(i); l.appendChild(document.createTextNode(label));
+    return { label: l, input: i };
+  }
+
+  function growthCalendar(slug) {
+    var wrap = el("div", "pitem");
+    wrap.appendChild(el("strong", null, "Content calendar"));
+    wrap.appendChild(el("div", "muted small", "A background scheduler drafts (never posts) on this cadence — you still approve and publish every post."));
+    var cadL = el("label", null, "Cadence"); cadL.htmlFor = "gc-cad-" + slug; wrap.appendChild(cadL);
+    var cad = el("select"); cad.id = "gc-cad-" + slug;
+    [["weekly", "Weekly"], ["daily", "Daily"]].forEach(function (o) { var op = el("option", null, o[1]); op.value = o[0]; cad.appendChild(op); });
+    wrap.appendChild(cad);
+    var chRow = el("div", "row"); chRow.style.marginTop = "8px";
+    var chSocial = growthCheckbox("Social post");
+    var chEmail = growthCheckbox("Email subject");
+    var active = growthCheckbox("Active");
+    chRow.appendChild(chSocial.label); chRow.appendChild(chEmail.label); chRow.appendChild(active.label);
+    wrap.appendChild(chRow);
+    api("/api/stores/" + encodeURIComponent(slug) + "/growth/calendar").then(function (c) {
+      if (c && c.cadence) cad.value = c.cadence;
+      var chans = (c && c.channels) || [];
+      chSocial.input.checked = chans.indexOf("social") >= 0;
+      chEmail.input.checked = chans.indexOf("email_subject") >= 0;
+      active.input.checked = c ? !!c.active : true;
+    }).catch(function () { active.input.checked = true; });
+    var save = el("button", "primary", "Save calendar");
+    save.onclick = async function () {
+      var channels = [];
+      if (chSocial.input.checked) channels.push("social");
+      if (chEmail.input.checked) channels.push("email_subject");
+      if (!channels.length) { gmsg("Pick at least one channel for the calendar.", true); return; }
+      try {
+        await api("/api/stores/" + encodeURIComponent(slug) + "/growth/calendar", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ cadence: cad.value, channels: channels, active: active.input.checked })
+        });
+        gmsg("Calendar saved.");
+      } catch (e) { gmsg(e.message || "Could not save the calendar.", true); }
+    };
+    var r = el("div", "row"); r.style.marginTop = "10px"; r.appendChild(save); wrap.appendChild(r);
+    return wrap;
+  }
+
+  async function loadGrowthPerformance(slug, box) {
+    var perf;
+    try { perf = await api("/api/stores/" + encodeURIComponent(slug) + "/growth/performance?days=30"); }
+    catch (e) { return; }
+    var wrap = el("div", "pitem");
+    wrap.appendChild(el("strong", null, "Performance — last 30 days"));
+    var g = el("div", "row"); g.style.flexWrap = "wrap"; g.style.marginTop = "8px";
+    function stat(k, v) { var s = el("div", "stat"); s.appendChild(el("div", "k", k)); s.appendChild(el("div", "v", v)); g.appendChild(s); }
+    var o = perf.orders || {}, a = perf.affiliates || {}, w = perf.waitlist || {};
+    stat("Orders", String(o.total != null ? o.total : 0));
+    stat("Revenue", money((o.revenue_micro || 0) / 1e6) + " USDT0");
+    stat("Waitlist", String(w.total != null ? w.total : 0));
+    stat("Attributed sales", String(a.attributed_sales != null ? a.attributed_sales : 0));
+    wrap.appendChild(g);
+    box.appendChild(wrap);
   }
 
   // ---- products (catalog CRUD; every API string rendered via textContent only) ----
