@@ -31,6 +31,17 @@
 </style>
 <style>
   :root{ --primary:#6C5CE7; --accent:#00D1B2; --bg:#0B0B12; --text:#F5F5FA; }
+  :root{ color-scheme:dark; }
+  :root[data-theme="light"]{
+    color-scheme:light;
+    --bg:#F4F2EC; --text:#191922; --primary:#5A4FD6; --accent:#0C9077;
+  }
+  .theme-toggle{ appearance:none; background:transparent; border:1px solid var(--hairline);
+    color:var(--text); width:32px; height:32px; border-radius:4px; cursor:pointer;
+    font-size:15px; line-height:1; display:inline-flex; align-items:center; justify-content:center;
+    transition:border-color .15s ease, background .15s ease; }
+  .theme-toggle:hover{ border-color:var(--text); background:var(--surface); }
+  .theme-toggle:focus-visible{ outline:2px solid var(--primary); outline-offset:2px; }
   :root{
     --on-primary:#fff;
     --xlayer:#BCFF2F; --on-xlayer:#000;
@@ -213,6 +224,9 @@
     *, *::before, *::after{ transition:none !important; animation:none !important; }
   }
 </style>
+<script>
+(function(){try{var k="tilla-theme",s=localStorage.getItem(k),m=window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches,t=(s==="light"||s==="dark")?s:(m?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();
+</script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -226,6 +240,7 @@
     <a class="rail-link mono aux" href="/#agents">For agents</a>
   </nav>
   <div class="rail-right">
+    <button class="theme-toggle mono" id="themeToggle" type="button" aria-label="Switch light or dark theme" title="Switch theme">◐</button>
     <span class="chip mono"><span class="dot" aria-hidden="true"></span>X Layer · chainId 196</span>
     <a class="rail-link mono" href="/dashboard">Open dashboard <span class="arr" aria-hidden="true">→</span></a>
   </div>
@@ -512,6 +527,25 @@
 
   connectBtn.addEventListener("click", connectWallet);
   libRetry.addEventListener("click", loadLibrary);
+})();
+</script>
+<script>
+/* ---- theme toggle: persist choice ---- */
+(function () {
+  var root = document.documentElement, KEY = "tilla-theme";
+  var btn = document.getElementById("themeToggle");
+  if (!btn) return;
+  function sync() { btn.setAttribute("aria-pressed", root.getAttribute("data-theme") === "light" ? "true" : "false"); }
+  sync();
+  btn.addEventListener("click", function () {
+    var next = root.getAttribute("data-theme") === "light" ? "dark" : "light";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem(KEY, next); } catch (e) {}
+    var tc = document.querySelector('meta[name="theme-color"]');
+    if (tc) tc.setAttribute("content", next === "light" ? "#F4F2EC" : "#0B0B12");
+    window.dispatchEvent(new Event("resize"));
+    sync();
+  });
 })();
 </script>
 </body>
