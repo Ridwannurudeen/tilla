@@ -460,6 +460,11 @@
     <div id="growthMsg" class="small hide" aria-live="polite"></div>
     <div id="growth" class="card"></div>
 
+    <h3 class="sec-h">Subscribers</h3>
+    <p class="small muted">Emails captured by this store's waitlist — visible only here, behind your login, never in feeds or logs.</p>
+    <div id="subsMsg" class="small hide" aria-live="polite"></div>
+    <div id="subscribers" class="card"></div>
+
     <h3 class="sec-h">Orders</h3>
     <div id="storeOrders" class="card scroll" tabindex="0" aria-label="Orders"></div>
   </div>
@@ -981,6 +986,7 @@
     await loadCustomDomain(slug);
     await loadAgentView(slug);
     await loadGrowth(slug);
+    await loadSubscribers(slug);
   }
 
   // ---- agent's-eye view (Phase 1.8): the same outputs a buyer-agent consumes,
@@ -1013,6 +1019,44 @@
     });
     var tools = (data.mcp_tools || []).map(function (t) { return t.name; }).join(", ");
     box.appendChild(el("div", "muted small", "MCP tools: " + tools));
+  }
+
+  // ---- subscribers: waitlist emails (auth-only) with soft-delete removal ----
+  function submsg(text, isErr) {
+    var m = byId("subsMsg"); m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+
+  async function loadSubscribers(slug) {
+    var box = byId("subscribers"); clear(box);
+    var d;
+    try { d = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/subscribers?limit=200"); }
+    catch (e) { box.appendChild(el("div", "muted small", "Could not load subscribers.")); return; }
+    box.appendChild(el("div", "muted small", (d.total || 0) + " subscriber" + (d.total === 1 ? "" : "s")));
+    var subs = d.subscribers || [];
+    if (!subs.length) { box.appendChild(el("div", "muted small", "No subscribers yet.")); return; }
+    var t = el("table"), thead = el("thead"), tr = el("tr");
+    ["Email", "Source", "When", ""].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
+    thead.appendChild(tr); t.appendChild(thead);
+    var tb = el("tbody");
+    subs.forEach(function (s) {
+      var row = el("tr");
+      row.appendChild(el("td", "mono", s.email));
+      row.appendChild(el("td", null, s.source || "—"));
+      row.appendChild(el("td", "muted", (s.created_at || "").slice(0, 10)));
+      var td = el("td");
+      var rm = el("button", "ghost", "Remove");
+      rm.onclick = async function () {
+        rm.disabled = true;
+        try {
+          await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/subscribers", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: s.email }) });
+          submsg("Removed " + s.email + "."); await loadSubscribers(slug);
+        } catch (e) { rm.disabled = false; submsg(e.message || "Could not remove that subscriber.", true); }
+      };
+      td.appendChild(rm); row.appendChild(td);
+      tb.appendChild(row);
+    });
+    t.appendChild(tb); box.appendChild(t);
   }
 
   // ---- custom domain: claim -> publish DNS TXT -> verify. Tilla serves nothing on
