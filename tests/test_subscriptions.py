@@ -413,3 +413,109 @@ def test_settle_not_settled_flag_no_order(monkeypatch):
     )
     assert r.status_code == 502
     assert _orders() == []
+
+
+# ── browser-signing proxy: /prepare + /encode (the store-page Subscribe flow) ──
+SELECTED_FULL = {
+    "scheme": "period",
+    "network": "eip155:196",
+    "payTo": "0x" + "a" * 40,
+    "maxAmountRequired": "5000000",
+    "asset": "0x779ded0c9e1022225f8e0630b35a9b54be713736",
+    "extra": {
+        "contracts": {
+            "subscription": "0x" + "e" * 40,
+            "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+        }
+    },
+}
+
+
+def _mock_challenge_full():
+    return respx.post(f"{SIDECAR}/subscriptions/challenge").mock(
+        return_value=httpx.Response(402, json={"accepts": [SELECTED_FULL]})
+    )
+
+
+def test_prepare_503_when_flag_off():
+    _sub_store("sp0")
+    r = client.post("/s/sp0/subscribe/prepare", json={"payer": "0x" + "b" * 40})
+    assert r.status_code == 503
+
+
+@respx.mock
+def test_prepare_rejects_bad_payer(monkeypatch):
+    _sub_store("sp1")
+    _enable(monkeypatch)
+    r = client.post("/s/sp1/subscribe/prepare", json={"payer": "nope"})
+    assert r.status_code == 422
+
+
+@respx.mock
+def test_prepare_returns_envelopes_and_approval(monkeypatch):
+    import app.chain as chain
+
+    _sub_store("sp2")
+    _enable(monkeypatch)
+    _mock_challenge_full()
+    # Permit2 allowance(owner,token,spender) -> nonce is the 3rd 32-byte word (= 3).
+    monkeypatch.setattr(
+        chain,
+        "eth_call",
+        lambda cfg, to, data, timeout=None: "0x" + "0" * 128 + f"{3:064x}",
+    )
+    prep = respx.post(f"{SIDECAR}/subscriptions/prepare").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "permitTypedData": {"primaryType": "PermitSingle", "message": {}},
+                "termsTypedData": {"primaryType": "SubscriptionTerms", "message": {}},
+                "permitSingle": {"details": {"nonce": 3}},
+                "terms": {"payer": "0x" + "b" * 40},
+            },
+        )
+    )
+    r = client.post("/s/sp2/subscribe/prepare", json={"payer": "0x" + "b" * 40})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "permitTypedData" in body and "termsTypedData" in body
+    assert body["approval"]["token"] == SELECTED_FULL["asset"]
+    assert body["approval"]["amount_per_period_micro"] == 5_000_000
+    # The proxy read the buyer's on-chain nonce (3) and passed it to the sidecar.
+    sent = json.loads(prep.calls[0].request.content)
+    assert sent["nonce"] == 3 and sent["payer"] == "0x" + "b" * 40
+
+
+def test_encode_503_when_flag_off():
+    _sub_store("se0")
+    r = client.post("/s/se0/subscribe/encode", json={})
+    assert r.status_code == 503
+
+
+@respx.mock
+def test_encode_missing_fields_422(monkeypatch):
+    _sub_store("se1")
+    _enable(monkeypatch)
+    r = client.post("/s/se1/subscribe/encode", json={"permitSingle": {"x": 1}})
+    assert r.status_code == 422
+
+
+@respx.mock
+def test_encode_returns_signature(monkeypatch):
+    _sub_store("se2")
+    _enable(monkeypatch)
+    _mock_challenge_full()
+    respx.post(f"{SIDECAR}/subscriptions/encode").mock(
+        return_value=httpx.Response(200, json={"paymentSignature": "B64SIG"})
+    )
+    r = client.post(
+        "/s/se2/subscribe/encode",
+        json={
+            "permitSingle": {"x": 1},
+            "permitSingleSignature": "0xsig1",
+            "terms": {"y": 2},
+            "termsSignature": "0xsig2",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["paymentSignature"] == "B64SIG"

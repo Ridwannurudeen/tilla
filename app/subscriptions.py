@@ -17,6 +17,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import uuid
 
 import httpx
@@ -25,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import JSONResponse
 
-from app import agentic, checkout, config
+from app import agentic, chain, checkout, config, payment
 from app.db import SessionLocal
 from app.limiter import limiter
 from app.models import Order, Product, Store, log_event
@@ -352,3 +353,128 @@ async def subscribe(
     if not sig:
         return await _serve_challenge(ctx)
     return await _verify_and_settle(ctx, sig)
+
+
+_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+# Permit2 AllowanceTransfer.allowance(owner, token, spender) selector; returns
+# (uint160 amount, uint48 expiration, uint48 nonce) as three 32-byte words.
+_PERMIT2_ALLOWANCE_SELECTOR = "0x927da105"
+
+
+def _permit2_nonce(payer: str, token: str, spender: str, permit2: str) -> int:
+    """The buyer's current Permit2 nonce for (payer, token, spender) — the value the
+    PermitSingle must carry or the on-chain permit reverts. Reads
+    Permit2.allowance(owner, token, spender).nonce (the third returned word).
+    Raises 503 on an RPC failure (fail-closed: never guess a nonce)."""
+    data = (
+        _PERMIT2_ALLOWANCE_SELECTOR
+        + chain.pad_address(payer)[2:]
+        + chain.pad_address(token)[2:]
+        + chain.pad_address(spender)[2:]
+    )
+    try:
+        result = chain.eth_call(payment.CANONICAL_CHAIN, permit2, data)
+    except (chain.ChainError, httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(503, "could not read the Permit2 nonce") from exc
+    raw = (result or "").removeprefix("0x")
+    if len(raw) < 192:
+        raise HTTPException(502, "unexpected Permit2 allowance response")
+    return int(raw[128:192], 16)
+
+
+def _selected_addrs(selected: dict) -> tuple[str, str, str]:
+    """(token, subscription-contract/spender, permit2-contract) from the sidecar's
+    server-owned challenge — never buyer-supplied, so terms bind to the store's asset
+    and the facilitator's real contracts."""
+    extra = selected.get("extra") if isinstance(selected, dict) else None
+    contracts = extra.get("contracts") if isinstance(extra, dict) else None
+    if not isinstance(contracts, dict):
+        raise HTTPException(502, "subscription challenge missing contracts")
+    token = selected.get("asset")
+    spender = contracts.get("subscription")
+    permit2 = contracts.get("permit2")
+    if not (token and spender and permit2):
+        raise HTTPException(502, "subscription challenge missing asset/contracts")
+    return token, spender, permit2
+
+
+async def _challenge_selected(ctx: dict) -> dict:
+    """Fetch the sidecar's period challenge and return its single `accepts[0]`
+    requirements (the server-owned subscription terms)."""
+    cresp = await _sidecar_post("/subscriptions/challenge", json=_challenge_req(ctx))
+    accepts = _safe_json(cresp).get("accepts")
+    if not isinstance(accepts, list) or not accepts or not isinstance(accepts[0], dict):
+        raise HTTPException(502, "subscription challenge returned no requirements")
+    return accepts[0]
+
+
+@router.post("/s/{slug}/subscribe/prepare")
+@limiter.limit("30/minute")
+async def subscribe_prepare(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+):
+    """Browser-signing step 1: return the two EIP-712 envelopes (Permit2 +
+    SubscriptionTerms) for the buyer to sign, built from the STORE's server-owned
+    terms (never buyer-supplied) with the buyer's current on-chain Permit2 nonce.
+    Body: {"payer": "0x..."}."""
+    if not config.SUBSCRIPTIONS_ENABLED:
+        raise HTTPException(503, "subscriptions are not configured")
+    ctx = await asyncio.to_thread(_subscription_ctx, slug)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422, "invalid JSON body") from None
+    payer = (body or {}).get("payer")
+    if not isinstance(payer, str) or not _ADDR_RE.match(payer):
+        raise HTTPException(422, "payer must be a 0x-prefixed 20-byte EVM address")
+    selected = await _challenge_selected(ctx)
+    token, spender, permit2 = _selected_addrs(selected)
+    nonce = await asyncio.to_thread(_permit2_nonce, payer, token, spender, permit2)
+    presp = await _sidecar_post(
+        "/subscriptions/prepare",
+        json={"selected": selected, "payer": payer, "nonce": nonce},
+    )
+    if presp.status_code != 200:
+        raise HTTPException(502, "subscription prepare failed")
+    out = _safe_json(presp)
+    out["approval"] = {
+        "permit2": permit2,
+        "token": token,
+        "spender": spender,
+        "amount_per_period_micro": ctx["amount_per_period_micro"],
+    }
+    return JSONResponse(out, headers=_SUB_HEADERS)
+
+
+@router.post("/s/{slug}/subscribe/encode")
+@limiter.limit("30/minute")
+async def subscribe_encode(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+):
+    """Browser-signing step 2: assemble the base64 PAYMENT-SIGNATURE header from the
+    buyer's two signatures, then the client POSTs it back to /s/{slug}/subscribe.
+    Body: {permitSingle, permitSingleSignature, terms, termsSignature}."""
+    if not config.SUBSCRIPTIONS_ENABLED:
+        raise HTTPException(503, "subscriptions are not configured")
+    ctx = await asyncio.to_thread(_subscription_ctx, slug)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422, "invalid JSON body") from None
+    fields = ("permitSingle", "permitSingleSignature", "terms", "termsSignature")
+    if not isinstance(body, dict) or any(not body.get(f) for f in fields):
+        raise HTTPException(422, f"required: {', '.join(fields)}")
+    selected = await _challenge_selected(ctx)
+    eresp = await _sidecar_post(
+        "/subscriptions/encode",
+        json={"selected": selected, **{f: body[f] for f in fields}},
+    )
+    if eresp.status_code != 200:
+        raise HTTPException(502, "subscription encode failed")
+    payment_signature = _safe_json(eresp).get("paymentSignature")
+    if not payment_signature:
+        raise HTTPException(502, "subscription encode returned no signature")
+    return JSONResponse({"paymentSignature": payment_signature}, headers=_SUB_HEADERS)

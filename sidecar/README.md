@@ -204,3 +204,28 @@ Response shapes are stable JSON: challenge returns
 - `package.json` — deps: `@okxweb3/app-x402-core`, `@okxweb3/app-x402-evm`,
   `@okxweb3/x402-express` (unused; installed for the spike), `express`, `viem`
   (transitive, used by the sample)
+
+## Store-page browser flow (prepare / encode) + real-facilitator env
+
+Two helper routes let a bundler-less store page drive the buyer signing (the SDK's
+EIP-712 builders can't run in-page): `POST /subscriptions/prepare` returns the two
+typed-data envelopes (Permit2 + SubscriptionTerms) built from the server-owned
+challenge; `POST /subscriptions/encode` assembles the `PAYMENT-SIGNATURE` from the
+buyer's two signatures. The browser only does native `eth_signTypedData_v4`. The
+public proxy (`/s/{slug}/subscribe/{prepare,encode}` in `app/subscriptions.py`)
+resolves the store's terms server-side and reads the buyer's on-chain Permit2 nonce.
+
+**`/subscriptions/settle` fail-closed:** the OKX facilitator returns a 200 body even
+on failure (e.g. `code 30001 "max_periods_invalid"`), so a non-throwing call is NOT
+proof of settlement. The route now delivers only on an OKX success code (`"0"`); any
+other code is a rejection (402), never a false settle.
+
+**Real-facilitator env (required for on-chain settle).** The default challenge uses
+the SDK's placeholder subscription contract; the live X Layer facilitator uses its
+own. Set these (from the facilitator `/supported` `period` kind) in the sidecar env
+so the EIP-712 domain binds to the real contract:
+
+```
+SIDECAR_SUBSCRIPTION_CONTRACT=0xe9e4529d2af54de1078424e495c620d23f4432cc
+SIDECAR_FACILITATOR_ADDRESS=0x2c0f34506e6a825b1d27383eee28980ad82a37ff
+```
