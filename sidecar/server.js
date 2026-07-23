@@ -25,7 +25,12 @@ const {
   decodePaymentPayload,
   asSubscriptionPaymentInner,
   parseChainIdFromNetwork,
+  buildPermit2TypedData,
+  computePermitSingleStructHash,
+  buildSubscriptionTermsTypedData,
+  encodePaymentPayload,
 } = require("@okxweb3/app-x402-core/subscription");
+const crypto = require("crypto");
 // Real facilitator client — used ONLY by the creds-gated /health/creds and
 // /subscriptions/settle routes below. The challenge/verify routes keep the stub.
 const { OKXFacilitatorClient } = require("@okxweb3/app-x402-core");
@@ -321,11 +326,105 @@ app.post("/subscriptions/settle", async (req, res) => {
   }
   try {
     const result = await fac.subscribe(payload, requirements, true);
+    // The OKX facilitator returns a 200 body even on failure (e.g. code 30001
+    // "max_periods_invalid"), so a non-throwing call is NOT proof of settlement.
+    // Only an OKX success code ("0") is settled; anything else is a rejection and
+    // MUST NOT deliver (fail-closed — never a false settle).
+    const code = result && (result.code ?? result.error_code);
+    if (String(code) !== "0") {
+      const detail =
+        (result && (result.error_message || result.msg || result.detailMsg)) ||
+        `code ${code}`;
+      return res
+        .status(402)
+        .json({
+          settled: false,
+          error: `facilitator rejected: ${detail}`,
+          facilitator: result,
+        });
+    }
     return res.json({ settled: true, localVerify, facilitator: result });
   } catch (e) {
     return res
       .status(502)
       .json({ error: `facilitator subscribe failed: ${e.message}` });
+  }
+});
+
+// POST /subscriptions/prepare — browser-signing helper (pure/local, no facilitator).
+// A bundler-less store page cannot run the JS SDK's EIP-712 builders, so it asks the
+// sidecar to build both typed-data envelopes (Permit2 + SubscriptionTerms) from the
+// server-owned `selected` requirements. The browser signs each with eth_signTypedData_v4
+// and echoes the messages back to /encode. Body: { selected, payer, nonce }.
+app.post("/subscriptions/prepare", (req, res) => {
+  const { selected, payer, nonce } = req.body || {};
+  if (!selected || !payer) {
+    return res.status(400).json({ error: "selected and payer are required" });
+  }
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    const permitEnvelope = buildPermit2TypedData({
+      selected,
+      nonce: Number(nonce ?? 0),
+      expiration: now + 365 * 24 * 3600,
+      sigDeadline: String(now + 3600),
+    });
+    const permitSingle = permitEnvelope.message;
+    const permitHash = computePermitSingleStructHash(permitSingle);
+    const salt = "0x" + crypto.randomBytes(32).toString("hex");
+    const termsEnvelope = buildSubscriptionTermsTypedData({
+      selected,
+      payer,
+      startAt: 0, // 0 = use block.timestamp on-chain
+      termsDeadline: now + 3600,
+      salt,
+      permitHash,
+    });
+    return res.json({
+      permitTypedData: permitEnvelope,
+      termsTypedData: termsEnvelope,
+      permitSingle,
+      terms: termsEnvelope.message,
+    });
+  } catch (e) {
+    return res.status(400).json({ error: `prepare failed: ${e.message}` });
+  }
+});
+
+// POST /subscriptions/encode — assemble the base64 PAYMENT-SIGNATURE header from the
+// buyer's two signatures. Body: { selected, permitSingle, permitSingleSignature,
+// terms, termsSignature }. Pure/local — no facilitator call.
+app.post("/subscriptions/encode", (req, res) => {
+  const {
+    selected,
+    permitSingle,
+    permitSingleSignature,
+    terms,
+    termsSignature,
+  } = req.body || {};
+  if (
+    !selected ||
+    !permitSingle ||
+    !permitSingleSignature ||
+    !terms ||
+    !termsSignature
+  ) {
+    return res.status(400).json({
+      error:
+        "selected, permitSingle, permitSingleSignature, terms and termsSignature are required",
+    });
+  }
+  try {
+    const paymentSignature = encodePaymentPayload({
+      selected,
+      permitSingle,
+      permitSingleSignature,
+      terms,
+      termsSignature,
+    });
+    return res.json({ paymentSignature });
+  } catch (e) {
+    return res.status(400).json({ error: `encode failed: ${e.message}` });
   }
 });
 
