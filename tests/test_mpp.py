@@ -329,7 +329,9 @@ def test_open_endpoint_creates_channel(make_store, monkeypatch):
 def test_open_endpoint_502_on_sa_error_no_row(make_store, monkeypatch):
     _metered_store("e2")
     _enable(monkeypatch, MockGateway(fail=True))
-    r = client.post("/s/e2/mpp/open", json={"sa_request": {"payload": {"channelId": "ch_x"}}})
+    r = client.post(
+        "/s/e2/mpp/open", json={"sa_request": {"payload": {"channelId": "ch_x"}}}
+    )
     assert r.status_code == 502
     with SessionLocal() as s:
         assert s.scalar(select(MppChannel)) is None  # no local state change
