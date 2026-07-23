@@ -1391,6 +1391,10 @@ def merchant_list_products(
                 "name": p.name,
                 "price_usdt": p.price_micro / 1e6,
                 "active": p.active,
+                "pricing_model": p.pricing_model or "one_time",
+                "pricing_params": (
+                    p.pricing_params if isinstance(p.pricing_params, dict) else {}
+                ),
             }
             for p in rows
         ]
