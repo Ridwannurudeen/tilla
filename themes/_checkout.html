@@ -553,6 +553,51 @@
     var del = byId("coDelivery");
     del.style.display = "block";
     del.textContent = d.delivery || "Delivered — thank you!";
+    if (d.subscription_id) renderCancelButton(d.subscription_id);
+  }
+
+  // A buyer can end their subscription from the receipt: sign a CancelAuth and submit
+  // it. The already-delivered first period is unaffected; only future charges stop.
+  function renderCancelButton(subId) {
+    var b = byId("coCancelSub");
+    if (!b) {
+      b = document.createElement("button");
+      b.id = "coCancelSub"; b.type = "button"; b.className = "co-btn";
+      b.style.marginTop = "10px"; b.style.background = "transparent";
+      b.style.border = "1px solid var(--line, #ccc)"; b.style.color = "inherit";
+      byId("coDelivery").insertAdjacentElement("afterend", b);
+    }
+    b.textContent = "Cancel subscription"; b.style.display = ""; b.disabled = false;
+    b.onclick = function () { _cancelSubscription(subId, b); };
+  }
+
+  async function _cancelSubscription(subId, btn) {
+    var provider = pickProvider();
+    if (!provider || !CO.account) { setStatus("Open this page in your wallet to cancel."); return; }
+    btn.disabled = true;
+    setStatus("Preparing cancellation…");
+    var prep;
+    try {
+      var pr = await fetch("/s/" + SLUG + "/subscribe/cancel/prepare", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ subId: subId })
+      });
+      if (!pr.ok) throw new Error("prep");
+      prep = await pr.json();
+    } catch (e) { btn.disabled = false; setStatus("Could not start the cancellation — please retry."); return; }
+    var sig;
+    try {
+      setStatus("Sign the cancellation in your wallet…");
+      sig = await provider.request({ method: "eth_signTypedData_v4", params: [CO.account, JSON.stringify(prep.cancelTypedData)] });
+    } catch (e) { btn.disabled = false; setStatus(isReject(e) ? "Cancellation declined." : "Could not sign — please retry."); return; }
+    try {
+      var auth = prep.cancelAuth || {}; auth.signature = sig;
+      var cr = await fetch("/s/" + SLUG + "/subscribe/cancel", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ subId: subId, cancelAuth: auth })
+      });
+      if (!cr.ok) throw new Error("cancel");
+      setStatus("Subscription canceled — no future charges. You keep this period.");
+      btn.style.display = "none";
+    } catch (e) { btn.disabled = false; setStatus("Could not cancel — please retry."); }
   }
 
   function updatePayButton() {

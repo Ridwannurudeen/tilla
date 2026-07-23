@@ -236,6 +236,7 @@ def _subscription_body(session, order: Order, ctx: dict, include_gated: bool) ->
         "order_id": order.id,
         "product": product.name if product else None,
         "subscription": True,
+        "subscription_id": order.settle_ref,
         "amount_micro": ctx["amount_per_period_micro"],
         "period_sec": ctx["period_sec"],
         "kind": delivery_row.kind if delivery_row else "text",
@@ -292,6 +293,11 @@ def _fulfill_subscription(
     success — never on a mocked/failed settle. The terms-signature idempotency key
     is stored on ``x402_nonce`` (unique), so a settle that raced a replay reconciles
     to the winner instead of minting a duplicate."""
+    # The facilitator settle result carries the on-chain subscription id (needed to
+    # cancel) + the settle tx. Persist them: subId on settle_ref, txHash on tx_hash.
+    data = reference.get("data") if isinstance(reference, dict) else None
+    sub_id = data.get("subId") if isinstance(data, dict) else None
+    tx_hash = data.get("txHash") if isinstance(data, dict) else None
     with SessionLocal() as session:
         order = Order(
             id=uuid.uuid4().hex[:16],
@@ -305,6 +311,8 @@ def _fulfill_subscription(
             x402_nonce=idem_key,
             from_addr=payer,
             paid_at=checkout._now(),
+            settle_ref=sub_id if isinstance(sub_id, str) else None,
+            tx_hash=tx_hash if isinstance(tx_hash, str) else None,
         )
         session.add(order)
         try:
@@ -478,3 +486,60 @@ async def subscribe_encode(
     if not payment_signature:
         raise HTTPException(502, "subscription encode returned no signature")
     return JSONResponse({"paymentSignature": payment_signature}, headers=_SUB_HEADERS)
+
+
+_SUBID_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+
+
+@router.post("/s/{slug}/subscribe/cancel/prepare")
+@limiter.limit("30/minute")
+async def subscribe_cancel_prepare(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+):
+    """Cancel step 1: return the CancelAuth typed data the buyer signs to end their
+    subscription. Body: {"subId": "0x..."}. Authenticated by the buyer's signature (only
+    the payer can sign a valid CancelAuth), so no store/ownership gate is needed here."""
+    if not config.SUBSCRIPTIONS_ENABLED:
+        raise HTTPException(503, "subscriptions are not configured")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422, "invalid JSON body") from None
+    sub_id = (body or {}).get("subId")
+    if not isinstance(sub_id, str) or not _SUBID_RE.match(sub_id):
+        raise HTTPException(422, "subId must be a 0x-prefixed 32-byte hex string")
+    presp = await _sidecar_post("/subscriptions/cancel-prepare", json={"subId": sub_id})
+    if presp.status_code != 200:
+        raise HTTPException(502, "cancel prepare failed")
+    return JSONResponse(_safe_json(presp), headers=_SUB_HEADERS)
+
+
+@router.post("/s/{slug}/subscribe/cancel")
+@limiter.limit("30/minute")
+async def subscribe_cancel(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+):
+    """Cancel step 2: submit the buyer's signed CancelAuth to the facilitator. Body:
+    {"subId", "cancelAuth"} (cancelAuth = the cancel-prepare message + "signature").
+    A successful cancel stops future charges; the already-delivered first period is
+    unaffected. Fail-closed on any facilitator rejection."""
+    if not config.SUBSCRIPTIONS_ENABLED:
+        raise HTTPException(503, "subscriptions are not configured")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(422, "invalid JSON body") from None
+    sub_id = (body or {}).get("subId")
+    cancel_auth = (body or {}).get("cancelAuth")
+    if not isinstance(sub_id, str) or not _SUBID_RE.match(sub_id):
+        raise HTTPException(422, "subId must be a 0x-prefixed 32-byte hex string")
+    if not isinstance(cancel_auth, dict) or not cancel_auth.get("signature"):
+        raise HTTPException(422, "a signed cancelAuth is required")
+    cresp = await _sidecar_post(
+        "/subscriptions/cancel", json={"subId": sub_id, "cancelAuth": cancel_auth}
+    )
+    if cresp.status_code != 200:
+        raise HTTPException(402, "subscription cancel failed")
+    return JSONResponse(_safe_json(cresp), headers=_SUB_HEADERS)
