@@ -222,9 +222,11 @@ def test_verify_then_serves_store(make_store, monkeypatch):
     # canonical + OG resolve to the custom domain root
     assert f'href="https://{DOMAIN}/"' in html
     assert f"https://{DOMAIN}/og.png" in html
-    # SSTI canary: merchant copy is data — {{7*7}} renders literally, never 49
-    assert "{{7*7}}" in html
-    assert "49" not in html
+    # SSTI canary: merchant copy is data — {{7*7}} renders literally at the injection
+    # point, never evaluated to 49. (Scope the negative to the injected copy — a bare
+    # "49 not in html" is flaky: random hex ids/tx hashes on the page can contain "49".)
+    assert "Single-origin {{7*7}}" in html
+    assert "Single-origin 49" not in html
 
 
 def test_release_stops_serving(make_store, monkeypatch):
