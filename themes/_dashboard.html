@@ -1034,11 +1034,16 @@
     var items = data.products || [];
     if (!items.length) { box.appendChild(el("div", "card muted", "No products yet.")); return; }
     var card = el("div", "card");
-    items.forEach(function (p) { card.appendChild(productItem(slug, p)); });
+    // The /pricing endpoint always targets the store's FIRST active product, so the
+    // pricing panel is shown on exactly that product to avoid editing one product's
+    // rail and silently writing it to another.
+    var pricingTarget = null;
+    items.forEach(function (p) { if (p.active && pricingTarget === null) pricingTarget = p.id; });
+    items.forEach(function (p) { card.appendChild(productItem(slug, p, p.id === pricingTarget)); });
     box.appendChild(card);
   }
 
-  function productItem(slug, p) {
+  function productItem(slug, p, isPricingTarget) {
     var item = el("div", "pitem");
     var row = el("div", "prow");
     row.appendChild(el("strong", null, p.name));
@@ -1091,7 +1096,137 @@
 
     item.appendChild(row);
     item.appendChild(ed);
+    if (isPricingTarget) {
+      var pc = pricingPanel(slug, p);
+      row.appendChild(pc.button);
+      item.appendChild(pc.panel);
+    }
     return item;
+  }
+
+  // Pricing & rails panel (surfaces the /api/stores/{slug}/pricing endpoint: the four
+  // x402 rails + B2B wholesale tiers + membership/pay-what-you-want). The endpoint has
+  // whole-rewrite semantics, so the panel round-trips the product's FULL pricing_params.
+  function pricingPanel(slug, p) {
+    var pp = (p.pricing_params && typeof p.pricing_params === "object") ? p.pricing_params : {};
+    var panel = el("div", "pedit hide");
+
+    function fld(parent, label, id, val, attrs) {
+      var l = el("label", null, label); l.htmlFor = id; parent.appendChild(l);
+      var i = el("input"); i.id = id;
+      if (attrs) Object.keys(attrs).forEach(function (k) { i[k] = attrs[k]; });
+      if (val != null && val !== "") i.value = String(val);
+      parent.appendChild(i); return i;
+    }
+    function micro(v) { var n = parseFloat(v); return isNaN(n) ? null : Math.round(n * 1e6); }
+    function toU(m) { return (m != null) ? m / 1e6 : ""; }
+
+    var mLbl = el("label", null, "Payment rail"); mLbl.htmlFor = "pm-model-" + p.id; panel.appendChild(mLbl);
+    var msel = el("select"); msel.id = "pm-model-" + p.id;
+    [["one_time", "One-time — fixed price"],
+     ["batch", "Batch — deferred settle (aggr_deferred)"],
+     ["metered", "Metered — pay-as-you-go (MPP)"],
+     ["subscription", "Subscription — recurring (period)"]
+    ].forEach(function (o) {
+      var op = el("option", null, o[1]); op.value = o[0];
+      if ((p.pricing_model || "one_time") === o[0]) op.selected = true;
+      msel.appendChild(op);
+    });
+    panel.appendChild(msel);
+
+    var meB = el("div"); meB.style.marginTop = "8px";
+    var mUnit = fld(meB, "Unit (e.g. request, token)", "pm-unit-" + p.id, pp.unit, { maxLength: 20 });
+    var mPpu = fld(meB, "Price per unit (USDT0)", "pm-ppu-" + p.id, toU(pp.price_per_unit_micro), { type: "number", min: "0.000001", step: "0.000001" });
+    var mDep = fld(meB, "Minimum deposit (USDT0)", "pm-dep-" + p.id, toU(pp.min_deposit_micro), { type: "number", min: "0.01", step: "0.01" });
+    panel.appendChild(meB);
+
+    var suB = el("div"); suB.style.marginTop = "8px";
+    var sAmt = fld(suB, "Amount per period (USDT0)", "pm-amt-" + p.id, toU(pp.amount_per_period_micro), { type: "number", min: "0.01", step: "0.01" });
+    var sDays = fld(suB, "Period length (days)", "pm-days-" + p.id, pp.period_sec != null ? pp.period_sec / 86400 : "", { type: "number", min: "1", step: "1" });
+    var sMax = fld(suB, "Max periods (0 = open-ended)", "pm-max-" + p.id, pp.max_periods != null ? pp.max_periods : "0", { type: "number", min: "0", step: "1" });
+    var sPid = fld(suB, "Plan id", "pm-pid-" + p.id, pp.plan_id, { maxLength: 64 });
+    var sTier = fld(suB, "Plan tier (1–255)", "pm-ptier-" + p.id, pp.plan_tier != null ? pp.plan_tier : "1", { type: "number", min: "1", max: "255", step: "1" });
+    var sName = fld(suB, "Plan name", "pm-pname-" + p.id, pp.plan_name, { maxLength: 120 });
+    panel.appendChild(suB);
+
+    function syncModel() {
+      var m = msel.value;
+      meB.classList.toggle("hide", m !== "metered");
+      suB.classList.toggle("hide", m !== "subscription");
+    }
+    msel.onchange = syncModel;
+
+    panel.appendChild(el("div", "muted small", "Wholesale tiers (B2B) — an agent buyer pays this price when its ERC-8004 id matches."));
+    var wWrap = el("div"); panel.appendChild(wWrap);
+    function tierRow(buyer, priceU) {
+      var r = el("div", "row"); r.style.marginTop = "6px";
+      var b = el("input"); b.placeholder = "any_agent or erc8004:<id>"; b.maxLength = 40; if (buyer != null) b.value = String(buyer);
+      var pr = el("input"); pr.type = "number"; pr.min = "0.01"; pr.step = "0.01"; pr.placeholder = "price USDT0"; if (priceU !== "" && priceU != null) pr.value = String(priceU);
+      var x = el("button", "ghost", "Remove"); x.onclick = function () { wWrap.removeChild(r); };
+      r.appendChild(b); r.appendChild(pr); r.appendChild(x); r._buyer = b; r._price = pr;
+      wWrap.appendChild(r); return r;
+    }
+    (Array.isArray(pp.tiers) ? pp.tiers : []).forEach(function (t) { tierRow(t.buyer, toU(t.price_micro)); });
+    var addTier = el("button", "ghost", "+ Add wholesale tier"); addTier.onclick = function () { tierRow("", ""); }; panel.appendChild(addTier);
+
+    panel.appendChild(el("div", "muted small", "Checkout pricing (optional) — named membership tiers OR pay-what-you-want, not both."));
+    var memWrap = el("div"); panel.appendChild(memWrap);
+    function memRow(name, priceU) {
+      var r = el("div", "row"); r.style.marginTop = "6px";
+      var n = el("input"); n.placeholder = "tier name"; n.maxLength = 60; if (name != null) n.value = String(name);
+      var pr = el("input"); pr.type = "number"; pr.min = "0.01"; pr.step = "0.01"; pr.placeholder = "price USDT0"; if (priceU !== "" && priceU != null) pr.value = String(priceU);
+      var x = el("button", "ghost", "Remove"); x.onclick = function () { memWrap.removeChild(r); };
+      r.appendChild(n); r.appendChild(pr); r.appendChild(x); r._name = n; r._price = pr;
+      memWrap.appendChild(r); return r;
+    }
+    (Array.isArray(pp.membership_tiers) ? pp.membership_tiers : []).forEach(function (t) { memRow(t.name, toU(t.price_micro)); });
+    var addMem = el("button", "ghost", "+ Add membership tier"); addMem.onclick = function () { memRow("", ""); }; panel.appendChild(addMem);
+    var pwyw = fld(panel, "Pay-what-you-want minimum (USDT0)", "pm-pwyw-" + p.id, toU(pp.pwyw_min_micro), { type: "number", min: "0.01", step: "0.01" });
+
+    var saveRow = el("div", "row"); saveRow.style.marginTop = "12px";
+    var psave = el("button", "primary", "Save pricing");
+    psave.onclick = async function () {
+      var model = msel.value; var body = { pricing_model: model };
+      if (model === "metered") {
+        body.params = { unit: (mUnit.value || "").trim(), price_per_unit_micro: micro(mPpu.value), min_deposit_micro: micro(mDep.value) };
+      } else if (model === "subscription") {
+        var days = parseFloat(sDays.value);
+        body.params = {
+          amount_per_period_micro: micro(sAmt.value),
+          period_sec: isNaN(days) ? null : Math.round(days * 86400),
+          max_periods: parseInt(sMax.value || "0", 10),
+          plan_id: (sPid.value || "").trim(),
+          plan_tier: parseInt(sTier.value || "1", 10),
+          plan_name: (sName.value || "").trim()
+        };
+      }
+      var tiers = [];
+      Array.prototype.forEach.call(wWrap.children, function (r) {
+        var bv = (r._buyer.value || "").trim(); var pm = micro(r._price.value);
+        if (bv || pm != null) tiers.push({ buyer: bv, price_micro: pm });
+      });
+      if (tiers.length) body.tiers = tiers;
+      var mems = [];
+      Array.prototype.forEach.call(memWrap.children, function (r) {
+        var nv = (r._name.value || "").trim(); var pm = micro(r._price.value);
+        if (nv || pm != null) mems.push({ name: nv, price_micro: pm });
+      });
+      if (mems.length) body.membership_tiers = mems;
+      var pw = micro(pwyw.value); if (pw != null) body.pwyw_min_micro = pw;
+      psave.disabled = true;
+      try {
+        await api("/api/stores/" + encodeURIComponent(slug) + "/pricing", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+        await loadProducts(slug);
+        pmsg("Pricing updated — " + p.name + " is now on the " + model + " rail.");
+      } catch (e) { psave.disabled = false; pmsg(e.message || "Could not update pricing.", true); }
+    };
+    var pcancel = el("button", "ghost", "Cancel"); pcancel.onclick = function () { panel.classList.add("hide"); };
+    saveRow.appendChild(psave); saveRow.appendChild(pcancel); panel.appendChild(saveRow);
+    syncModel();
+
+    var button = el("button", "ghost", "Pricing & rails");
+    button.onclick = function () { panel.classList.toggle("hide"); };
+    return { button: button, panel: panel };
   }
 
   async function addProduct() {

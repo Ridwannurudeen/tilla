@@ -495,6 +495,36 @@ def test_merchant_add_product_resyncs_storefront(make_store, tmp_path, monkeypat
 
 
 @respx.mock
+def test_merchant_products_expose_pricing_for_prefill(
+    make_store, tmp_path, monkeypatch
+):
+    # The dashboard Pricing & rails panel prefills from the product list, so it must
+    # carry pricing_model + pricing_params, and reflect a /pricing write.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "prc", make_store)
+    tok = _merchant_token(acct)
+    rows = client.get("/api/merchant/stores/prc/products", headers=_auth(tok)).json()[
+        "products"
+    ]
+    assert rows[0]["pricing_model"] == "one_time"
+    assert rows[0]["pricing_params"] == {}
+    # A merchant session token authorizes /pricing (the M9 additive clause), so the
+    # panel can write with the same bearer it already holds.
+    r = client.post(
+        "/api/stores/prc/pricing", headers=_auth(tok), json={"pricing_model": "batch"}
+    )
+    assert r.status_code == 200, r.text
+    rows = client.get("/api/merchant/stores/prc/products", headers=_auth(tok)).json()[
+        "products"
+    ]
+    assert rows[0]["pricing_model"] == "batch"
+
+
+@respx.mock
 def test_merchant_edit_reprice_reflects_on_storefront_and_checkout(
     make_store, tmp_path, monkeypatch
 ):
