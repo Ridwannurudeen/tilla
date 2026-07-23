@@ -446,6 +446,11 @@
          buyers who already paid keep the version they bought.</p>
     </div>
 
+    <h3 class="sec-h">Custom domain</h3>
+    <p class="small muted">Serve this store on your own domain. Claim it, publish one DNS TXT record, then verify — Tilla serves nothing on the domain until it's verified.</p>
+    <div id="domainMsg" class="small hide" aria-live="polite"></div>
+    <div id="customDomain" class="card"></div>
+
     <h3 class="sec-h">Agent's-eye view</h3>
     <p class="small muted">Exactly what a buyer-agent sees: your machine endpoints, the feed it reads (with delivery ETA), the tools it can call, and how you rank in agent discovery.</p>
     <div id="agentView" class="card"></div>
@@ -973,6 +978,7 @@
     await loadStoreCopy(slug);
     await loadProducts(slug);
     await loadDeliverables(slug);
+    await loadCustomDomain(slug);
     await loadAgentView(slug);
     await loadGrowth(slug);
   }
@@ -1007,6 +1013,80 @@
     });
     var tools = (data.mcp_tools || []).map(function (t) { return t.name; }).join(", ");
     box.appendChild(el("div", "muted small", "MCP tools: " + tools));
+  }
+
+  // ---- custom domain: claim -> publish DNS TXT -> verify. Tilla serves nothing on
+  // the domain until verified (fail-closed). Every DNS string rendered via textContent. ----
+  function dommsg(text, isErr) {
+    var m = byId("domainMsg");
+    m.textContent = text || "";
+    m.className = "small " + (isErr ? "err" : "ok") + (text ? "" : " hide");
+  }
+
+  async function loadCustomDomain(slug) {
+    var box = byId("customDomain"); clear(box);
+    var d;
+    try { d = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/custom-domain"); }
+    catch (e) { box.appendChild(el("div", "muted small", "Could not load domain settings.")); return; }
+
+    if (!d.custom_domain) {
+      var lbl = el("label", null, "Domain (e.g. shop.yourbrand.com)"); lbl.htmlFor = "cdInput"; box.appendChild(lbl);
+      var input = el("input"); input.id = "cdInput"; input.maxLength = 253; input.placeholder = "shop.yourbrand.com"; box.appendChild(input);
+      var claim = el("button", "primary", "Claim domain");
+      claim.onclick = async function () {
+        var dom = (input.value || "").trim();
+        if (!dom) { dommsg("Enter a domain first.", true); return; }
+        claim.disabled = true;
+        try {
+          await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/custom-domain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ domain: dom }) });
+          dommsg("Domain claimed — add the DNS record below, then verify.");
+          await loadCustomDomain(slug);
+        } catch (e) {
+          claim.disabled = false;
+          dommsg(e.status === 409 ? "That domain is already in use by another store."
+            : e.status === 422 ? "That doesn't look like a valid public domain."
+            : (e.message || "Could not claim the domain."), true);
+        }
+      };
+      var cRow = el("div", "row"); cRow.style.marginTop = "10px"; cRow.appendChild(claim); box.appendChild(cRow);
+      return;
+    }
+
+    var head = el("div", "row");
+    head.appendChild(el("span", d.verified ? "pill on" : "pill", d.verified ? "Verified" : "Pending DNS"));
+    head.appendChild(el("strong", "mono", d.custom_domain));
+    box.appendChild(head);
+
+    if (d.verified) {
+      box.appendChild(el("div", "muted small", "Live at https://" + d.custom_domain + "/"));
+    } else if (d.dns_record) {
+      box.appendChild(el("div", "small", "Add this DNS record at your domain host, then click Verify:"));
+      var rec = el("div", "card mono small");
+      rec.appendChild(el("div", null, "Type:  " + d.dns_record.type));
+      rec.appendChild(el("div", null, "Name:  " + d.dns_record.name));
+      rec.appendChild(el("div", null, "Value: " + d.dns_record.value));
+      box.appendChild(rec);
+      var vb = el("button", "primary", "Verify DNS");
+      vb.onclick = async function () {
+        vb.disabled = true; dommsg("Checking DNS…");
+        try {
+          var r = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/custom-domain/verify", { method: "POST" });
+          if (r && r.verified) { dommsg("Verified — your store is live on " + d.custom_domain + "."); }
+          else { dommsg("DNS record not found yet — propagation can take a few minutes. Try again shortly.", true); }
+          await loadCustomDomain(slug);
+        } catch (e) { vb.disabled = false; dommsg(e.message || "Verification failed.", true); }
+      };
+      box.appendChild(vb);
+    }
+
+    var rm = el("button", "ghost", "Remove domain");
+    rm.onclick = async function () {
+      try {
+        await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/custom-domain", { method: "DELETE" });
+        dommsg("Custom domain removed."); await loadCustomDomain(slug);
+      } catch (e) { dommsg(e.message || "Could not remove the domain.", true); }
+    };
+    var rmRow = el("div", "row"); rmRow.style.marginTop = "10px"; rmRow.appendChild(rm); box.appendChild(rmRow);
   }
 
   // ---- growth (M17): draft outbox + content calendar + first-party performance.
