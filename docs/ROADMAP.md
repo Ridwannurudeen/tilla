@@ -34,7 +34,7 @@ Framing: "Two Markets, One Society" (Agents market + Tasks market); pillars Iden
 |---|---|---|---|
 | 1 | ERC-8004 identity on X Layer | Multiple ASPs per wallet; registration/update/activate **gas-free** | Register stores as ASPs — an identity factory |
 | 2 | Services + fees | Name 5–30 chars; desc ≤400 CJK-width, no links/prompts; A2MCP fee = USDT string; `validate-listing` QA gate; human review ≤24h | Multiple services under #6961: create-store, upgrade-store, per-store buy |
-| 3 | A2MCP (pay-per-call, x402-compliant) | Instant settle, no arbitration | Tilla's live rail (create-store, 1 USDT) |
+| 3 | A2MCP (pay-per-call, x402-compliant) | Instant settle, no arbitration | Tilla's live rail (create-store, 0.05 USDT) |
 | 4 | A2A escrow services | Escrow on X Layer, released on sign-off; disputes → arbitration (5% bounty deposit) | "Custom store build" with buyer protection |
 | 5 | Task board | paymentMode 1=escrow / 3=x402; `task-search`/`recommend-task`/`contact-user` | Take store-build jobs AND post tasks (logo, copy) = agents-hiring-agents receipts |
 | 6 | Ratings / reputation | Bidirectional on-chain feedback; `soldCount` ranks the home view | Real GMV directly buys marketplace placement |
@@ -46,8 +46,8 @@ Framing: "Two Markets, One Society" (Agents market + Tasks market); pillars Iden
 | 12 | Two-market framing | Agents market + Tasks market | Tilla spans both sides of both markets |
 
 ### 1.4 Tilla today vs the gap
-**Used:** ASP #6961; one A2MCP service (Create Storefront, 1 USDT, x402 exact — live 402 verified); USDT0 settlement + on-chain verify; avatar.
-**Unused (this roadmap's raw material):** multiple services; **per-store ASP listings** (the biggest thesis-proof gap); task board both directions; A2A escrow service type; reviews/soldCount accumulation; XMTP negotiation; MPP/aggr_deferred/period rails; evaluator; semantic-search-optimized catalogs.
+**Used (as of 2026-07-24):** ASP #6961; three A2MCP services (Create Storefront 0.05 USDT, upgrade-store 0.03, add-product 0.01 — x402 exact, live 402 verified); USDT0 settlement + on-chain verify; avatar; **all four payment rails enabled** (exact / period / aggr_deferred / MPP — per-rail proof in §4 Phase 4).
+**Unused (this roadmap's raw material):** **per-store ASP listings** (the biggest thesis-proof gap); task board both directions; OKX's own A2A escrow service type (Tilla ships its own non-custodial escrow instead); marketplace ratings/soldCount accumulation; XMTP negotiation; evaluator; semantic-search-optimized catalogs.
 
 ---
 
@@ -146,7 +146,7 @@ All "nobody has" claims `[inferred]` from the live scan (§5): ASPs are overwhel
 5. **ERC-8004 on-chain store reputation** — experimental (Draft spec, `[unverified]` marketplace linkage).
 6. **Agent affiliate revenue share** — other agents become Tilla's distribution.
 7. **A2A escrow storefronts** — stores hireable via task board with buyer protection (rail proven end-to-end with Warden).
-8. **Multi-rail per-SKU pricing** — OKX asks for one rail; Tilla exposes four (honest caveats: `period` spike-gated, `aggr_deferred` TEE-only).
+8. **Multi-rail per-SKU pricing** — OKX asks for one rail; Tilla exposes four, all enabled (honest caveats: `aggr_deferred` needs a TEE agentic-wallet buyer and no batch-priced product is listed today; the MPP channel has been opened but never closed).
 9. **Mandate/spend-policy-aware checkout** — AP2-aligned before OKX is.
 10. **Discovery API mirror + agent cards** — future-proofs for Coinbase Bazaar / Google UCP stacks.
 11. **Pay-per-crawl catalog access.**
@@ -159,11 +159,11 @@ All "nobody has" claims `[inferred]` from the live scan (§5): ASPs are overwhel
 - **Phase 1 — Foundation (product, not toy):** git repo + tests + CI; security hardening (kill the live XSS, validation, rate limits, Warden screening); SQLAlchemy persistence; hardened checkout state machine (unique amounts, txhash verify, payment detection — polling committed, WS spike-gated — under/over/late-pay, expiry, idempotency); real gated delivery (uploads, signed expiring links, buyer library).
 - **Phase 2 — Storefront excellence:** wallet-connect checkout UX; 3 themes wired + selectable; receipts with explorer links; OG/SEO/JSON-LD.
 - **Phase 3 — Agent-native commerce:** per-store x402 buy endpoints (dual-sided stores); machine-readable catalog stack; per-store MCP server; agent card + discovery mirror.
-- **Phase 4 — Full payment protocol — PARTIAL (built; live-settle USER-gated):** per-SKU rail menu (`pricing_model` + declaration endpoint + feed/MCP/llms surfacing) and all four rails' CODE are built and tested. Settlement status per BUILD.md M8: x402 exact **LIVE, PROVEN**; `aggr_deferred` **OPTION LIVE, settlement unproven** (needs a TEE agentic-wallet buyer); MPP pay-as-you-go **code built, deployed dormant 503, no channel ever opened** (needs a funded channel + SA creds); subscription (`period`) **sidecar + proxy built, local dry-run verified, deployed dormant 503** (needs creds + a funded Permit2 buyer). Each USER-gated proof is parked until a real settlement tx hash is logged — no rail beyond exact is claimed working.
+- **Phase 4 — Full payment protocol — DONE except one half-loop (all four rails enabled; proof per rail, 2026-07-24):** per-SKU rail menu (`pricing_model` + declaration endpoint + feed/MCP/llms surfacing) plus all four rails are built, enabled, and — with one exception — settled with real funds. Settlement status per BUILD.md M8: x402 exact **LIVE, PROVEN** (3 recorded proofs); subscription (`period`) **LIVE, PROVEN** (two real settles, blocks 66072022 / 66072295); `aggr_deferred` **LIVE, PROVEN** (one batch settle covering two orders, block 66059520 — but **no batch-priced product is currently listed**, so live 402 challenges carry only `exact`); MPP pay-as-you-go **LIVE, HALF-PROVEN** — one channel opened with a signed voucher against a 2 USDT deposit, **never closed or settled**, and the close is not claimed. Every settlement above is a **self-funded arm's-length test**; the rule is unchanged — a rail is only claimed once a real settlement tx hash is logged.
 - **Phase 5 — Merchant platform:** accounts, multi-store, dashboard, CSV, merchant API + webhooks.
 - **Phase 6 — Marketplace citizenship:** more services under #6961; store-as-ASP auto-listing; task-board participation; agents-hiring-agents (Warden hire); post-task ratings.
 - **Phase 7 — On-chain depth:** EAS receipts; StoreRegistry; ERC-8004 experiments.
-- **Phase 8 — Growth — BUILT (M13; live, with USER-gated tails):** affiliate attribution + accrual ledger + verify-and-record payout (payout execution never in code — a manual operator wallet send, recorded post-hoc); external feeds (OpenAI JSON + Google Merchant RSS + Tilla-wide aggregate, read-only); embeddable shadow-DOM buy button (`/embed.js`); ACP `/checkout_sessions` five-endpoint surface (mounted dormant-503 behind `TILLA_ACP_ENABLED`, tx-hash complete live once flipped; x402-middleware complete = spike 9, parked). External *listings* (ChatGPT/Instant-Checkout, Perplexity, Google Merchant Center) + SMTP broadcasts are USER-owned and never claimed until a real artifact exists. See `docs/acp-checkout.md`.
+- **Phase 8 — Growth — BUILT (M13; live, with USER-gated tails):** affiliate attribution + accrual ledger + verify-and-record payout (payout execution never in code — a manual operator wallet send, recorded post-hoc); external feeds (OpenAI JSON + Google Merchant RSS + Tilla-wide aggregate, read-only); embeddable shadow-DOM buy button (`/embed.js`); ACP `/checkout_sessions` five-endpoint surface (**now enabled** — the endpoints answer real status codes, not the old dormant 503, and one session has completed and settled on-chain, block 66025300; x402-middleware complete = spike 9, still parked). External *listings* (ChatGPT/Instant-Checkout, Perplexity, Google Merchant Center) + SMTP broadcasts are USER-owned and never claimed until a real artifact exists. See `docs/acp-checkout.md`.
 
 **Hackathon checkpoint (2026-07-27 22:59 UTC):** submit whatever is genuinely done — target = Phases 1–3 complete with at least one real arm's-length purchase. Submission assets (X thread, ≤90s demo, form) are drafted and **user-owned/approval-gated**.
 
@@ -182,8 +182,8 @@ All "nobody has" claims `[inferred]` from the live scan (§5): ASPs are overwhel
 
 ## 6. Business model
 
-- **Live now:** 1 USDT per store creation (x402, ASP #6961).
-- **Add:** premium creation tier (custom domain, multi-product, themes) at a higher flat fee; paid `upgrade-store` service; later a small platform fee where rails support it (MPP supports payment **splits, max 10** — the only non-custodial %-fee rail today; x402 `exact` pays the merchant directly and stays fee-free).
+- **Live now:** 0.05 USDT0 per store creation — charged identically whether an agent pays over x402 (ASP #6961) or a human self-serves from the dashboard — plus `upgrade-store` (0.03 USDT) and `add-product` (0.01 USDT).
+- **Add:** premium creation tier (custom domain, multi-product, themes) at a higher flat fee; later a small platform fee where rails support it (MPP supports payment **splits, max 10** — the only non-custodial %-fee rail today; x402 `exact` pays the merchant directly and stays fee-free).
 - **Principle: non-custodial by default.** Human checkout and per-store x402 settle **directly to the merchant wallet**. Custodial flows (A2A escrow proceeds settle to the ASP wallet) are opt-in and clearly labeled (§8).
 - **Success metrics to steer by:** ≥3 stores created by real third parties; ≥1 arm's-length agent purchase end-to-end (second self-operated wallet — honestly labeled as such); ≥1 **genuinely external** purchase (a person/agent we don't operate — needs recruitment, user-assisted); ≥1 real sale per rail shipped; test suite ≥60 green tests; every sale carrying an on-chain receipt link; soldCount on #6961 climbing.
 

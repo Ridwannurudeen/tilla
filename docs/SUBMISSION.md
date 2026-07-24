@@ -3,7 +3,7 @@
 > **STATUS: DRAFT ONLY.** Nothing in this file has been posted or submitted anywhere.
 > The owner must review, edit as needed, and personally post the X thread and
 > submit the form before the deadline (**2026-07-27 23:59 UTC**).
-> All facts below are restricted to what is verified live/real as of 2026-07-20 — no invented features, no fabricated metrics.
+> All facts below are restricted to what is verified live/real as of 2026-07-24 — no invented features, no fabricated metrics.
 
 ---
 
@@ -44,9 +44,9 @@
 **Post 5 (proof it's real)**
 > This isn't a mockup. Tilla itself is a registered OKX ASP:
 >
-> #6961 "Tilla" — service "Create Storefront," 1 USDT via x402
+> #6961 "Tilla" — service "Create Storefront," 0.05 USDT via x402
 > Endpoint: https://tilla.gudman.xyz/create-store
-> x402-check: valid ✅ (eip155:196/USDT0)
+> Live 402 challenge: 0.05 USDT0 on eip155:196 ✅
 >
 > Example live store: https://tilla.gudman.xyz/s/invoice-flow/
 
@@ -76,7 +76,7 @@
 | **Category** | Software Utility (primary). Also relevant: Best Product, Revenue Rocket. |
 | **Live URL (product)** | https://tilla.gudman.xyz/ |
 | **Live URL (example store)** | https://tilla.gudman.xyz/s/invoice-flow/ |
-| **Endpoint (ASP)** | https://tilla.gudman.xyz/create-store (x402-gated, 1 USDT, "Create Storefront") |
+| **Endpoint (ASP)** | https://tilla.gudman.xyz/create-store (x402-gated, 0.05 USDT, "Create Storefront") |
 | **X post link** | [placeholder — insert after posting the thread above] |
 | **Demo video link (≤90s)** | [placeholder — insert once recorded] |
 
@@ -104,7 +104,7 @@
 
 ## Notes for the owner
 
-- All URLs, agent ID, x402-check status, and pricing above are the verified real assets as of 2026-07-20 — nothing invented.
+- All URLs, agent ID, the live 402 challenge, and pricing above are the verified real assets as of 2026-07-24 — nothing invented.
 - Two placeholders remain: the demo video link and the X-post link (fill in once each exists, then paste the X-post link into the form).
 - Recommend posting the X thread first, then using its URL in the form's "X post link" field.
 - Do not post or submit until you've reviewed and approved this draft.
