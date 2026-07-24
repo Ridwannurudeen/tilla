@@ -2,6 +2,13 @@
    JS. Included by every theme. No build step, no CDN, everything inline (CSP-safe).
    Template interpolation is limited to SLUG (via |tojson) and ADDR (a server-
    validated hex address); USDT0 + chain 0xc4 are hardcoded JS constants. #}
+<div id="walletPicker" class="wp-overlay hide" role="dialog" aria-modal="true" aria-label="Choose a wallet">
+  <div class="wp-card">
+    <p class="wp-title">Choose a wallet</p>
+    <div id="wpList"></div>
+    <button id="wpCancel" class="wp-cancel" type="button">Cancel</button>
+  </div>
+</div>
 <div class="checkout" id="co">
   <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
   <div class="row"><span>Network</span><b>{{ CHAIN_NAME }} (chainId {{ CHAIN_ID }})</b></div>
@@ -228,6 +235,15 @@
     #co .co-btn, #co .co-copy, #co .co-ghost, #co .co-manual, #co .co-count,
     #co .status, #co .co-hint, #co .co-claim, nav, header, footer{ display:none !important; }
   }
+  .wp-overlay{ position:fixed; inset:0; z-index:1000; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.45); padding:20px; }
+  .wp-overlay.hide{ display:none; }
+  .wp-card{ background:#fff; color:#1a1a1a; border-radius:10px; padding:20px; width:min(340px,92vw); box-shadow:0 14px 44px rgba(0,0,0,.32); }
+  .wp-title{ font-size:12px; letter-spacing:.06em; text-transform:uppercase; opacity:.55; margin:0 0 10px; }
+  .wp-wallet{ display:flex; align-items:center; gap:12px; width:100%; padding:12px 14px; margin:8px 0; border:1px solid #dcdcdc; border-radius:8px; background:#fff; color:#1a1a1a; cursor:pointer; font:inherit; text-align:left; transition:border-color .15s ease; }
+  .wp-wallet:hover{ border-color:#1a1a1a; }
+  .wp-wallet img{ width:24px; height:24px; border-radius:5px; flex:none; }
+  .wp-wallet span{ font-weight:600; }
+  .wp-cancel{ margin-top:6px; background:transparent; border:1px solid #dcdcdc; border-radius:8px; padding:8px 14px; cursor:pointer; font:inherit; color:#1a1a1a; }
 </style>
 
 <script>
@@ -251,7 +267,14 @@
 
   // ---- EIP-6963 provider discovery ----
   const providers = [];
-  window.addEventListener("eip6963:announceProvider", function (e) { if (e.detail) providers.push(e.detail); });
+  window.addEventListener("eip6963:announceProvider", function (e) {
+    if (!e.detail) return;
+    var rdns = e.detail.info && e.detail.info.rdns;
+    for (var i = 0; i < providers.length; i++) {
+      if (providers[i].info && providers[i].info.rdns === rdns) { providers[i] = e.detail; return; }
+    }
+    providers.push(e.detail);
+  });
   try { window.dispatchEvent(new Event("eip6963:requestProvider")); } catch (e) {}
 
   function pickProvider() {
@@ -266,12 +289,26 @@
   }
   // Re-announce + brief wait so late-injecting wallets (Rabby, MetaMask, etc.) are
   // discovered before we pick one.
-  async function resolveProvider() {
+  function closeWalletPicker() { var w = byId("walletPicker"); if (w) w.classList.add("hide"); }
+  async function chooseProvider() {
     try { window.dispatchEvent(new Event("eip6963:requestProvider")); } catch (e) {}
-    if (!providers.length && !window.ethereum) {
-      await new Promise(function (r) { setTimeout(r, 350); });
-    }
-    return pickProvider();
+    await new Promise(function (r) { setTimeout(r, 350); });
+    var list = providers.slice();
+    if (list.length <= 1) return list.length ? list[0].provider : (window.ethereum || null);
+    return await new Promise(function (resolve) {
+      var wrap = byId("wpList"); wrap.textContent = "";
+      list.forEach(function (p) {
+        var btn = document.createElement("button");
+        btn.type = "button"; btn.className = "wp-wallet";
+        if (p.info && p.info.icon) { var img = document.createElement("img"); img.src = p.info.icon; img.alt = ""; btn.appendChild(img); }
+        var span = document.createElement("span"); span.textContent = (p.info && p.info.name) || "Wallet";
+        btn.appendChild(span);
+        btn.onclick = function () { closeWalletPicker(); resolve(p.provider); };
+        wrap.appendChild(btn);
+      });
+      byId("wpCancel").onclick = function () { closeWalletPicker(); resolve(null); };
+      byId("walletPicker").classList.remove("hide");
+    });
   }
   function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
 
@@ -455,7 +492,7 @@
     byId("coManual").style.display = "none";
     byId("payWalletBtn").style.display = "none";
     byId("coAmount").textContent = "…";
-    var provider = await resolveProvider();
+    var provider = await chooseProvider();
     if (!provider) { setStatus("Open this page in your wallet's browser to subscribe."); setBuysDisabled(false); return; }
     var account;
     try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
@@ -581,7 +618,7 @@
   }
 
   async function _cancelSubscription(subId, btn) {
-    var provider = await resolveProvider();
+    var provider = await chooseProvider();
     if (!provider || !CO.account) { setStatus("Open this page in your wallet to cancel."); return; }
     btn.disabled = true;
     setStatus("Preparing cancellation…");
@@ -630,7 +667,7 @@
   }
 
   async function payWithWallet() {
-    var provider = await resolveProvider();
+    var provider = await chooseProvider();
     if (!provider) { updatePayButton(); return; }
     var btn = byId("payWalletBtn");
     btn.disabled = true;
@@ -829,7 +866,7 @@
   // ---- sign-to-claim (reuses M4 auth endpoints) ----
   async function claimPurchase() {
     var btn = byId("claimBtn"); btn.disabled = true;
-    var provider = await resolveProvider();
+    var provider = await chooseProvider();
     if (!provider) { setClaim("No wallet detected — open this page in your wallet's browser to claim, or use your emailed link."); btn.disabled = false; return; }
     var account;
     try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
