@@ -70,6 +70,15 @@ ATTESTED_TOPIC0 = keccak(text="Attested(address,address,bytes32,bytes32)")
 # every boot grants a fresh few attempts). A found receipt resolves immediately.
 RECONCILE_MAX_TICKS = 3
 
+# A CONFIGURED attester that cannot work (RPC unreachable, wrong chain, schema
+# unavailable) used to idle forever at WARNING level — invisible to the watchdog, which
+# only knows /health, /ready and the journal. After this many consecutive idle ticks the
+# tick logs IDLE_MARKER at ERROR and keeps logging it while the condition holds, which is
+# what scripts/watchdog.sh greps for. A DORMANT attester (flag off / no key) never counts
+# — that is the configured state, not a degradation.
+IDLE_ALERT_TICKS = 5
+IDLE_MARKER = "attest: DEGRADED"
+
 SCHEMA_REGISTRY_ABI = [
     {
         "name": "register",
@@ -294,12 +303,28 @@ _attester_factory = _default_attester_factory
 # In-process caches (reset by :func:`_reset_state` in tests).
 _schema_registered = False
 _reconcile_seen: dict[str, int] = {}
+_idle_ticks = 0
 
 
 def _reset_state() -> None:
-    global _schema_registered
+    global _schema_registered, _idle_ticks
     _schema_registered = False
+    _idle_ticks = 0
     _reconcile_seen.clear()
+
+
+def _idle(reason: str) -> int:
+    """Record one idle tick of a LIVE attester and, once the run reaches
+    IDLE_ALERT_TICKS, log the watchdog's marker every tick until the attester recovers
+    (a one-shot log could fall outside the watchdog's journal window and be lost).
+    Returns 0 — the tick attested nothing."""
+    global _idle_ticks
+    _idle_ticks += 1
+    if _idle_ticks >= IDLE_ALERT_TICKS:
+        logger.error(
+            "%s: %s consecutive idle ticks (%s)", IDLE_MARKER, _idle_ticks, reason
+        )
+    return 0
 
 
 # ------------------------------------------------------------ on-chain seams
@@ -766,7 +791,9 @@ def attest_tick() -> int:
     """One attestation pass. Refuses (idles, signs nothing) unless a live attester is
     configured AND the connected chain matches ATTEST_CHAIN_ID. Reconciles in-flight
     'sending' then 'sent' rows, ensures the schema is registered once, then attests up to
-    MAX_PER_TICK pending orders. Returns the number of orders acted on."""
+    MAX_PER_TICK pending orders. Returns the number of orders acted on. A configured
+    attester that keeps idling escalates to the watchdog marker (see :func:`_idle`)."""
+    global _idle_ticks
     attester = _attester_factory()
     if attester is None:
         return 0  # dormant / misconfigured — no RPC, no signing
@@ -774,19 +801,20 @@ def attest_tick() -> int:
         chain_id = _chain_id(attester)
     except Exception:
         logger.warning("attest: chain_id unavailable; idling this tick")
-        return 0
+        return _idle("chain_id unavailable")
     if chain_id != config.ATTEST_CHAIN_ID:
         logger.error(
             "attest: connected chain_id %s != expected %s; refusing to sign",
             chain_id,
             config.ATTEST_CHAIN_ID,
         )
-        return 0
+        return _idle("wrong chain_id")
 
     _reconcile_sending(attester)
     _reconcile_sent(attester)
     if not _ensure_schema(attester):
-        return 0
+        return _idle("schema unavailable")
+    _idle_ticks = 0
     acted = 0
     for order_id, store_id in _pending_orders():
         _attest_one(attester, order_id, store_id)

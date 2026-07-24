@@ -6,8 +6,10 @@ DORMANT-SAFE: ``POST /s/{slug}/subscribe`` is always mounted but fail-closes to 
 unless ``config.SUBSCRIPTIONS_ENABLED`` is set. Even then, the sidecar itself only
 contacts the OKX facilitator when OKX creds are present, so a real subscribe/charge
 needs creds + a USER-funded Permit2 buyer. NEVER a false 402/200: if the sidecar is
-unreachable at any step the proxy 503s, and ONLY a facilitator settle success ever
-creates an Order + delivers — a settle failure or 503 delivers nothing.
+unreachable at any step the proxy 503s, and ONLY a facilitator settle carrying a real
+on-chain settlement tx hash ever creates an Order + delivers (see
+:func:`_settle_tx_hash`) — a settle failure, a rejection served as HTTP 200, or a 503
+delivers nothing and is audited as ``subscription.settle_failed``.
 """
 
 from __future__ import annotations
@@ -166,14 +168,61 @@ def _payer_from_terms(sig: str) -> str | None:
         return None
 
 
+_TX_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+
+
+def _settle_tx_hash(reference) -> str:
+    """The on-chain settlement tx hash from the facilitator's settle result, or fail
+    closed.
+
+    The OKX facilitator answers HTTP 200 for a REJECTED subscribe, carrying the
+    rejection INSIDE the body (observed in prod: ``{"code": 30001, "data": {},
+    "error_code": "30001", "error_message": "permit_spender_mismatch", ...}``), so the
+    sidecar's ``settled`` flag is not on its own evidence that funds moved. A settlement
+    is recognised ONLY by a clean success code AND a real 32-byte tx hash; anything else
+    raises, so no Order is created and nothing is delivered."""
+    if not isinstance(reference, dict):
+        raise HTTPException(502, "subscription settle returned no facilitator result")
+    for key in ("code", "error_code"):
+        value = reference.get(key)
+        if value is not None and str(value) != "0":
+            raise HTTPException(402, "subscription settle rejected by the facilitator")
+    if reference.get("error_message"):
+        raise HTTPException(402, "subscription settle rejected by the facilitator")
+    data = reference.get("data")
+    tx_hash = data.get("txHash") if isinstance(data, dict) else None
+    if not isinstance(tx_hash, str) or not _TX_HASH_RE.match(tx_hash):
+        raise HTTPException(502, "subscription settle returned no settlement tx")
+    return tx_hash
+
+
+def _log_settle_failed(ctx: dict, reference, reason: str) -> None:
+    """Audit a settle that did NOT deliver, under its OWN event name. A failure must
+    never be recorded as ``subscription.settled`` — prod filed two facilitator
+    rejections under that name, so the audit log read as though funds had moved."""
+    with SessionLocal() as session:
+        log_event(
+            session,
+            "subscriptions",
+            "subscription.settle_failed",
+            store_id=ctx["store_id"],
+            data={
+                "reason": reason,
+                "reference": reference if isinstance(reference, dict) else None,
+            },
+        )
+        session.commit()
+
+
 async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
     """With a PAYMENT-SIGNATURE: rebuild the requirements SERVER-SIDE from ctx (so
     verify/settle bind the buyer's signature to the STORE's payTo/amount/period,
     never a buyer-supplied copy), run the sidecar's LOCAL verify, and only on
     localVerify.ok is True settle through the facilitator. A replayed signature
     returns the existing order (no re-settle). localVerify not ok -> 402 (no Order);
-    a facilitator settle failure / 503 -> the same status, NO Order; only a
-    facilitator success creates the Order + delivers."""
+    a facilitator settle failure / 503 / a 200 whose result carries an error or no
+    settlement tx -> NO Order, audited as ``subscription.settle_failed``; only a
+    settlement tx hash creates the Order + delivers."""
     idem_key = _subscription_idem_key(sig)
     payer = _payer_from_terms(sig)
     replay = await asyncio.to_thread(_subscription_replay, ctx, idem_key, payer)
@@ -203,15 +252,21 @@ async def _verify_and_settle(ctx: dict, sig: str) -> JSONResponse:
         json={"requirements": requirements},
         headers=sig_headers,
     )
-    if sresp.status_code != 200 or not _safe_json(sresp).get("settled"):
-        # Settle failure or the sidecar's own 503 delivers NOTHING.
-        raise HTTPException(
-            sresp.status_code if sresp.status_code >= 400 else 502,
-            "subscription settle failed",
-        )
-    reference = _safe_json(sresp).get("facilitator")
+    sbody = _safe_json(sresp)
+    reference = sbody.get("facilitator")
+    try:
+        if sresp.status_code != 200 or not sbody.get("settled"):
+            # Settle failure or the sidecar's own 503 delivers NOTHING.
+            raise HTTPException(
+                sresp.status_code if sresp.status_code >= 400 else 502,
+                "subscription settle failed",
+            )
+        tx_hash = _settle_tx_hash(reference)
+    except HTTPException as exc:
+        await asyncio.to_thread(_log_settle_failed, ctx, reference, exc.detail)
+        raise
     body_out = await asyncio.to_thread(
-        _fulfill_subscription, ctx, reference, idem_key, payer
+        _fulfill_subscription, ctx, reference, tx_hash, idem_key, payer
     )
     return JSONResponse(body_out, headers=_SUB_HEADERS)
 
@@ -286,18 +341,18 @@ def _subscription_replay(ctx: dict, idem_key: str, payer: str | None) -> dict | 
 
 
 def _fulfill_subscription(
-    ctx: dict, reference, idem_key: str, payer: str | None
+    ctx: dict, reference, tx_hash: str, idem_key: str, payer: str | None
 ) -> dict:
     """Record the settled subscription as an agent Order and deliver through the
-    exact M3/M4 ``checkout.deliver`` path. Runs ONLY after a real facilitator settle
-    success — never on a mocked/failed settle. The terms-signature idempotency key
-    is stored on ``x402_nonce`` (unique), so a settle that raced a replay reconciles
-    to the winner instead of minting a duplicate."""
-    # The facilitator settle result carries the on-chain subscription id (needed to
-    # cancel) + the settle tx. Persist them: subId on settle_ref, txHash on tx_hash.
+    exact M3/M4 ``checkout.deliver`` path. Runs ONLY after a facilitator settle whose
+    result carried a real settlement tx (``_settle_tx_hash`` already validated it) —
+    never on a mocked/failed settle. The terms-signature idempotency key is stored on
+    ``x402_nonce`` (unique), so a settle that raced a replay reconciles to the winner
+    instead of minting a duplicate."""
+    # The facilitator settle result also carries the on-chain subscription id (needed
+    # to cancel). Persist both: subId on settle_ref, the settle tx on tx_hash.
     data = reference.get("data") if isinstance(reference, dict) else None
     sub_id = data.get("subId") if isinstance(data, dict) else None
-    tx_hash = data.get("txHash") if isinstance(data, dict) else None
     with SessionLocal() as session:
         order = Order(
             id=uuid.uuid4().hex[:16],
@@ -312,7 +367,7 @@ def _fulfill_subscription(
             from_addr=payer,
             paid_at=checkout._now(),
             settle_ref=sub_id if isinstance(sub_id, str) else None,
-            tx_hash=tx_hash if isinstance(tx_hash, str) else None,
+            tx_hash=tx_hash,
         )
         session.add(order)
         try:

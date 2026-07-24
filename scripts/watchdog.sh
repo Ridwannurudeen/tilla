@@ -9,6 +9,11 @@
 #                  budget exhausted -> alert at most once/hour, NO restart (no storm).
 #  3. up + /ready 503 -> Telegram the failing checks, throttled once/hour per state,
 #                  NO restart (a stale RPC/readiness issue isn't fixed by a bounce).
+#  4. subscription sidecar (Node, :8790) /health -> alert only, throttled once/hour.
+#                  A dead sidecar 503s every subscribe; nothing else notices it.
+#  5. app-side silent degradation: the journal marker app/attest.py logs after a run of
+#                  idle ticks -> alert only, throttled once/hour.
+# Both extra probes ALERT ONLY — this script restarts exactly one unit, "tilla-api".
 # Telegram uses the SOLVENT bot creds at /etc/solvent/telegram-alerts; if that file or
 # its vars are absent, alerts are skipped and the restart logic still runs.
 #
@@ -18,9 +23,13 @@ set -uo pipefail
 UNIT="tilla-api"
 HEALTH="http://127.0.0.1:8040/health"
 READY="http://127.0.0.1:8040/ready"
+SIDECAR="http://127.0.0.1:8790/health"      # subscription sidecar liveness (no creds)
+ATTEST_MARKER="attest: DEGRADED"            # app/attest.py logs this after idle ticks
 STATE="/opt/tilla/.watchdog.state"          # restart epochs, one per line (last hour)
 RL_MARK="/opt/tilla/.watchdog.ratelimited"  # mtime = last "rate-limited" alert
 RD_MARK="/opt/tilla/.watchdog.ready"        # content = last-alerted /ready body
+SC_MARK="/opt/tilla/.watchdog.sidecar"      # mtime = last sidecar-down alert
+AT_MARK="/opt/tilla/.watchdog.attest"       # mtime = last attest-degraded alert
 MAX_RESTARTS=3                              # per rolling hour
 TG_CONF="/etc/solvent/telegram-alerts"
 
@@ -101,4 +110,24 @@ else
       : > "$RL_MARK"
     fi
   fi
+fi
+
+# Subscription sidecar liveness. Alert only (this script restarts one unit, tilla-api):
+# a dead sidecar makes every /s/*/subscribe 503, and nothing else surfaces it.
+if curl -fsS -m 5 "$SIDECAR" >/dev/null 2>&1; then
+  rm -f "$SC_MARK" 2>/dev/null || true
+elif throttle_ok "$SC_MARK"; then
+  tg_send "subscription sidecar NOT answering ${SIDECAR} — subscribes are failing closed"
+  : > "$SC_MARK"
+fi
+
+# Silent app-side degradation: app/attest.py logs ATTEST_MARKER every tick once a live
+# attester has idled for a run of ticks (RPC unreachable, wrong chain, schema missing).
+if journalctl -u "$UNIT" --since "-10min" --no-pager 2>/dev/null | grep -qF "$ATTEST_MARKER"; then
+  if throttle_ok "$AT_MARK"; then
+    tg_send "${UNIT} attester DEGRADED (idling; no receipts being written) — check the journal"
+    : > "$AT_MARK"
+  fi
+else
+  rm -f "$AT_MARK" 2>/dev/null || true
 fi

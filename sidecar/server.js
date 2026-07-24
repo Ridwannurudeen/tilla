@@ -282,6 +282,11 @@ function realFacilitator() {
   return client;
 }
 
+// GET /health — liveness only, for scripts/watchdog.sh. No creds, no facilitator
+// round-trip, no secrets in the body. /health/creds is NOT a liveness probe: it calls
+// out to web3.okx.com and 503s whenever creds are absent.
+app.get("/health", (req, res) => res.json({ ok: true }));
+
 // GET /health/creds — read-only creds probe (the orchestrator's JS-side check).
 // No creds -> 503 (never contacts the facilitator). With creds it calls
 // getSupported() (reports which schemes /supported lists, incl. whether `period`
@@ -514,13 +519,11 @@ app.post("/subscriptions/cancel", async (req, res) => {
     if (String(code) !== "0") {
       const detail =
         (result && (result.error_message || result.msg)) || `code ${code}`;
-      return res
-        .status(402)
-        .json({
-          canceled: false,
-          error: `facilitator rejected: ${detail}`,
-          facilitator: result,
-        });
+      return res.status(402).json({
+        canceled: false,
+        error: `facilitator rejected: ${detail}`,
+        facilitator: result,
+      });
     }
     return res.json({ canceled: true, facilitator: result });
   } catch (e) {

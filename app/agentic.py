@@ -108,6 +108,13 @@ _BUY_PATH_RE = re.compile(r"^/s/([a-z0-9][a-z0-9-]{0,39})/buy(?:/([0-9]{1,18}))?
 # were never claimable out-of-band, so voiding is correct). A settled order is
 # flipped to 'delivered' by record_settlement and is never reaped.
 REAP_AFTER = timedelta(minutes=15)
+# The aggr_deferred rail needs its own, far longer deadline. A live OKX deferred settle
+# returns NO tx ref, so settlement only becomes observable when the facilitator relayer's
+# transfer lands on chain — 15 min was well inside that latency and voided six
+# facilitator-accepted orders in prod on 2026-07-23. A deferred order is therefore held
+# for hours AND may only be voided on the back of a chain scan that actually completed
+# (see ``_reap_tick`` / ``reconcile.LAST_CHAIN_SCAN_MONO``), never on a blind timer.
+DEFERRED_REAP_AFTER = timedelta(hours=6)
 REAP_INTERVAL = 300  # seconds
 
 
@@ -820,18 +827,28 @@ async def store_settle_failed_hook(context, failure) -> HTTPResponseBody:
     return HTTPResponseBody(content_type="application/json", body=body)
 
 
-def reap_agent_orders(session: Session, now=None) -> int:
+def reap_agent_orders(
+    session: Session, now=None, *, chain_scanned: bool = False
+) -> int:
     """Void channel='agent' orders stuck in the provisional 'settling' status older
-    than 15 min (a crash or lost settle between the deliver-commit and the
-    settle-confirm). A settled order (flipped to 'delivered' by record_settlement,
+    than the applicable deadline (a crash or lost settle between the deliver-commit and
+    the settle-confirm). A settled order (flipped to 'delivered' by record_settlement,
     even when its PAYMENT-RESPONSE header was undecodable and tx_hash is NULL) and
     every human order are never touched — the reaper keys on 'settling', never on
-    tx_hash, so a genuinely-paid order can never be clawed back."""
+    tx_hash, so a genuinely-paid order can never be clawed back.
+
+    On the aggr_deferred rail the facilitator returns no tx ref, so an unsettled order is
+    indistinguishable from a paid one still waiting on the relayer: those orders wait
+    ``DEFERRED_REAP_AFTER`` and are voided ONLY when ``chain_scanned`` says a full
+    reconcile chain scan completed (an eth_getLogs blackout must never read as
+    'never paid')."""
+    if config.AGGR_DEFERRED_ENABLED and not chain_scanned:
+        return 0
     now = now or checkout._now()
-    cutoff = now - REAP_AFTER
+    cutoff = now - (DEFERRED_REAP_AFTER if config.AGGR_DEFERRED_ENABLED else REAP_AFTER)
     reaped = 0
     # aggr_deferred orders (settle_ref set) are EXEMPT: their aggregated tx can
-    # confirm after the 15-min window and the M8 reconciliation poller owns their
+    # confirm after the reap window and the M8 reconciliation poller owns their
     # lifecycle — reaping them could void a genuinely-paid-but-slow order.
     orders = session.scalars(
         select(Order).where(
@@ -852,17 +869,21 @@ def _reap_tick() -> None:
     # A live OKX aggr_deferred settle carries NO tx hash, so those orders sit 'settling'
     # with settle_ref NULL until the chain reconciler finds the facilitator transfer —
     # the settle_ref exemption in reap_agent_orders does NOT protect them. The reaper
-    # needs no RPC but the reconciler does, so an RPC outage spanning the 15-min window
-    # could void a genuinely-paid order. Fail-closed: when the rail is live, reconcile
-    # first and skip reaping entirely if the chain is unreachable.
+    # needs no RPC but the reconciler does, so a silently-failing RPC would make every
+    # slow-but-paid order look unpaid. Fail-closed: when the rail is live, skip entirely
+    # if the chain is unreachable, and only let the reaper void deferred orders when this
+    # tick's chain scan actually COMPLETED (LAST_CHAIN_SCAN_MONO advanced).
     from app import reconcile
 
+    chain_scanned = False
     if config.AGGR_DEFERRED_ENABLED:
         if not reconcile.chain_reachable():
             return
+        before = reconcile.LAST_CHAIN_SCAN_MONO
         reconcile.reconcile_chain_tick()
+        chain_scanned = reconcile.LAST_CHAIN_SCAN_MONO > before
     with SessionLocal() as session:
-        if reap_agent_orders(session):
+        if reap_agent_orders(session, chain_scanned=chain_scanned):
             session.commit()
 
 

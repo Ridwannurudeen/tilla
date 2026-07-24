@@ -2,8 +2,13 @@
 so nothing reaches a real Node process or the OKX facilitator. Covers the flag-off
 503, the non-subscription 409 / unknown-store 404 gates, the challenge relay
 (body + APP-PAYMENT-REQUIRED verbatim, request built from pricing_params), and the
-verify/settle path — only a mocked facilitator settle SUCCESS creates an Order; a
-verify reject, a settle failure, or an unreachable sidecar creates NOTHING.
+verify/settle path — only a mocked facilitator settle carrying a real settlement tx
+creates an Order; a verify reject, a settle failure, a rejection served as HTTP 200,
+or an unreachable sidecar creates NOTHING.
+
+Every settle double mirrors the REAL sidecar response ({settled, localVerify,
+facilitator} — sidecar/server.js) wrapping the REAL OKX facilitator result body, whose
+success and rejection shapes are taken from the prod event_log rows of 2026-07-23.
 """
 
 import json
@@ -15,11 +20,51 @@ from sqlalchemy import select
 import app.main as main
 from app import config
 from app.db import SessionLocal
-from app.models import Order, Product, Store, get_or_create_merchant
+from app.models import EventLog, Order, Product, Store, get_or_create_merchant
 
 client = TestClient(main.app)
 
 SIDECAR = config.SUBSCRIPTION_SIDECAR_URL.rstrip("/")
+
+# The two real facilitator result bodies:
+#   success   -> code 0 + data.{state, subId, txHash}
+#   rejection -> HTTP 200 + code 30001 + EMPTY data + error_code/error_message
+SUB_ID = "0x" + "7e" * 32
+SETTLE_TX = "0x" + "f8" * 32
+
+
+def _facilitator_ok(sub_id: str = SUB_ID) -> dict:
+    return {
+        "code": 0,
+        "data": {"state": 0, "subId": sub_id, "txHash": SETTLE_TX},
+        "detailMsg": "",
+        "error_code": "0",
+        "error_message": "",
+        "msg": "",
+    }
+
+
+def _facilitator_error(message: str) -> dict:
+    return {
+        "code": 30001,
+        "data": {},
+        "detailMsg": "",
+        "error_code": "30001",
+        "error_message": message,
+        "msg": message,
+    }
+
+
+def _settle_body(facilitator: dict) -> dict:
+    """The sidecar's real /settle success body (server.js returns ``settled: true``
+    whenever the facilitator call did not throw)."""
+    return {"settled": True, "localVerify": {"ok": True}, "facilitator": facilitator}
+
+
+def _events() -> list[str]:
+    with SessionLocal() as s:
+        return [e.event for e in s.scalars(select(EventLog)).all()]
+
 
 SUB_PARAMS = {
     "amount_per_period_micro": 5_000_000,
@@ -174,7 +219,7 @@ def test_verify_skipped_ok_rejected_402(monkeypatch):
         return_value=httpx.Response(200, json={"localVerify": {"skipped": "x"}})
     )
     settle = respx.post(f"{SIDECAR}/subscriptions/settle").mock(
-        return_value=httpx.Response(200, json={"settled": True})
+        return_value=httpx.Response(200, json=_settle_body(_facilitator_ok()))
     )
     r = client.post(
         "/s/sv5/subscribe",
@@ -195,10 +240,7 @@ def test_settle_success_creates_order_with_rebuilt_requirements(monkeypatch):
         return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
     )
     settle = respx.post(f"{SIDECAR}/subscriptions/settle").mock(
-        return_value=httpx.Response(
-            200,
-            json={"settled": True, "facilitator": {"subscriptionId": "sub_123"}},
-        )
+        return_value=httpx.Response(200, json=_settle_body(_facilitator_ok()))
     )
     r = client.post(
         "/s/sv2/subscribe",
@@ -214,11 +256,69 @@ def test_settle_success_creates_order_with_rebuilt_requirements(monkeypatch):
     assert len(orders) == 1
     assert orders[0].channel == "agent"
     assert orders[0].status in ("delivered", "paid")
+    # The settlement tx lives ON THE ORDER ROW, not only inside the event payload.
+    assert orders[0].tx_hash == SETTLE_TX
+    assert orders[0].settle_ref == SUB_ID
     # The settle was bound to the SERVER-rebuilt requirements, not the client copy.
     import json
 
     sent = json.loads(settle.calls.last.request.content)
     assert sent["requirements"] == REBUILT_REQS
+
+
+@respx.mock
+def test_facilitator_error_in_settled_response_creates_no_order(monkeypatch):
+    # THE PROD DEFECT (order cb662715a45e4231, 2026-07-23): the OKX facilitator serves
+    # HTTP 200 for a REJECTED subscribe, carrying the rejection in the body. The sidecar
+    # relayed it as settled=true, and the proxy delivered an order with a NULL tx.
+    # An error_code/error_message in the facilitator result must fail CLOSED.
+    _sub_store("sverr")
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    respx.post(f"{SIDECAR}/subscriptions/settle").mock(
+        return_value=httpx.Response(
+            200, json=_settle_body(_facilitator_error("permit_spender_mismatch"))
+        )
+    )
+    r = client.post(
+        "/s/sverr/subscribe",
+        headers={"PAYMENT-SIGNATURE": "sig"},
+        json={"requirements": {"scheme": "period"}},
+    )
+    assert r.status_code == 402
+    assert _orders() == []
+    # A failure is NEVER filed as 'subscription.settled'.
+    events = _events()
+    assert "subscription.settle_failed" in events
+    assert "subscription.settled" not in events
+
+
+@respx.mock
+def test_settle_without_settlement_tx_creates_no_order(monkeypatch):
+    # A success code with no txHash is not evidence that funds moved — no Order.
+    _sub_store("svnotx")
+    _enable(monkeypatch)
+    _mock_challenge()
+    respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+        return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+    )
+    reference = _facilitator_ok()
+    del reference["data"]["txHash"]
+    respx.post(f"{SIDECAR}/subscriptions/settle").mock(
+        return_value=httpx.Response(200, json=_settle_body(reference))
+    )
+    r = client.post(
+        "/s/svnotx/subscribe",
+        headers={"PAYMENT-SIGNATURE": "sig"},
+        json={"requirements": {"scheme": "period"}},
+    )
+    assert r.status_code == 502
+    assert _orders() == []
+    assert "subscription.settle_failed" in _events()
+    assert "subscription.settled" not in _events()
 
 
 @respx.mock
@@ -231,9 +331,7 @@ def test_replayed_signature_is_idempotent(monkeypatch):
         return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
     )
     settle = respx.post(f"{SIDECAR}/subscriptions/settle").mock(
-        return_value=httpx.Response(
-            200, json={"settled": True, "facilitator": {"subscriptionId": "sub_9"}}
-        )
+        return_value=httpx.Response(200, json=_settle_body(_facilitator_ok()))
     )
     args = dict(
         headers={"PAYMENT-SIGNATURE": "replay-sig"},
@@ -260,11 +358,9 @@ def _sub_sig(payer: str, terms_sig: str) -> str:
     return base64.b64encode(json.dumps(envelope).encode()).decode()
 
 
-def _mock_settle(sub_id: str):
+def _mock_settle(sub_id: str = SUB_ID):
     return respx.post(f"{SIDECAR}/subscriptions/settle").mock(
-        return_value=httpx.Response(
-            200, json={"settled": True, "facilitator": {"subscriptionId": sub_id}}
-        )
+        return_value=httpx.Response(200, json=_settle_body(_facilitator_ok(sub_id)))
     )
 
 
@@ -296,7 +392,7 @@ def test_replay_withholds_entitlement_goods(monkeypatch):
     respx.post(f"{SIDECAR}/subscriptions/verify").mock(
         return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
     )
-    settle = _mock_settle("sub_b1")
+    settle = _mock_settle()
     reqs = {"requirements": {"scheme": "period"}}
     r1 = client.post(
         "/s/sb1/subscribe",
@@ -336,7 +432,7 @@ def test_recharge_by_bound_payer_allowed(monkeypatch):
     respx.post(f"{SIDECAR}/subscriptions/verify").mock(
         return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
     )
-    settle = _mock_settle("sub_b2")
+    settle = _mock_settle()
     args = dict(
         headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER, TERMS_SIG)},
         json={"requirements": {"scheme": "period"}},
@@ -359,7 +455,7 @@ def test_checksum_cased_payer_matches_binding(monkeypatch):
     respx.post(f"{SIDECAR}/subscriptions/verify").mock(
         return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
     )
-    _mock_settle("sub_b3")
+    _mock_settle()
     r1 = client.post(
         "/s/sb3/subscribe",
         headers={"PAYMENT-SIGNATURE": _sub_sig(PAYER.lower(), TERMS_SIG)},
