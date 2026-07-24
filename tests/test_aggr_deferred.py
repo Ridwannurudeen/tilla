@@ -288,6 +288,15 @@ def test_aggr_deferred_with_real_tx_flips_delivered(make_store):
 from app import reconcile  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_reconcile_state():
+    """The per-pair scan cursors and the completed-scan stamp are module-level, and
+    these tests share one (buyer, pay_to) pair — reset both around every test."""
+    reconcile._reset_state()
+    yield
+    reconcile._reset_state()
+
+
 class _FakeStatusClient:
     """Stands in for the OKX sync facilitator client — no network. Records the
     reference it was polled with and returns a canned SettleStatusResponse."""
@@ -488,6 +497,7 @@ class _ChainRpc:
         self.head = head
         self.logs = logs or []
         self.receipts = receipts or {}
+        self.scanned: list[tuple[int, int]] = []  # (fromBlock, toBlock) per eth_getLogs
 
     def handler(self, request):
         body = json.loads(request.content)
@@ -497,6 +507,7 @@ class _ChainRpc:
         elif method == "eth_getLogs":
             frm = int(params[0]["fromBlock"], 16)
             to = int(params[0]["toBlock"], 16)
+            self.scanned.append((frm, to))
             tos = {a.lower() for a in params[0]["topics"][2]}
             result = [
                 lg
@@ -774,3 +785,168 @@ def test_reap_tick_holds_deferred_order_when_the_log_scan_fails(
     agentic._reap_tick()
     with SessionLocal() as s:
         assert s.get(Order, oid).status == "settling"
+
+
+# ---------- backlog anchoring: settlements older than the trailing lookback window -----
+# The scan used to be head-anchored (head - AGGR_SETTLE_LOOKBACK_BLOCKS, ~20 min at the
+# 1s X Layer block time). Combined with the fail-closed reap that is a trap: an order
+# whose settlement lands outside that window is (correctly) never voided, but was also
+# never reachable — stuck 'settling' forever. The scan now anchors at the OLDEST settling
+# order for the pair and walks FORWARD across ticks until it reaches head.
+_WINDOW_SPAN = config.GETLOGS_MAX_SPAN + 1  # each slice covers [c, c+SPAN] inclusive
+_TICK_SPAN = config.RECONCILE_MAX_WINDOWS * _WINDOW_SPAN
+
+
+def _age_order(oid: str, delta) -> None:
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        o.created_at = checkout._now() - delta
+        o.paid_at = o.created_at
+        s.commit()
+
+
+def _anchor_for(head: int, delta) -> int:
+    """The block _scan_start lands on for an order aged ``delta`` (1 block/s x1.25 + 600).
+    Real elapsed time only grows while the test runs, so the live anchor is this value or
+    a few blocks EARLIER — the safe direction, and what the assertions allow for."""
+    return head - (int(delta.total_seconds() * 1.25) + 600)
+
+
+@respx.mock
+def test_fresh_settle_is_caught_on_the_first_tick(make_store, monkeypatch):
+    # (c) The fast path is unchanged: a fresh order's transfer lands inside the trailing
+    # window, so ONE tick finalizes it and the walk never reaches back beyond the window.
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "anchorfresh", price=1_000_000)
+    head = 100_000
+    tx = "0x" + "a1" * 32
+    rpc = _ChainRpc(
+        head=head,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, head - 30, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 1
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "delivered"
+    # Anchored on the trailing window, never deeper, and completed in one tick.
+    assert rpc.scanned[0][0] == head - config.AGGR_SETTLE_LOOKBACK_BLOCKS
+    assert len(rpc.scanned) <= config.RECONCILE_MAX_WINDOWS
+    assert reconcile.LAST_CHAIN_SCAN_MONO > 0
+
+
+@respx.mock
+def test_old_order_anchors_back_and_walks_forward_to_its_transfer(
+    make_store, monkeypatch
+):
+    # (a) A 2h-old settling order: the anchor reaches ~9600 blocks back (2h at 1 block/s
+    # x1.25 + 600), far beyond the 1200-block trailing window, and successive ticks walk
+    # forward until the transfer is covered.
+    import datetime
+
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "anchorold", price=1_000_000)
+    age = datetime.timedelta(hours=2)
+    _age_order(oid, age)
+    head = 100_000
+    anchor = _anchor_for(head, age)
+    tx = "0x" + "a2" * 32
+    # Sits in the THIRD tick's slice: anchor + 2 * _TICK_SPAN .. + 3 * _TICK_SPAN.
+    block = anchor + 2 * _TICK_SPAN + 500
+    rpc = _ChainRpc(
+        head=head,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, block, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert (
+        head - block > config.AGGR_SETTLE_LOOKBACK_BLOCKS
+    )  # a head scan cannot see it
+
+    assert reconcile.reconcile_chain_tick() == 0
+    # Anchored at (or just before) the order, far deeper than the trailing window.
+    assert rpc.scanned[0][0] <= anchor
+    assert rpc.scanned[0][0] < head - config.AGGR_SETTLE_LOOKBACK_BLOCKS
+    assert reconcile.LAST_CHAIN_SCAN_MONO == 0  # a partial walk is NOT a completed scan
+    assert reconcile.reconcile_chain_tick() == 0
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+
+    assert reconcile.reconcile_chain_tick() == 1  # third tick covers the transfer
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash == tx
+        assert o.settle_ref == tx
+    # Forward progress: later slices, never a re-walk of the first one.
+    assert rpc.scanned[0][0] < rpc.scanned[-1][0]
+
+
+@respx.mock
+def test_restart_forgets_the_cursor_and_re_anchors(make_store, monkeypatch):
+    # (b) The cursors are process-local on purpose. After a restart mid-backlog the maps
+    # are empty, so the anchor is recomputed from the order's age and the walk restarts —
+    # an arbitrarily old settlement is always eventually reachable.
+    import datetime
+
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "anchorboot", price=1_000_000)
+    age = datetime.timedelta(hours=2)
+    _age_order(oid, age)
+    head = 100_000
+    anchor = _anchor_for(head, age)
+    tx = "0x" + "a3" * 32
+    block = anchor + 2 * _TICK_SPAN + 500
+    rpc = _ChainRpc(
+        head=head,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, block, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 0  # one tick of progress, then...
+    reconcile._reset_state()  # ...process restart: cursors gone
+    rpc.scanned.clear()
+
+    assert reconcile.reconcile_chain_tick() == 0
+    # Re-anchored from scratch off the order's age, not resumed and not head-anchored.
+    assert rpc.scanned[0][0] <= anchor
+    assert rpc.scanned[0][0] < head - config.AGGR_SETTLE_LOOKBACK_BLOCKS
+    assert reconcile.reconcile_chain_tick() == 0
+    assert reconcile.reconcile_chain_tick() == 1
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "delivered"
+
+
+@respx.mock
+def test_reap_tick_holds_order_while_the_backlog_walk_is_incomplete(
+    make_store, monkeypatch
+):
+    # The reaper must not read a PARTIAL forward walk as "scanned, nothing found". An
+    # order past the deferred deadline whose transfer sits in a not-yet-walked slice
+    # survives every tick until the walk actually reaches it.
+    import datetime
+
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "reapbacklog", price=1_000_000)
+    age = agentic.DEFERRED_REAP_AFTER + datetime.timedelta(hours=1)
+    _age_order(oid, age)
+    head = 500_000
+    anchor = _anchor_for(head, age)
+    tx = "0x" + "a4" * 32
+    block = anchor + 2 * _TICK_SPAN + 500
+    rpc = _ChainRpc(
+        head=head,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, block, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    for _ in range(2):
+        agentic._reap_tick()
+        with SessionLocal() as s:
+            assert s.get(Order, oid).status == "settling"  # mid-walk: never voided
+    agentic._reap_tick()  # the walk reaches the transfer
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash == tx
+    assert "agent_order.reaped" not in _events(oid)

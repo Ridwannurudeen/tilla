@@ -40,12 +40,42 @@ from app.models import Order
 
 logger = logging.getLogger("tilla")
 
-# ``time.monotonic()`` of the last chain scan that completed with NO RPC failure — the
-# reaper's evidence that "no settlement transfer found" is a real answer rather than an
-# RPC blackout. Without it a blind eth_getLogs failure looks exactly like "this order was
-# never paid", which is how the 2026-07-23 reap voided facilitator-accepted orders. Read
-# by ``agentic._reap_tick``; mirrors the ``checkout.LAST_HEAD_MONO`` heartbeat.
+# ``time.monotonic()`` of the last chain scan that COMPLETED — every candidate pair
+# walked all the way to head with no RPC failure. This is the reaper's evidence that "no
+# settlement transfer found" is a real answer rather than an RPC blackout or a scan that
+# never reached back far enough. Without it a blind eth_getLogs failure looks exactly like
+# "this order was never paid", which is how the 2026-07-23 reap voided facilitator-
+# accepted orders. Read by ``agentic._reap_tick``; mirrors ``checkout.LAST_HEAD_MONO``.
 LAST_CHAIN_SCAN_MONO = 0.0
+
+# X Layer mines ~1 block/second (measured across the 2026-07-23 settlement window). The
+# backlog anchor turns a settling order's age into a block depth with a generous margin so
+# the estimate always lands EARLIER than that order's real creation block: an over-early
+# lower bound only costs a few extra windows, while a late one would step straight over
+# the settlement transfer and lose it for good.
+BLOCKS_PER_SEC = 1.0
+ANCHOR_SAFETY_FACTOR = 1.25
+ANCHOR_SAFETY_BLOCKS = 600
+
+# Per-pair scan position, so a pair working through a backlog makes FORWARD progress
+# instead of re-walking the same RECONCILE_MAX_WINDOWS slices every tick:
+#   key in _pair_cursors  -> mid-walk, resume at that block;
+#   key in _pairs_at_head -> the walk reached head, so the trailing window applies again;
+#   in neither            -> first sight: anchor with ``_scan_start``.
+# Both are process-local by design: after a restart the anchor is simply recomputed and
+# the backlog re-walked, so an arbitrarily old settlement stays reachable. No DB state —
+# ``chain_cursor`` belongs to the checkout sweeper (per chain, not per pair).
+_pair_cursors: dict[tuple[str, str], int] = {}
+_pairs_at_head: set[tuple[str, str]] = set()
+
+
+def _reset_state() -> None:
+    """Drop the per-pair scan positions and the completed-scan stamp (tests; mirrors
+    ``attest._reset_state``)."""
+    global LAST_CHAIN_SCAN_MONO
+    LAST_CHAIN_SCAN_MONO = 0.0
+    _pair_cursors.clear()
+    _pairs_at_head.clear()
 
 
 def _default_client_factory():
@@ -114,20 +144,25 @@ def _reconcile_one(session, client, order: Order) -> bool:
     return False
 
 
-def _facilitator_transfers(cfg, from_addr: str, pay_to: str, head: int) -> list[tuple]:
-    """Every CONFIRMED USDT0 Transfer from ``from_addr`` to ``pay_to`` in the recent
-    lookback window whose transaction was submitted by the OKX facilitator relayer,
-    as ``(block_number, log_index, value, tx_hash)`` sorted in chain order. This is
-    the real settlement evidence: OKX's ``/settle`` returns no tx hash, but ~30s later
-    its relayer submits a tx whose USDT0 Transfer log moves the funds buyer -> merchant
-    (batched — one transfer of the SUM per group of orders). Pages the eth_getLogs
-    window in <= GETLOGS_MAX_SPAN-block slices (the X Layer 101-block cap), bounded to
-    RECONCILE_MAX_WINDOWS slices. Raises on RPC error so the caller leaves the pair
-    settling and retries next tick (fail-closed — never a false settlement)."""
+def _facilitator_transfers(
+    cfg, from_addr: str, pay_to: str, start: int, head: int
+) -> tuple[list[tuple], int]:
+    """Every CONFIRMED USDT0 Transfer from ``from_addr`` to ``pay_to`` at or after
+    ``start`` whose transaction was submitted by the OKX facilitator relayer, as
+    ``(block_number, log_index, value, tx_hash)`` sorted in chain order, plus the NEXT
+    block to scan. This is the real settlement evidence: OKX's ``/settle`` returns no tx
+    hash, but ~30s later its relayer submits a tx whose USDT0 Transfer log moves the funds
+    buyer -> merchant (batched — one transfer of the SUM per group of orders). Pages
+    eth_getLogs in <= GETLOGS_MAX_SPAN-block slices (the X Layer 101-block cap), bounded
+    to RECONCILE_MAX_WINDOWS slices per call — a caller that resumes from the returned
+    cursor therefore walks FORWARD through a long backlog instead of re-scanning the same
+    slices every tick. A returned cursor past ``head`` means the walk covered the whole
+    range. Raises on RPC error so the caller leaves the pair settling and retries the SAME
+    slice next tick (fail-closed — never a false settlement, never a skipped block)."""
     want_from = from_addr.lower()
     transfers: list[tuple] = []
     receipts: dict[str, dict | None] = {}
-    cursor = max(head - config.AGGR_SETTLE_LOOKBACK_BLOCKS, 0)
+    cursor = start
     windows = 0
     while cursor <= head and windows < config.RECONCILE_MAX_WINDOWS:
         to_block = min(cursor + config.GETLOGS_MAX_SPAN, head)
@@ -149,10 +184,26 @@ def _facilitator_transfers(cfg, from_addr: str, pay_to: str, head: int) -> list[
         cursor = to_block + 1
         windows += 1
     transfers.sort()
-    return transfers
+    return transfers, cursor
 
 
-def _reconcile_chain_pair(session, cfg, from_addr, pay_to, orders, head) -> int:
+def _scan_start(orders, head: int) -> int:
+    """Where a pair with no stored cursor begins its walk: the usual trailing
+    ``head - AGGR_SETTLE_LOOKBACK_BLOCKS`` window, or — when the pair's OLDEST 'settling'
+    order predates that window — an estimate of that order's creation block, so a
+    settlement older than the window is still reachable (walked forward over the next few
+    ticks). Head-anchored scanning alone left such an order settling forever: the reaper
+    correctly refuses to void it, and the reconciler could never see far enough back."""
+    trailing = max(head - config.AGGR_SETTLE_LOOKBACK_BLOCKS, 0)
+    oldest = min(checkout._naive(o.created_at) for o in orders)
+    elapsed = max((checkout._now() - oldest).total_seconds(), 0.0)
+    depth = int(elapsed * BLOCKS_PER_SEC * ANCHOR_SAFETY_FACTOR) + ANCHOR_SAFETY_BLOCKS
+    return min(trailing, max(head - depth, 0))
+
+
+def _reconcile_chain_pair(
+    session, cfg, from_addr, pay_to, orders, head
+) -> tuple[int, bool]:
     """Finalize the oldest 'settling' aggr_deferred orders for one (from_addr ->
     pay_to) pair against the facilitator-relayed settlement transfers, ACCUMULATING —
     a batched settlement pays the SUM of several orders in one transfer, so each
@@ -160,10 +211,21 @@ def _reconcile_chain_pair(session, cfg, from_addr, pay_to, orders, head) -> int:
     settlement tx once (a tx already recorded as a settle_ref on this pair is skipped)
     so a re-scanned transfer can never double-settle a later order. Records the settle
     tx on each finalized order (tx_hash via ``_finalize_settled`` + settle_ref as the
-    consume cursor) and commits the pair atomically. Returns the number finalized. An RPC
-    error PROPAGATES so the caller can tell "scanned, found nothing" apart from "could
-    not scan" — the pair is left settling either way (fail-closed)."""
-    transfers = _facilitator_transfers(cfg, from_addr, pay_to, head)
+    consume cursor) and commits the pair atomically.
+
+    Returns ``(finalized, reached_head)``. ``reached_head`` is False while the pair is
+    still walking a backlog: a PARTIAL walk has not proven "no settlement transfer", so
+    the reaper must not treat it as a clean scan. An RPC error PROPAGATES so the caller
+    can tell "scanned, found nothing" apart from "could not scan" — the pair is left
+    settling either way (fail-closed)."""
+    key = (from_addr, pay_to)
+    if key in _pair_cursors:
+        start = _pair_cursors[key]  # mid-backlog: resume, don't re-walk
+    elif key in _pairs_at_head:
+        start = max(head - config.AGGR_SETTLE_LOOKBACK_BLOCKS, 0)
+    else:
+        start = _scan_start(orders, head)
+    transfers, cursor = _facilitator_transfers(cfg, from_addr, pay_to, start, head)
     consumed = set(
         session.scalars(
             select(Order.settle_ref).where(
@@ -191,7 +253,13 @@ def _reconcile_chain_pair(session, cfg, from_addr, pay_to, orders, head) -> int:
                 finalized += 1
     if finalized:
         session.commit()
-    return finalized
+    reached_head = cursor > head
+    if reached_head:
+        _pair_cursors.pop(key, None)
+        _pairs_at_head.add(key)
+    else:
+        _pair_cursors[key] = cursor
+    return finalized, reached_head
 
 
 def reconcile_chain_tick() -> int:
@@ -203,9 +271,10 @@ def reconcile_chain_tick() -> int:
     candidate orders per tick. Returns the number finalized. Fail-closed: any RPC error
     leaves the affected orders settling for a later tick.
 
-    Stamps ``LAST_CHAIN_SCAN_MONO`` only when EVERY candidate pair was scanned without an
-    RPC failure — that stamp is the reaper's licence to treat "no transfer found" as a
-    real answer (see ``agentic._reap_tick``)."""
+    Stamps ``LAST_CHAIN_SCAN_MONO`` only when EVERY candidate pair walked all the way to
+    head with no RPC failure — a pair still catching up through a backlog does NOT count.
+    That stamp is the reaper's licence to treat "no transfer found" as a real answer (see
+    ``agentic._reap_tick``)."""
     global LAST_CHAIN_SCAN_MONO
     if not config.AGGR_DEFERRED_ENABLED:
         return 0
@@ -225,6 +294,8 @@ def reconcile_chain_tick() -> int:
         ).all()
         if not orders:
             # Nothing to look for: a scan with no candidates is a complete scan.
+            _pair_cursors.clear()
+            _pairs_at_head.clear()
             LAST_CHAIN_SCAN_MONO = time.monotonic()
             return 0
         try:
@@ -235,13 +306,20 @@ def reconcile_chain_tick() -> int:
         pairs: dict[tuple[str, str], list] = {}
         for o in orders:
             pairs.setdefault((o.from_addr, o.pay_to), []).append(o)
+        # Pairs with nothing settling any more can't be scanned; drop their positions so
+        # the maps stay bounded over a long-running process.
+        for stale in set(_pair_cursors) - set(pairs):
+            del _pair_cursors[stale]
+        _pairs_at_head.intersection_update(pairs)
         acted = 0
         scanned_all = True
         for (from_addr, pay_to), pair_orders in pairs.items():
             try:
-                acted += _reconcile_chain_pair(
+                finalized, reached_head = _reconcile_chain_pair(
                     session, cfg, from_addr, pay_to, pair_orders, head
                 )
+                acted += finalized
+                scanned_all = scanned_all and reached_head
             except (chain.ChainError, httpx.HTTPError, ValueError):
                 logger.warning(
                     "reconcile: chain scan failed for %s -> %s", from_addr, pay_to
