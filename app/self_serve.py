@@ -17,6 +17,7 @@ one submitted payment funds at most one store.
 from __future__ import annotations
 
 import os
+import time
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -81,18 +82,37 @@ def get_creation(
     return creation
 
 
+# A broadcast is not a mined block: the dashboard submits the hash the moment the
+# wallet returns it, so the first lookups legitimately find nothing. Poll a few times
+# before calling a real payment "not found" — a 400 there pushes the merchant into
+# signing a SECOND transfer. Bounded, because the request thread waits on this.
+_RECEIPT_TRIES = 3
+_RECEIPT_RETRY_SECONDS = 2.0
+
+
+def _receipt(tx_hash: str) -> dict | None:
+    """The tx receipt, polled a bounded number of times, or None if it never lands.
+    Pinned to Tilla's canonical chain (its RPC + asset only) — the same pinning
+    refunds/checkout use. get_transaction_receipt takes the ChainConfig FIRST;
+    omitting it silently passed tx_hash as the config and 500'd on every pay."""
+    for attempt in range(_RECEIPT_TRIES):
+        receipt = chain.get_transaction_receipt(
+            payment.CANONICAL_CHAIN, tx_hash, config.RPC_TIMEOUT_REQUEST
+        )
+        if receipt is not None:
+            return receipt
+        if attempt + 1 < _RECEIPT_TRIES:
+            time.sleep(_RECEIPT_RETRY_SECONDS)
+    return None
+
+
 def _verify_payment(
     tx_hash: str, pay_to: str, expected_micro: int, from_addr: str
 ) -> None:
     """Verify the tx is a succeeded USDT0 transfer summing EXACTLY to expected_micro
     from from_addr to pay_to (exact-amount, mirroring the checkout matcher so a
     stray/partial transfer can't be farmed). Raises CreationError on any mismatch."""
-    # Pin verification to Tilla's canonical chain (its RPC + asset only) — the same
-    # pinning refunds/checkout use. get_transaction_receipt takes the ChainConfig
-    # FIRST; omitting it silently passed tx_hash as the config and 500'd on every pay.
-    receipt = chain.get_transaction_receipt(
-        payment.CANONICAL_CHAIN, tx_hash, config.RPC_TIMEOUT_REQUEST
-    )
+    receipt = _receipt(tx_hash)
     if receipt is None:
         raise CreationError(400, "transaction not found")
     if str(receipt.get("status", "")).lower() != "0x1":
@@ -118,8 +138,8 @@ def pay_and_create(
 ) -> StoreCreation:
     """Verify the payment and generate the store. pending -> paid (payment verified)
     -> live (store generated). A generation outage AFTER a real payment leaves the
-    record 'paid' with a NULL slug for a no-recharge retry; blocked generated content
-    marks it 'failed'. A reused tx is a 409."""
+    record 'paid' with a NULL slug; blocked generated content marks it 'failed'. Both
+    regenerate through :func:`retry` with no re-charge. A reused tx is a 409."""
     if creation.status == "live" and creation.slug:
         return creation  # idempotent
     tx_hash = (tx_hash or "").strip().lower()
@@ -147,12 +167,30 @@ def pay_and_create(
 
 
 def retry(session: Session, creation: StoreCreation) -> StoreCreation:
-    """Retry generation for a paid-but-ungenerated creation (after a model outage).
-    No payment re-check — the payment was already verified when status became 'paid'
-    — so the merchant is never re-charged."""
-    if creation.status != "paid" or creation.slug:
+    """Retry generation for a paid-but-ungenerated creation — after a model outage
+    ('paid') or after the generated content itself was blocked ('failed'). Both
+    states are reached only THROUGH 'paid', so the tx is already verified and
+    consumed: generation is re-run with no payment re-check and no re-charge."""
+    if creation.status not in ("paid", "failed") or creation.slug:
         raise CreationError(409, "nothing to retry")
     return _generate(creation)
+
+
+def list_open(session: Session, merchant_addr: str) -> list[StoreCreation]:
+    """This merchant's still-actionable creations, newest first — the ones a reload
+    must be able to resume ('pending' = awaiting payment, 'paid' = awaiting
+    generation, 'failed' = awaiting regeneration). Owner-scoped on merchant_addr, so
+    another merchant's rows are never in the result."""
+    return list(
+        session.scalars(
+            select(StoreCreation)
+            .where(
+                StoreCreation.merchant_addr == merchant_addr.lower(),
+                StoreCreation.status.in_(("pending", "paid", "failed")),
+            )
+            .order_by(StoreCreation.created_at.desc(), StoreCreation.id.desc())
+        )
+    )
 
 
 def _generate(creation: StoreCreation) -> StoreCreation:
