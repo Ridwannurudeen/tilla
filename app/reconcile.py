@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import httpx
 from sqlalchemy import select
@@ -38,6 +39,13 @@ from app.db import SessionLocal
 from app.models import Order
 
 logger = logging.getLogger("tilla")
+
+# ``time.monotonic()`` of the last chain scan that completed with NO RPC failure — the
+# reaper's evidence that "no settlement transfer found" is a real answer rather than an
+# RPC blackout. Without it a blind eth_getLogs failure looks exactly like "this order was
+# never paid", which is how the 2026-07-23 reap voided facilitator-accepted orders. Read
+# by ``agentic._reap_tick``; mirrors the ``checkout.LAST_HEAD_MONO`` heartbeat.
+LAST_CHAIN_SCAN_MONO = 0.0
 
 
 def _default_client_factory():
@@ -152,13 +160,10 @@ def _reconcile_chain_pair(session, cfg, from_addr, pay_to, orders, head) -> int:
     settlement tx once (a tx already recorded as a settle_ref on this pair is skipped)
     so a re-scanned transfer can never double-settle a later order. Records the settle
     tx on each finalized order (tx_hash via ``_finalize_settled`` + settle_ref as the
-    consume cursor) and commits the pair atomically. Returns the number finalized;
-    fail-closed (0, left settling) on an RPC error."""
-    try:
-        transfers = _facilitator_transfers(cfg, from_addr, pay_to, head)
-    except (chain.ChainError, httpx.HTTPError, ValueError):
-        logger.warning("reconcile: chain scan failed for %s -> %s", from_addr, pay_to)
-        return 0
+    consume cursor) and commits the pair atomically. Returns the number finalized. An RPC
+    error PROPAGATES so the caller can tell "scanned, found nothing" apart from "could
+    not scan" — the pair is left settling either way (fail-closed)."""
+    transfers = _facilitator_transfers(cfg, from_addr, pay_to, head)
     consumed = set(
         session.scalars(
             select(Order.settle_ref).where(
@@ -196,7 +201,12 @@ def reconcile_chain_tick() -> int:
     and finalize the orders they paid for (batched: one transfer -> the sum of several
     orders). DORMANT unless AGGR_DEFERRED_ENABLED. Bounded to RECONCILE_MAX_PER_TICK
     candidate orders per tick. Returns the number finalized. Fail-closed: any RPC error
-    leaves the affected orders settling for a later tick."""
+    leaves the affected orders settling for a later tick.
+
+    Stamps ``LAST_CHAIN_SCAN_MONO`` only when EVERY candidate pair was scanned without an
+    RPC failure — that stamp is the reaper's licence to treat "no transfer found" as a
+    real answer (see ``agentic._reap_tick``)."""
+    global LAST_CHAIN_SCAN_MONO
     if not config.AGGR_DEFERRED_ENABLED:
         return 0
     cfg = payment.CANONICAL_CHAIN
@@ -214,6 +224,8 @@ def reconcile_chain_tick() -> int:
             .limit(config.RECONCILE_MAX_PER_TICK)
         ).all()
         if not orders:
+            # Nothing to look for: a scan with no candidates is a complete scan.
+            LAST_CHAIN_SCAN_MONO = time.monotonic()
             return 0
         try:
             head = chain.block_number(cfg)
@@ -224,10 +236,19 @@ def reconcile_chain_tick() -> int:
         for o in orders:
             pairs.setdefault((o.from_addr, o.pay_to), []).append(o)
         acted = 0
+        scanned_all = True
         for (from_addr, pay_to), pair_orders in pairs.items():
-            acted += _reconcile_chain_pair(
-                session, cfg, from_addr, pay_to, pair_orders, head
-            )
+            try:
+                acted += _reconcile_chain_pair(
+                    session, cfg, from_addr, pay_to, pair_orders, head
+                )
+            except (chain.ChainError, httpx.HTTPError, ValueError):
+                logger.warning(
+                    "reconcile: chain scan failed for %s -> %s", from_addr, pay_to
+                )
+                scanned_all = False
+        if scanned_all:
+            LAST_CHAIN_SCAN_MONO = time.monotonic()
     return acted
 
 

@@ -9,6 +9,8 @@ default factory is None, and a flag-off deliver leaves attest_status 'none' whil
 order still delivers.
 """
 
+import logging
+import pathlib
 import subprocess
 import sys
 from unittest.mock import MagicMock
@@ -835,3 +837,67 @@ def test_dashboard_theme_renders_attestation_via_textcontent():
     html = (config.THEMES_DIR / "_dashboard.html").read_text(encoding="utf-8")
     assert "o.attestation_uid" in html
     assert "On-chain receipt" in html
+
+
+# ============================================================================
+# Silent-degradation alerting (watchdog-visible)
+# ============================================================================
+def test_idle_ticks_escalate_to_the_watchdog_marker(monkeypatch, caplog):
+    # A CONFIGURED attester whose RPC never answers used to idle at WARNING forever —
+    # seen in the prod journal, alerted on by nothing. After IDLE_ALERT_TICKS the tick
+    # must log IDLE_MARKER at ERROR (scripts/watchdog.sh greps the journal for it) and
+    # keep logging it while the condition holds.
+    monkeypatch.setattr(attest, "_attester_factory", lambda: object())
+    monkeypatch.setattr(
+        attest, "_chain_id", lambda att: (_ for _ in ()).throw(RuntimeError("no rpc"))
+    )
+    with caplog.at_level(logging.ERROR, logger="tilla"):
+        for _ in range(attest.IDLE_ALERT_TICKS - 1):
+            assert attest.attest_tick() == 0
+        assert attest.IDLE_MARKER not in caplog.text  # below the threshold: quiet
+        assert attest.attest_tick() == 0
+        assert attest.IDLE_MARKER in caplog.text
+        caplog.clear()
+        assert attest.attest_tick() == 0
+        assert attest.IDLE_MARKER in caplog.text  # durable, not one-shot
+
+
+def test_dormant_attester_never_alerts(monkeypatch, caplog):
+    # Flag off / no key is the CONFIGURED state, not a degradation.
+    monkeypatch.setattr(attest, "_attester_factory", lambda: None)
+    with caplog.at_level(logging.ERROR, logger="tilla"):
+        for _ in range(attest.IDLE_ALERT_TICKS + 2):
+            assert attest.attest_tick() == 0
+    assert attest.IDLE_MARKER not in caplog.text
+
+
+def test_healthy_tick_clears_the_idle_run(make_store, monkeypatch, caplog):
+    # A recovered attester resets the run, so a later blip starts counting from zero.
+    monkeypatch.setattr(attest, "_attester_factory", lambda: object())
+    monkeypatch.setattr(
+        attest, "_chain_id", lambda att: (_ for _ in ()).throw(RuntimeError("no rpc"))
+    )
+    for _ in range(attest.IDLE_ALERT_TICKS - 1):
+        attest.attest_tick()
+    _wire(monkeypatch)  # RPC back, schema present -> healthy tick
+    attest.attest_tick()
+    monkeypatch.setattr(
+        attest, "_chain_id", lambda att: (_ for _ in ()).throw(RuntimeError("no rpc"))
+    )
+    with caplog.at_level(logging.ERROR, logger="tilla"):
+        attest.attest_tick()
+    assert attest.IDLE_MARKER not in caplog.text
+
+
+def test_sidecar_exposes_a_credless_health_route():
+    # scripts/watchdog.sh probes :8790/health; /health/creds is not a liveness probe
+    # (it round-trips to web3.okx.com and 503s without creds).
+    js = (
+        pathlib.Path(__file__).resolve().parent.parent / "sidecar" / "server.js"
+    ).read_text(encoding="utf-8")
+    assert 'app.get("/health", ' in js
+    wd = (
+        pathlib.Path(__file__).resolve().parent.parent / "scripts" / "watchdog.sh"
+    ).read_text(encoding="utf-8")
+    assert "127.0.0.1:8790/health" in wd
+    assert attest.IDLE_MARKER in wd

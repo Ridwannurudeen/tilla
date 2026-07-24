@@ -682,18 +682,95 @@ def test_reap_tick_skips_when_chain_unreachable(make_store, monkeypatch):
         assert s.get(Order, oid).status == "settling"
 
 
+@respx.mock
 def test_reap_tick_voids_stuck_order_when_chain_reachable(make_store, monkeypatch):
-    # Chain reachable + reconciler finds no facilitator transfer => a genuinely stuck
-    # order (never settled on-chain) is still voided by the reaper as before.
+    # Chain reachable + a COMPLETED scan that finds no facilitator transfer => a
+    # genuinely stuck order (never settled on-chain) is still voided by the reaper,
+    # once it is past the deferred deadline.
     import datetime
 
     monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
     oid = _chain_settling_order(make_store, "reapguard2", price=1_000_000)
     with SessionLocal() as s:
-        s.get(Order, oid).paid_at = checkout._now() - datetime.timedelta(hours=2)
+        s.get(Order, oid).paid_at = (
+            checkout._now()
+            - agentic.DEFERRED_REAP_AFTER
+            - datetime.timedelta(minutes=1)
+        )
         s.commit()
-    monkeypatch.setattr(reconcile, "chain_reachable", lambda: True)
-    monkeypatch.setattr(reconcile, "reconcile_chain_tick", lambda: 0)
+    _ChainRpc(head=1000).install()  # head answers, no transfer in the window
     agentic._reap_tick()
     with SessionLocal() as s:
         assert s.get(Order, oid).status == "canceled"
+
+
+@respx.mock
+def test_reaper_holds_deferred_order_whose_transfer_lands_late(make_store, monkeypatch):
+    # THE PROD DEFECT (six orders voided 2026-07-23): the live OKX /settle returns no tx
+    # ref, so EVERY deferred order sits 'settling' with settle_ref NULL until the
+    # facilitator relayer's transfer appears on chain. The 15-min reaper voided them
+    # mid-flight. An order past the OLD deadline must SURVIVE and then be finalized by
+    # the reconcile path when the transfer finally lands — never voided.
+    import datetime
+
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "reaplate", price=1_000_000)
+    with SessionLocal() as s:
+        s.get(Order, oid).paid_at = (
+            checkout._now() - agentic.REAP_AFTER - datetime.timedelta(minutes=1)
+        )
+        s.commit()
+    rpc = _ChainRpc(head=1000)
+    rpc.install()
+    # Tick 1: the relayer has not paid yet. Nothing on chain, order past the OLD 15-min
+    # deadline — it must still be settling.
+    agentic._reap_tick()
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"
+    # Tick 2: the relayer's transfer lands — reconcile finalizes the very same order.
+    tx = "0x" + "7" * 64
+    rpc.logs = [_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, 900, tx)]
+    rpc.receipts = {tx: _receipt(RELAYER)}
+    agentic._reap_tick()
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash == tx
+    assert "agent_order.reaped" not in _events(oid)
+
+
+@respx.mock
+def test_reap_tick_holds_deferred_order_when_the_log_scan_fails(
+    make_store, monkeypatch
+):
+    # chain_reachable() only proves eth_blockNumber answers. When the eth_getLogs scan
+    # itself fails, "no settlement transfer found" is not an answer — a paid-but-slow
+    # order must be held, not voided.
+    import datetime
+
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    oid = _chain_settling_order(make_store, "reapblind", price=1_000_000)
+    with SessionLocal() as s:
+        s.get(Order, oid).paid_at = (
+            checkout._now() - agentic.DEFERRED_REAP_AFTER - datetime.timedelta(hours=1)
+        )
+        s.commit()
+    rpc = _ChainRpc(head=1000)
+
+    def blind(request):
+        body = json.loads(request.content)
+        if body["method"] == "eth_getLogs":
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "error": {"code": -32000, "message": "query returned no results"},
+                },
+            )
+        return rpc.handler(request)
+
+    respx.post(config.RPC_URL).mock(side_effect=blind)
+    agentic._reap_tick()
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "settling"

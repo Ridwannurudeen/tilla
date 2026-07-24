@@ -499,3 +499,34 @@ def test_close_does_not_lower_spent_below_vouchers(make_store, monkeypatch):
 
 def test_ready_false_by_default():
     assert mpp.mpp_ready() is False  # flags off in the test env -> dormant
+
+
+# ===================================================== real-SDK contract
+# MPP is LIVE in prod and _OKXGateway rides the SDK's PRIVATE _do_post plus
+# session_status. MockGateway above stands in for _OKXGateway, so it can never
+# catch the SDK renaming or re-signing either method — a pip upgrade would 500
+# every channel op while the suite stayed green. This test pins the real
+# signatures. It skips where the SDK is absent (dev boxes: it is imported lazily
+# and is not a test dependency) and runs wherever MPP can actually be served.
+def test_okx_sa_client_signatures_match_the_gateway_calls():
+    saclient = pytest.importorskip(
+        "mpp_evm.saclient", reason="okxweb3-app-mpp not installed (lazy runtime dep)"
+    )
+    import inspect
+
+    client_cls = saclient.OKXSAClient
+    # _OKXGateway.open/top_up/close: self._client._do_post(path, sa_request)
+    assert list(inspect.signature(client_cls._do_post).parameters) == [
+        "self",
+        "path",
+        "payload",
+    ]
+    # _OKXGateway.status: self._client.session_status(channel_id).model_dump(...)
+    assert list(inspect.signature(client_cls.session_status).parameters) == [
+        "self",
+        "channel_id",
+    ]
+    status_model = inspect.signature(client_cls.session_status).return_annotation
+    if isinstance(status_model, str):  # from __future__ annotations in the SDK
+        status_model = getattr(saclient, status_model)
+    assert hasattr(status_model, "model_dump")
