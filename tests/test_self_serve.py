@@ -5,15 +5,13 @@ All chain access is mocked (no network, no funds); screening and generation are
 stubbed so the flow itself is what's under test, not the LLM.
 """
 
-import types
-
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app import chain, config, engine, screening
+from app import chain, config, engine, payment, screening
 from app.screening import ScreeningBlocked
 
 client = TestClient(main.app)
@@ -45,15 +43,37 @@ def _merchant_token(acct) -> str:
 
 
 def _allow_screen(monkeypatch):
+    # Return the REAL ScanOutcome the screener produces ('allow' | 'pending'). A
+    # SimpleNamespace with an invented status lets a wrong comparison in create_intent
+    # pass here while 422-ing every real description.
     monkeypatch.setattr(
-        screening, "screen", lambda *_a, **_k: types.SimpleNamespace(status="live")
+        screening, "screen", lambda *_a, **_k: screening.ScanOutcome("allow", None)
     )
 
 
-def _stub_create_store(monkeypatch, slug="cool-beans", status="live"):
-    monkeypatch.setattr(
-        engine, "create_store", lambda *_a, **_k: {"slug": slug, "status": status}
-    )
+def _stub_create_store(monkeypatch, slug="cool-beans", pending=False):
+    # Mirror engine.create_store's REAL return shape and signature: the success dict
+    # carries NO 'status' key; only the screening-queued path sets 'pending_screening'.
+    # A stub inventing status='live' hid _generate marking every success as 'failed'.
+    def _fake(desc, addr=None, delivery=None, theme=None):
+        if pending:
+            return {
+                "slug": slug,
+                "status": "pending_screening",
+                "store_name": "Cool Beans",
+                "manage_key": "k",
+                "message": "queued",
+            }
+        return {
+            "slug": slug,
+            "store_name": "Cool Beans",
+            "url": f"https://tilla.gudman.xyz/s/{slug}/",
+            "product_name": "Beans",
+            "price_usdt": 5,
+            "manage_key": "k",
+        }
+
+    monkeypatch.setattr(engine, "create_store", _fake)
 
 
 def _pad(addr: str) -> str:
@@ -77,7 +97,16 @@ def _receipt(from_addr, to_addr, value, status="0x1"):
 
 
 def _mock_tx(monkeypatch, receipt):
-    monkeypatch.setattr(chain, "get_transaction_receipt", lambda *_a, **_k: receipt)
+    # Bind the REAL signature (cfg, tx_hash, timeout=None). A permissive *args stub
+    # accepts any call, which is how a receipt lookup missing its ChainConfig shipped
+    # and 500'd every payment; this way a wrong call raises TypeError here instead.
+    def _fake(cfg, tx_hash, timeout=None):
+        assert cfg is payment.CANONICAL_CHAIN, (
+            "verification must pin the canonical chain"
+        )
+        return receipt
+
+    monkeypatch.setattr(chain, "get_transaction_receipt", _fake)
 
 
 def _intent(token, description="single-origin coffee beans", theme=None):

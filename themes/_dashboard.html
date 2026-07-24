@@ -71,6 +71,20 @@
   .mark i:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
   .mark i:nth-child(4){ background:color-mix(in srgb,var(--text) 64%,transparent); }
   .head-right{ flex:none; }
+  /* header collapses into a hamburger dropdown below 1100px (see media query) */
+  .nav-toggle{ display:none; flex:none; width:38px; height:38px; padding:0;
+    background:transparent; border:1px solid var(--hairline); border-radius:4px; cursor:pointer;
+    align-items:center; justify-content:center; }
+  .nav-toggle:hover{ border-color:var(--text); }
+  .nav-toggle .nt-bars{ position:relative; width:18px; height:12px; }
+  .nav-toggle .nt-bars span{ position:absolute; left:0; width:18px; height:2px; border-radius:2px;
+    background:var(--text); transition:transform .18s ease, opacity .18s ease, top .18s ease; }
+  .nav-toggle .nt-bars span:nth-child(1){ top:0; }
+  .nav-toggle .nt-bars span:nth-child(2){ top:5px; }
+  .nav-toggle .nt-bars span:nth-child(3){ top:10px; }
+  header.nav-open .nt-bars span:nth-child(1){ top:5px; transform:rotate(45deg); }
+  header.nav-open .nt-bars span:nth-child(2){ opacity:0; }
+  header.nav-open .nt-bars span:nth-child(3){ top:5px; transform:rotate(-45deg); }
   .navlink{ padding:14px 4px; text-decoration:none;
     font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 70%,transparent); white-space:nowrap;
@@ -261,13 +275,33 @@
     *{ transition:none !important; animation:none !important; }
   }
 
+  @media (max-width:1100px){
+    .nav-toggle{ display:inline-flex; }
+    .head-right{
+      position:fixed; top:56px; left:0; right:0; z-index:4;
+      flex-direction:column; align-items:stretch; justify-content:flex-start; gap:0;
+      padding:8px 20px 16px;
+      background:var(--bg);
+      border-bottom:1px solid var(--hairline);
+      box-shadow:0 16px 34px rgba(0,0,0,.34);
+      opacity:0; visibility:hidden; transform:translateY(-8px);
+      transition:opacity .18s ease, transform .18s ease, visibility .18s;
+    }
+    header.nav-open .head-right{ opacity:1; visibility:visible; transform:none; }
+    .head-right .navlink{ padding:13px 2px; font-size:12px; letter-spacing:.08em;
+      border-top:1px solid var(--hairline); }
+    .head-right .navlink:first-of-type{ border-top:0; }
+    .head-right .theme-toggle{ align-self:flex-start; margin:10px 0 4px; }
+    .head-right .chip.chain{ align-self:flex-start; margin:4px 0; }
+    #whoami{ align-self:flex-start; max-width:none; margin:4px 0; }
+    #signBtn, #signOut{ width:100%; margin-top:8px; }
+  }
   @media (max-width:760px){
     .cols{ grid-template-columns:1fr; }
   }
   @media (max-width:640px){
-    .chip.chain{ display:none; }
-    .navlink{ display:none; }
-    #whoami{ max-width:9ch; }
+    #mainTabs, #storeTabs{ flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    #mainTabs button, #storeTabs button{ white-space:nowrap; flex:none; }
   }
   /* store console — tabbed tool navigation */
   .store-tabs{ display:flex; flex-wrap:wrap; gap:2px; margin:16px 0 22px;
@@ -305,7 +339,10 @@
     <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     <h1>Tilla · Merchant</h1>
   </a>
-  <div class="row head-right">
+  <button class="nav-toggle" id="navToggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="headMenu">
+    <span class="nt-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+  </button>
+  <div class="row head-right" id="headMenu">
     <button class="theme-toggle mono" id="themeToggle" type="button" aria-label="Switch light or dark theme" title="Switch theme">◐</button>
     <a class="navlink mono" href="/">Home</a>
     <a class="navlink mono" href="/marketplace.html">Marketplace</a>
@@ -691,6 +728,10 @@
     opts = opts || {};
     opts.headers = Object.assign({}, opts.headers || {}, auth());
     var r = await fetch(path, opts);
+    // Every call from this console is merchant-authenticated (/api/merchant/*, or the
+    // /api/stores/* growth routes which accept the owning merchant), so a 401 can only
+    // mean the session itself is over. Never point this helper at a buyer-session route:
+    // its 401 would be permanent and would sign the merchant out on every load.
     if (r.status === 401) { signOut(); throw new Error("Session expired — sign in again."); }
     var body = null;
     try { body = await r.json(); } catch (e) {}
@@ -807,52 +848,89 @@
     });
   }
 
-  // ---- referrals (this wallet's OWN rev-share earnings; the API only ever returns
-  //      the signed-in earner's balance — every string rendered via textContent) ----
+  // ---- referrals (the merchant's OWN affiliate ledger: who referred sales to their
+  //      stores and what is still owed. Merchant-authenticated, so it rides the same
+  //      dashboard session; every string rendered via textContent) ----
   async function loadReferrals() {
     var box = byId("referrals");
     var data;
-    try { data = await api("/api/affiliate/summary"); }
-    catch (e) { clear(box); box.appendChild(el("div", "muted small", "Could not load referral earnings.")); return; }
-    clear(box);
-    if (!data.stores || !data.stores.length) {
-      box.appendChild(el("div", "card muted sentence", "No referral earnings yet — share a store link with ?ref=<your wallet> to start."));
+    try { data = await api("/api/merchant/affiliates"); }
+    catch (e) {
+      clear(box);
+      box.appendChild(el("div", "card muted sentence", "Could not load referrals — " + e.message));
       return;
     }
+    function txCell(url) {
+      var td = el("td");
+      // server-built OKLink URL (never merchant input) — same pattern as the order tx links
+      if (url) { var a = el("a", "mono", "View"); a.href = url; a.rel = "noopener"; a.target = "_blank"; td.appendChild(a); }
+      else { td.appendChild(el("span", "muted", "—")); }
+      return td;
+    }
+    clear(box);
+    var referrers = data.referrers || [], orders = data.orders || [];
     var c = el("div", "card");
-    c.appendChild(el("p", "muted small", "Earnings from sales made through your referral links — share any store's link with ?ref=<your wallet> to earn a share."));
+    c.appendChild(el("p", "muted small", "Agents earn a share by sending buyers to your stores with ?ref=<their wallet>. Accrued is what you still owe them; paid out is what you have already sent."));
     var g = el("div", "grid");
     function stat(k, v) { var s = el("div", "stat"); s.appendChild(el("div", "k", k)); s.appendChild(el("div", "v", v)); g.appendChild(s); }
-    stat("Accrued (USDT0)", data.totals.accrued_usdt);
-    stat("Paid out (USDT0)", data.totals.paid_usdt);
-    stat("Void (USDT0)", data.totals.void_usdt);
+    stat("Owed now (USDT0)", data.owed_usdt);
+    stat("Referrers", String(referrers.length));
+    stat("Referred orders", String(orders.length));
     c.appendChild(g);
+    if (!referrers.length) {
+      c.appendChild(el("p", "muted sentence", "No referred sales yet — an agent earns a share by sharing your store link with ?ref=<their wallet>."));
+      box.appendChild(c);
+      return;
+    }
     var t = el("table"), thead = el("thead"), tr = el("tr");
-    ["Store", "Orders", "Accrued", "Paid out", "Void"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
+    ["Referrer", "Accrued", "Paid out", "Void"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
     thead.appendChild(tr); t.appendChild(thead);
     var tb = el("tbody");
-    data.stores.forEach(function (st) {
+    referrers.forEach(function (r) {
       var row = el("tr");
-      var std = el("td");
-      if (st.store_slug) {
-        // st.store_slug is server-validated to the slug pattern — safe in a path segment
-        var a = el("a", "mono", st.store_slug); a.href = "/s/" + st.store_slug + "/"; std.appendChild(a);
-      } else {
-        std.appendChild(el("span", "muted", "—"));
-      }
-      row.appendChild(std);
-      row.appendChild(el("td", null, String(st.orders)));
-      row.appendChild(el("td", null, st.accrued_usdt));
-      row.appendChild(el("td", null, st.paid_usdt));
-      row.appendChild(el("td", null, st.void_usdt));
+      row.appendChild(el("td", "mono", r.referrer));
+      row.appendChild(el("td", null, r.accrued_usdt));
+      row.appendChild(el("td", null, r.paid_usdt));
+      row.appendChild(el("td", null, r.void_usdt));
       tb.appendChild(row);
     });
     t.appendChild(tb);
     var wrap = el("div", "scroll"); wrap.style.marginTop = "10px";
-    wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Referral earnings by store");
+    wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Referral totals by referrer");
     wrap.appendChild(t);
     c.appendChild(wrap);
     box.appendChild(c);
+    if (!orders.length) return;
+    var oc = el("div", "card");
+    oc.appendChild(el("p", "muted small", "Referred orders — the sale tx, plus the payout tx once you have paid that referrer."));
+    var ot = el("table"), othead = el("thead"), otr = el("tr");
+    ["Order", "Store", "Referrer", "Status", "Share", "Sale tx", "Payout tx"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; otr.appendChild(th); });
+    othead.appendChild(otr); ot.appendChild(othead);
+    var otb = el("tbody");
+    orders.forEach(function (o) {
+      var row = el("tr");
+      row.appendChild(el("td", "mono", o.order_id));
+      var sd = el("td");
+      if (o.store_slug) {
+        // o.store_slug is server-validated to the slug pattern — safe in a path segment
+        var sa = el("a", "mono", o.store_slug); sa.href = "/s/" + o.store_slug + "/"; sd.appendChild(sa);
+      } else {
+        sd.appendChild(el("span", "muted", "—"));
+      }
+      row.appendChild(sd);
+      row.appendChild(el("td", "mono", o.referrer));
+      row.appendChild(el("td", null, o.status));
+      row.appendChild(el("td", null, money((o.accrued_micro || 0) / 1e6)));
+      row.appendChild(txCell(o.sale_tx_url));
+      row.appendChild(txCell(o.payout_tx_url));
+      otb.appendChild(row);
+    });
+    ot.appendChild(otb);
+    var owrap = el("div", "scroll"); owrap.style.marginTop = "10px";
+    owrap.tabIndex = 0; owrap.setAttribute("aria-label", "Referred orders");
+    owrap.appendChild(ot);
+    oc.appendChild(owrap);
+    box.appendChild(oc);
   }
 
   // ---- summary ----
@@ -1102,20 +1180,53 @@
       return b.getAttribute("data-tab");
     });
     function select(id) {
-      Array.prototype.forEach.call(nav.querySelectorAll("button"), function (b) {
-        b.classList.toggle("active", b.getAttribute("data-tab") === id);
+      Array.prototype.forEach.call(nav.querySelectorAll("button[data-tab]"), function (b) {
+        var on = b.getAttribute("data-tab") === id;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.tabIndex = on ? 0 : -1;
       });
       ids.forEach(function (pid) {
         var p = byId(pid); if (p) p.classList.toggle("active", pid === id);
       });
     }
+    Array.prototype.forEach.call(nav.querySelectorAll("button[data-tab]"), function (b) {
+      var on = b.classList.contains("active");
+      b.setAttribute("aria-selected", on ? "true" : "false");
+      b.setAttribute("aria-controls", b.getAttribute("data-tab"));
+      b.tabIndex = on ? 0 : -1;
+    });
     nav.addEventListener("click", function (e) {
       var b = e.target.closest("button[data-tab]"); if (b) select(b.getAttribute("data-tab"));
+    });
+    nav.addEventListener("keydown", function (e) {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      var btns = Array.prototype.slice.call(nav.querySelectorAll("button[data-tab]"));
+      var cur = btns.indexOf(document.activeElement);
+      if (cur < 0) return;
+      var n = e.key === "ArrowRight" ? (cur + 1) % btns.length : (cur - 1 + btns.length) % btns.length;
+      select(btns[n].getAttribute("data-tab")); btns[n].focus(); e.preventDefault();
     });
     return select;
   }
   var selectStoreTab = initTabs("storeTabs");
   initTabs("mainTabs");
+
+  // ---- responsive header: hamburger dropdown below 1100px ----
+  (function () {
+    var header = document.querySelector("header");
+    var btn = byId("navToggle");
+    if (!header || !btn) return;
+    function setOpen(o) { header.classList.toggle("nav-open", o); btn.setAttribute("aria-expanded", o ? "true" : "false"); }
+    btn.addEventListener("click", function (e) { e.stopPropagation(); setOpen(!header.classList.contains("nav-open")); });
+    document.addEventListener("click", function (e) { if (header.classList.contains("nav-open") && !header.contains(e.target)) setOpen(false); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape" && header.classList.contains("nav-open")) { setOpen(false); btn.focus(); } });
+    var links = header.querySelectorAll(".head-right a");
+    for (var i = 0; i < links.length; i++) links[i].addEventListener("click", function () { setOpen(false); });
+    var mq = window.matchMedia("(min-width:1101px)");
+    var onMq = function () { if (mq.matches) setOpen(false); };
+    if (mq.addEventListener) mq.addEventListener("change", onMq); else mq.addListener(onMq);
+  })();
 
   // ---- one store's orders ----
   async function openStore(slug) {

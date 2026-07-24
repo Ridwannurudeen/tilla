@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config, engine, screening
+from app import chain, config, engine, payment, screening
 from app.models import StoreCreation
 from app.payment import PAYMENT_AMOUNT, load_payment_rail
 
@@ -52,8 +52,10 @@ def create_intent(
         outcome = screening.screen(description)
     except screening.ScreeningBlocked as exc:
         raise CreationError(422, "content did not pass safety screening") from exc
-    if outcome.status != "live":
-        # Flagged or screening-unavailable — never take a payment we can't clear.
+    if outcome.status != "allow":
+        # 'pending' = flagged or screening-unavailable — never take a payment we can't
+        # clear. NB: this is the screening verdict ('allow' | 'pending'), not the
+        # StoreCreation row status ('pending' | 'live') used further down.
         raise CreationError(422, "content did not pass safety screening")
     creation = StoreCreation(
         merchant_addr=merchant_addr.lower(),
@@ -85,7 +87,12 @@ def _verify_payment(
     """Verify the tx is a succeeded USDT0 transfer summing EXACTLY to expected_micro
     from from_addr to pay_to (exact-amount, mirroring the checkout matcher so a
     stray/partial transfer can't be farmed). Raises CreationError on any mismatch."""
-    receipt = chain.get_transaction_receipt(tx_hash, config.RPC_TIMEOUT_REQUEST)
+    # Pin verification to Tilla's canonical chain (its RPC + asset only) — the same
+    # pinning refunds/checkout use. get_transaction_receipt takes the ChainConfig
+    # FIRST; omitting it silently passed tx_hash as the config and 500'd on every pay.
+    receipt = chain.get_transaction_receipt(
+        payment.CANONICAL_CHAIN, tx_hash, config.RPC_TIMEOUT_REQUEST
+    )
     if receipt is None:
         raise CreationError(400, "transaction not found")
     if str(receipt.get("status", "")).lower() != "0x1":
@@ -161,7 +168,10 @@ def _generate(creation: StoreCreation) -> StoreCreation:
         )
     except engine.GenerationUnavailable:
         return creation  # stays 'paid' — retry when the model is back, no recharge
-    if result.get("status") == "live" and result.get("slug"):
+    # create_store returns NO 'status' key on success — only the screening-queued path
+    # sets status='pending_screening'. Comparing against "live" (a value it never
+    # returns) marked every SUCCESSFUL generation as 'failed', burning a real payment.
+    if result.get("slug") and result.get("status") != "pending_screening":
         creation.slug = result["slug"]
         creation.status = "live"
     else:

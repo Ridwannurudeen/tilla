@@ -10,6 +10,7 @@
   </div>
 </div>
 <div class="checkout" id="co">
+  <div class="row" id="coItemRow" style="display:none"><span>Item</span><b id="coItem">…</b></div>
   <div class="row"><span>Amount</span><b id="coAmount">…</b></div>
   <div class="row"><span>Network</span><b>{{ CHAIN_NAME }} (chainId {{ CHAIN_ID }})</b></div>
   <div class="co-netwarn">⚠️ Pay on <b>{{ CHAIN_NAME }}</b> only. Sending funds on any other network will <b>NOT</b> be detected and may be lost — Tilla only watches {{ CHAIN_NAME }} (chainId {{ CHAIN_ID }}) for this order.</div>
@@ -296,18 +297,35 @@
     var list = providers.slice();
     if (list.length <= 1) return list.length ? list[0].provider : (window.ethereum || null);
     return await new Promise(function (resolve) {
+      var overlay = byId("walletPicker");
       var wrap = byId("wpList"); wrap.textContent = "";
+      var prevFocus = document.activeElement;
+      var firstBtn = null;
+      function done(val) { document.removeEventListener("keydown", onKey); closeWalletPicker(); if (prevFocus && prevFocus.focus) prevFocus.focus(); resolve(val); }
+      function onKey(e) {
+        if (e.key === "Escape") { done(null); return; }
+        if (e.key === "Tab") {
+          var f = overlay.querySelectorAll("button");
+          if (!f.length) return;
+          var first = f[0], last = f[f.length - 1];
+          if (e.shiftKey && document.activeElement === first) { last.focus(); e.preventDefault(); }
+          else if (!e.shiftKey && document.activeElement === last) { first.focus(); e.preventDefault(); }
+        }
+      }
       list.forEach(function (p) {
         var btn = document.createElement("button");
         btn.type = "button"; btn.className = "wp-wallet";
         if (p.info && p.info.icon) { var img = document.createElement("img"); img.src = p.info.icon; img.alt = ""; btn.appendChild(img); }
         var span = document.createElement("span"); span.textContent = (p.info && p.info.name) || "Wallet";
         btn.appendChild(span);
-        btn.onclick = function () { closeWalletPicker(); resolve(p.provider); };
+        btn.onclick = function () { done(p.provider); };
         wrap.appendChild(btn);
+        if (!firstBtn) firstBtn = btn;
       });
-      byId("wpCancel").onclick = function () { closeWalletPicker(); resolve(null); };
-      byId("walletPicker").classList.remove("hide");
+      byId("wpCancel").onclick = function () { done(null); };
+      document.addEventListener("keydown", onKey);
+      overlay.classList.remove("hide");
+      if (firstBtn) firstBtn.focus();
     });
   }
   function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
@@ -440,6 +458,11 @@
     byId("coPrintBtn").style.display = "none";
     byId("payWalletBtn").style.display = "none";
     byId("coManual").style.display = "";
+    // Reset per-order fields so a new checkout never shows a previous order's values.
+    byId("coItemRow").style.display = "none"; byId("coItem").textContent = "…";
+    byId("coEtaRow").style.display = "none"; byId("coEta").textContent = "…";
+    byId("coAmount").textContent = "…";
+    byId("coCountdown").textContent = "";
     clearOptions();
     setStatus("Waiting for payment — verified automatically on-chain…");
     // Subscription products settle on the x402 period rail (Permit2 + terms),
@@ -475,6 +498,10 @@
     CO.expiresAt = Date.parse(d.expires_at);
     byId("coAmount").textContent = CO.amountStr + " USDT0";
     byId("coAddr").textContent = CO.payTo;
+    if (CO.productName) {
+      byId("coItem").textContent = CO.productName;
+      byId("coItemRow").style.display = "";
+    }
     if (d.sla_minutes) {
       byId("coEta").textContent = "within " + d.sla_minutes + " min of payment";
       byId("coEtaRow").style.display = "";
