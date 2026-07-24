@@ -52,8 +52,10 @@ def create_intent(
         outcome = screening.screen(description)
     except screening.ScreeningBlocked as exc:
         raise CreationError(422, "content did not pass safety screening") from exc
-    if outcome.status != "live":
-        # Flagged or screening-unavailable — never take a payment we can't clear.
+    if outcome.status != "allow":
+        # 'pending' = flagged or screening-unavailable — never take a payment we can't
+        # clear. NB: this is the screening verdict ('allow' | 'pending'), not the
+        # StoreCreation row status ('pending' | 'live') used further down.
         raise CreationError(422, "content did not pass safety screening")
     creation = StoreCreation(
         merchant_addr=merchant_addr.lower(),

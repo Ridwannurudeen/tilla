@@ -5,8 +5,6 @@ All chain access is mocked (no network, no funds); screening and generation are
 stubbed so the flow itself is what's under test, not the LLM.
 """
 
-import types
-
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
@@ -45,8 +43,11 @@ def _merchant_token(acct) -> str:
 
 
 def _allow_screen(monkeypatch):
+    # Return the REAL ScanOutcome the screener produces ('allow' | 'pending'). A
+    # SimpleNamespace with an invented status lets a wrong comparison in create_intent
+    # pass here while 422-ing every real description.
     monkeypatch.setattr(
-        screening, "screen", lambda *_a, **_k: types.SimpleNamespace(status="live")
+        screening, "screen", lambda *_a, **_k: screening.ScanOutcome("allow", None)
     )
 
 
