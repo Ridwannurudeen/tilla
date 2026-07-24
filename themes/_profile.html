@@ -4,6 +4,10 @@
 <meta charset="utf-8" />
 <link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'><rect%20width='32'%20height='32'%20rx='7'%20fill='%230B0B12'/><rect%20x='5'%20y='5'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='13'%20y='5'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='21'%20y='13'%20width='7'%20height='7'%20fill='%23BCFF2F'/><rect%20x='5'%20y='21'%20width='7'%20height='7'%20fill='%23F5F5FA'/><rect%20x='13'%20y='13'%20width='7'%20height='7'%20fill='%236C5CE7'/></svg>">
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0B0B12" />
+<script>
+(function(){try{var k="tilla-theme",s=localStorage.getItem(k),m=window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches,t=(s==="light"||s==="dark")?s:(m?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();
+</script>
 <title>{{ ADDRESS_SHORT }} · Stores on Tilla</title>
 <meta name="description" content="{{ STORE_COUNT }} live storefronts on Tilla, paid in USDT0 on X Layer." />
 <link rel="canonical" href="{{ BASE_URL }}/m/{{ ADDRESS }}" />
@@ -16,7 +20,20 @@
   :root{
     --bg:#0B0B12; --surface:#15151d; --pressed:#1f1f29;
     --hairline:#2b2b31; --text:#F5F5FA; --muted:#9a9aa6;
-    --xlayer:#BCFF2F; --on-xlayer:#000; --accent:#6C5CE7;
+    --xlayer:#BCFF2F; --on-xlayer:#000; --accent:#6C5CE7; --go:var(--xlayer);
+    color-scheme:dark;
+  }
+  :root[data-theme="light"]{
+    --bg:#F4F2EC; --surface:#FBFAF7; --pressed:#EAE7DE;
+    --hairline:#D8D4C8; --text:#191922; --muted:#5B5B67; --go:#4a3cc0;
+    color-scheme:light;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#F4F2EC; --surface:#FBFAF7; --pressed:#EAE7DE;
+      --hairline:#D8D4C8; --text:#191922; --muted:#5B5B67; --go:#4a3cc0;
+      color-scheme:light;
+    }
   }
   *{ box-sizing:border-box; }
   body{
@@ -58,7 +75,7 @@
   .store .desc{ margin-top:6px; font-size:14px; color:var(--muted); }
   .store .go{ margin-top:14px; display:inline-flex; align-items:center; gap:6px;
     font-size:11px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
-    color:var(--xlayer); }
+    color:var(--go); }
   .slug{ margin-top:10px; font-size:11px; color:color-mix(in srgb,var(--text) 46%,transparent); }
 
   footer{ margin-top:48px; padding-top:22px; border-top:1px solid var(--hairline);
