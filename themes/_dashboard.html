@@ -269,6 +269,18 @@
     .navlink{ display:none; }
     #whoami{ max-width:9ch; }
   }
+  /* store console — tabbed tool navigation */
+  .store-tabs{ display:flex; flex-wrap:wrap; gap:2px; margin:16px 0 22px;
+    border-bottom:1px solid var(--hairline); }
+  .store-tabs button{ appearance:none; background:transparent; border:0;
+    border-bottom:2px solid transparent; color:var(--muted); cursor:pointer;
+    padding:9px 14px; font:inherit; font-size:11px; letter-spacing:.06em; text-transform:uppercase;
+    transition:color .15s ease, border-color .15s ease; margin-bottom:-1px; }
+  .store-tabs button:hover{ color:var(--text); }
+  .store-tabs button.active{ color:var(--text); border-bottom-color:var(--text); }
+  .store-tabs button:focus-visible{ outline:2px solid var(--text); outline-offset:2px; }
+  .store-tab{ display:none; }
+  .store-tab.active{ display:block; }
 </style>
 </head>
 <body>
@@ -389,24 +401,19 @@
     <button id="backToMain" class="ghost">&larr; Back</button>
     <h2 id="storeTitle" class="sec-h" tabindex="-1"></h2>
 
-    <h3 class="sec-h">Store copy</h3>
-    <div id="copyMsg" class="small hide" aria-live="polite"></div>
-    <div class="card">
-      <div class="row head">
-        <strong>Plain-language copy</strong>
-        <span class="muted mono">screened before it goes live</span>
-      </div>
-      <p class="muted small">Re-word the tagline and one-liner shown on your storefront. Saving re-renders the page — your products, prices, and theme are untouched.</p>
-      <label for="scTagline">Tagline</label>
-      <input id="scTagline" maxlength="120" placeholder="A short line under your store name" />
-      <label for="scOneLiner">One-liner</label>
-      <textarea id="scOneLiner" maxlength="280" placeholder="One sentence describing what you sell"></textarea>
-      <div class="row" style="margin-top:12px">
-        <button id="scSave" class="primary">Save copy</button>
-      </div>
-    </div>
+    <nav class="store-tabs mono" id="storeTabs" role="tablist" aria-label="Store tools">
+      <button type="button" role="tab" data-tab="tab-products" class="active">Products &amp; pricing</button>
+      <button type="button" role="tab" data-tab="tab-deliverables">Deliverables</button>
+      <button type="button" role="tab" data-tab="tab-domain">Custom domain</button>
+      <button type="button" role="tab" data-tab="tab-growth">Growth</button>
+      <button type="button" role="tab" data-tab="tab-subscribers">Subscribers</button>
+      <button type="button" role="tab" data-tab="tab-agent">Agent view</button>
+      <button type="button" role="tab" data-tab="tab-copy">Store copy</button>
+      <button type="button" role="tab" data-tab="tab-orders">Orders</button>
+    </nav>
 
-    <h3 class="sec-h">Products</h3>
+    <div class="store-tab active" id="tab-products" role="tabpanel">
+    <h3 class="sec-h">Products &amp; pricing</h3>
     <div id="productMsg" class="small hide" aria-live="polite"></div>
     <div id="products"></div>
     <div class="card">
@@ -426,7 +433,9 @@
         <button id="pAdd" class="primary">Add product</button>
       </div>
     </div>
+    </div>
 
+    <div class="store-tab" id="tab-deliverables" role="tabpanel">
     <h3 class="sec-h">Deliverables</h3>
     <div id="delivMsg" class="small hide" aria-live="polite"></div>
     <div id="deliverables"></div>
@@ -463,28 +472,58 @@
       <p class="muted small">Replacing a deliverable only changes the chosen scope for new orders —
          buyers who already paid keep the version they bought.</p>
     </div>
+    </div>
 
+    <div class="store-tab" id="tab-domain" role="tabpanel">
     <h3 class="sec-h">Custom domain</h3>
     <p class="small muted">Serve this store on your own domain. Claim it, publish one DNS TXT record, then verify — Tilla serves nothing on the domain until it's verified.</p>
     <div id="domainMsg" class="small hide" aria-live="polite"></div>
     <div id="customDomain" class="card"></div>
+    </div>
 
-    <h3 class="sec-h">Agent's-eye view</h3>
-    <p class="small muted">Exactly what a buyer-agent sees: your machine endpoints, the feed it reads (with delivery ETA), the tools it can call, and how you rank in agent discovery.</p>
-    <div id="agentView" class="card"></div>
-
+    <div class="store-tab" id="tab-growth" role="tabpanel">
     <h3 class="sec-h">Growth</h3>
     <p class="small muted">Generate screened launch copy, approve what you like, then mark each post published as you post it yourself — Tilla drafts, but never posts on your behalf.</p>
     <div id="growthMsg" class="small hide" aria-live="polite"></div>
     <div id="growth" class="card"></div>
+    </div>
 
+    <div class="store-tab" id="tab-subscribers" role="tabpanel">
     <h3 class="sec-h">Subscribers</h3>
     <p class="small muted">Emails captured by this store's waitlist — visible only here, behind your login, never in feeds or logs.</p>
     <div id="subsMsg" class="small hide" aria-live="polite"></div>
     <div id="subscribers" class="card"></div>
+    </div>
 
+    <div class="store-tab" id="tab-agent" role="tabpanel">
+    <h3 class="sec-h">Agent's-eye view</h3>
+    <p class="small muted">Exactly what a buyer-agent sees: your machine endpoints, the feed it reads (with delivery ETA), the tools it can call, and how you rank in agent discovery.</p>
+    <div id="agentView" class="card"></div>
+    </div>
+
+    <div class="store-tab" id="tab-copy" role="tabpanel">
+    <h3 class="sec-h">Store copy</h3>
+    <div id="copyMsg" class="small hide" aria-live="polite"></div>
+    <div class="card">
+      <div class="row head">
+        <strong>Plain-language copy</strong>
+        <span class="muted mono">screened before it goes live</span>
+      </div>
+      <p class="muted small">Re-word the tagline and one-liner shown on your storefront. Saving re-renders the page — your products, prices, and theme are untouched.</p>
+      <label for="scTagline">Tagline</label>
+      <input id="scTagline" maxlength="120" placeholder="A short line under your store name" />
+      <label for="scOneLiner">One-liner</label>
+      <textarea id="scOneLiner" maxlength="280" placeholder="One sentence describing what you sell"></textarea>
+      <div class="row" style="margin-top:12px">
+        <button id="scSave" class="primary">Save copy</button>
+      </div>
+    </div>
+    </div>
+
+    <div class="store-tab" id="tab-orders" role="tabpanel">
     <h3 class="sec-h">Orders</h3>
     <div id="storeOrders" class="card scroll" tabindex="0" aria-label="Orders"></div>
+    </div>
   </div>
 
   <!-- one order -->
@@ -968,9 +1007,28 @@
     csShow(3);
   }
 
+  // ---- store console tabs ----
+  function selectStoreTab(id) {
+    var tabs = byId("storeTabs"); if (!tabs) return;
+    Array.prototype.forEach.call(tabs.querySelectorAll("button"), function (b) {
+      b.classList.toggle("active", b.getAttribute("data-tab") === id);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".store-tab"), function (p) {
+      p.classList.toggle("active", p.id === id);
+    });
+  }
+  (function () {
+    var tabs = byId("storeTabs");
+    if (tabs) tabs.addEventListener("click", function (e) {
+      var b = e.target.closest("button[data-tab]"); if (!b) return;
+      selectStoreTab(b.getAttribute("data-tab"));
+    });
+  })();
+
   // ---- one store's orders ----
   async function openStore(slug) {
     LAST_STORE = slug;
+    selectStoreTab("tab-products");
     var data;
     try { data = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/orders?limit=100"); } catch (e) { flash(e.message, true); return; }
     setHash("#store/" + slug);
