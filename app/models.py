@@ -989,7 +989,8 @@ def get_or_create_merchant(session: Session, wallet_address: str) -> Merchant:
 
 class StoreCreation(Base):
     """A human self-serve store-creation payment intent (the paid dashboard flow).
-    The merchant pays 1 USDT to Tilla's own rail; on a verified on-chain payment
+    The merchant pays the create-store fee (payment.PAYMENT_AMOUNT, currently
+    0.05 USDT0) to Tilla's own rail; on a verified on-chain payment
     the store is generated with their wallet as the receive address. The
     description is screened BEFORE a payment is offered, so a merchant is never
     charged for content that would be blocked. UNIQUE(tx_hash) makes one submitted
