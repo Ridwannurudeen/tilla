@@ -7,7 +7,9 @@ IDOR gate, and the mark_listed command. Warden + chain are mocked; TILLA_WARDEN_
 is off throughout so no paid path is ever constructed.
 """
 
+import json
 import secrets
+import shlex
 
 import httpx
 import pytest
@@ -23,8 +25,8 @@ import app.main as main
 from app import agentic, checkout, delivery, engine
 from app.config import WARDEN_SCREEN_URL
 from app.db import SessionLocal
-from app.mark_listed import mark_listed
-from app.models import EventLog, Order, Product, ScreeningReceipt, Store
+from app.mark_listed import describe, mark_listed
+from app.models import EventLog, Order, Product, Review, ScreeningReceipt, Store
 
 client = TestClient(main.app)
 
@@ -513,3 +515,137 @@ def test_mark_listed_non_listed_status_no_timestamp(make_store):
         st = s.get(Store, sid)
         assert st.marketplace_status == "submitted"
         assert st.marketplace_listed_at is None
+
+
+# ======================================================= describe command
+def _listable(make_store, slug, *, sales=0, reviews=(), status="live"):
+    """A store shaped like a listing candidate: a named storefront, a named product,
+    and `sales` delivered orders (optionally reviewed) so the live reputation the
+    listing quotes is real, not stubbed."""
+    sid = make_store(slug=slug, price_micro=9_000_000, status=status)
+    with SessionLocal() as s:
+        st = s.get(Store, sid)
+        st.content = {"store_name": "Invoice Flow", "product_name": "Command Center"}
+        product = s.scalar(select(Product).where(Product.store_id == sid))
+        product.name = "Freelancer Command Center"
+        for i in range(sales):
+            s.add(
+                Order(
+                    id=f"{slug}o{i}",
+                    store_id=sid,
+                    pay_to="0x" + "a" * 40,
+                    amount_micro=9_000_000,
+                    expected_micro=9_000_000,
+                    status="delivered",
+                    channel="agent",
+                    from_addr="0x" + str(i) * 40,
+                )
+            )
+        s.flush()
+        for i, rating in enumerate(reviews):
+            s.add(
+                Review(
+                    store_id=sid,
+                    order_id=f"{slug}o{i}",
+                    from_addr="0x" + str(i) * 40,
+                    rating=rating,
+                    body="good",
+                )
+            )
+        s.commit()
+    return sid
+
+
+def test_describe_quotes_the_live_reputation_numbers(make_store):
+    _listable(make_store, "desc-rep", sales=4, reviews=(5, 4))
+    listing = describe("desc-rep")
+    service = listing["service"]
+
+    assert service["serviceName"] == "Buy Freelancer Command Center from Invoice Flow"
+    text = service["serviceDescription"]
+    assert text == (
+        "Freelancer Command Center from Invoice Flow, delivered as soon as the "
+        "payment clears. Price 9 USDT. Sold 4 times, 100% of sales delivered with "
+        "no dispute or refund, buyer rating 4.5 out of 5, seller trust tier "
+        "established."
+    )
+    assert service["fee"] == "9"
+    assert service["endpoint"].endswith("/s/desc-rep/buy")
+    assert service["serviceType"] == "A2MCP"
+    assert service["operation"] == "create"
+
+
+def test_describe_matches_what_discovery_publishes(make_store):
+    """The listing may never drift from the numbers an agent buyer already sees."""
+    _listable(make_store, "desc-live", sales=4, reviews=(5, 4))
+    row = next(
+        r
+        for r in client.get("/discovery/resources").json()["resources"]
+        if r["slug"] == "desc-live"
+    )
+    text = describe("desc-live")["service"]["serviceDescription"]
+    assert f"Sold {row['sold_count']} times" in text
+    assert f"seller trust tier {row['trust_tier']}" in text
+    assert f"buyer rating {row['review_avg']} out of 5" in text
+    assert f"{round(row['success_rate'] * 100)}% of sales" in text
+
+
+def test_describe_omits_stats_for_a_store_with_no_sales(make_store):
+    _listable(make_store, "desc-new")
+    text = describe("desc-new")["service"]["serviceDescription"]
+    assert text == (
+        "Freelancer Command Center from Invoice Flow, delivered as soon as the "
+        "payment clears. Price 9 USDT."
+    )
+    assert "None" not in text
+    assert "trust tier" not in text  # a new store reads as new, not as 'tier new'
+
+
+def test_describe_omits_only_the_missing_review_clause(make_store):
+    """Sales but no reviews yet: keep the sales facts, drop the rating clause."""
+    _listable(make_store, "desc-noreview", sales=4)
+    text = describe("desc-noreview")["service"]["serviceDescription"]
+    assert "Sold 4 times" in text
+    assert "seller trust tier established" in text
+    assert "buyer rating" not in text
+
+
+def test_describe_builds_the_runnable_onchainos_command(make_store):
+    _listable(make_store, "desc-cmd", sales=4)
+    listing = describe("desc-cmd")
+    command = listing["command"]
+    assert command.startswith("onchainos agent update --agent-id 6961 --service ")
+    # the argument is one shell-quoted JSON array carrying exactly this service
+    quoted = command.split(" --service ", 1)[1]
+    (payload,) = json.loads(shlex.split(quoted)[0])
+    assert payload == listing["service"]
+    assert payload["fee"] == "9"  # a JSON string, per the runbook's content rules
+    assert "http" not in payload["serviceDescription"]  # no links in listing copy
+
+
+def test_describe_is_read_only(make_store):
+    sid = _listable(make_store, "desc-ro", sales=4)
+    describe("desc-ro")
+    with SessionLocal() as s:
+        assert s.get(Store, sid).marketplace_status == "unlisted"
+        assert s.scalar(select(func.count()).select_from(EventLog)) == 0
+
+
+def test_describe_unknown_slug_rejected():
+    with pytest.raises(LookupError):
+        describe("nope")
+
+
+def test_describe_refuses_a_store_that_is_not_publicly_live(make_store):
+    _listable(make_store, "desc-draft", status="draft")
+    with pytest.raises(LookupError):
+        describe("desc-draft")
+
+
+def test_describe_refuses_a_store_with_no_active_product(make_store):
+    sid = _listable(make_store, "desc-noprod")
+    with SessionLocal() as s:
+        s.scalar(select(Product).where(Product.store_id == sid)).active = False
+        s.commit()
+    with pytest.raises(LookupError):
+        describe("desc-noprod")

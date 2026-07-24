@@ -20,6 +20,13 @@ Funds-safety invariants (funds move only when Tilla means to spend):
 
 The verdict body is returned verbatim; ALLOW/BLOCK interpretation stays in
 ``app.screening`` (one place enforces the verdict contract).
+
+Rating write-back (:func:`record_rating`): once a hire has SETTLED, Tilla rates the
+agent it just paid. The local half — an append-only ``hire.rating`` event_log row —
+is real and always written. The submission half is a DRY RUN ONLY: no rating /
+feedback / reputation endpoint or ``onchainos`` subcommand is documented anywhere in
+this repo, so :func:`rating_payload` builds Tilla's own shape and nothing ever sends
+it. See that function's UNVERIFIED note before wiring any transport.
 """
 
 from __future__ import annotations
@@ -40,6 +47,8 @@ from x402.http.utils import (
 from x402.schemas import PaymentPayload, PaymentRequirements
 
 from app import config
+from app.db import SessionLocal
+from app.models import log_event
 from app.payment import (
     PAYMENT_ASSET,
     PAYMENT_EIP712_NAME,
@@ -50,6 +59,13 @@ from app.payment import (
 )
 
 logger = logging.getLogger("tilla")
+
+# The agent Tilla hires: Warden #3808, whose paid scan service is the endpoint pinned
+# by WARDEN_PAID_PAYTO (docs/runbooks/M10-onchain.md step D).
+WARDEN_AGENT_ID = 3808
+# The rating scale the payload uses. 1..5 mirrors Tilla's own buyer-review scale
+# (models.Review's 1..5 CHECK), so both directions of reputation read the same way.
+RATING_MAX = 5
 
 # The EIP-3009 TransferWithAuthorization struct, signed locally with eth-account so
 # the paid path needs NO web3 (the x402 SDK's EVM signer does). Field order/types
@@ -72,11 +88,14 @@ _VALIDITY_BUFFER_SECONDS = 60
 class PaidScan:
     """The result of a served paid scan: the raw verdict body plus the on-chain
     settle receipt. ``tx_hash`` is None only when the PAYMENT-RESPONSE header was
-    undecodable (the scan still settled and was served)."""
+    undecodable (the scan still settled and was served). ``latency_ms`` is the whole
+    hire measured wall-clock — unpaid probe, local signing, served paid replay — i.e.
+    what Tilla actually waited for, and the only timing fact it can honestly rate."""
 
     verdict: dict
     amount_micro: int
     tx_hash: str | None
+    latency_ms: int
 
 
 def _select_exact(req) -> PaymentRequirements | None:
@@ -185,6 +204,7 @@ def paid_scan(payload: str) -> PaidScan | None:
     timeout = config.WARDEN_SCREEN_TIMEOUT
     url = config.WARDEN_PAID_SCAN_URL
     body = {"payload": payload}
+    started = time.monotonic()
 
     # 1) Unpaid probe: expect a 402 carrying the EIP-712 challenge.
     try:
@@ -255,4 +275,85 @@ def paid_scan(payload: str) -> PaidScan | None:
             tx_hash = decode_payment_response_header(settle_header).transaction or None
         except Exception:
             logger.exception("warden_hire: undecodable PAYMENT-RESPONSE on served scan")
-    return PaidScan(verdict=verdict, amount_micro=amount_micro, tx_hash=tx_hash)
+    return PaidScan(
+        verdict=verdict,
+        amount_micro=amount_micro,
+        tx_hash=tx_hash,
+        latency_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
+# ---------- rating write-back: Tilla rates the agent it just paid ----------
+def _rate_hires_enabled() -> bool:
+    """``TILLA_RATE_HIRES=1`` turns on the DRY-RUN submitter log. Read at call time
+    rather than at config import so a test/operator can flip it without a restart —
+    it is safe to, because there is nothing to submit TO (see rating_payload)."""
+    return os.environ.get("TILLA_RATE_HIRES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _rating(actionable: bool, latency_ms: int) -> int:
+    """The score Tilla can honestly give one settled hire, out of RATING_MAX.
+
+    Derived ONLY from facts this client observed: 1 when the hire settled but came
+    back with a verdict Tilla could not act on (money spent, nothing usable), 3 when
+    an actionable verdict took more than half the screen budget, else 5. Whether the
+    verdict was CORRECT is deliberately not scored — Tilla cannot check that, and a
+    rating it cannot justify would be noise in someone else's reputation graph.
+    """
+    if not actionable:
+        return 1
+    if latency_ms > config.WARDEN_SCREEN_TIMEOUT * 1000 / 2:
+        return 3
+    return RATING_MAX
+
+
+def rating_payload(scan: PaidScan, *, actionable: bool) -> dict:
+    """The rating Tilla WOULD submit for one settled hire of Warden #3808.
+
+    UNVERIFIED TRANSPORT — this shape is Tilla's own, NOT an external contract. No
+    rating / feedback / reputation submission surface is documented anywhere in this
+    repo: there is no such ``onchainos`` subcommand in docs/runbooks/M10-onchain.md,
+    ERC-8004 is read-only here (config.py: "Tilla never writes to it"), and the
+    runbook lists ratings as out of scope. So this payload is only ever logged.
+    Do NOT wire a transport until the real request shape is verified against OKX's
+    published surface — writing to an imagined contract is how the last three
+    production bugs happened.
+    """
+    return {
+        "agent_id": WARDEN_AGENT_ID,
+        "service": "paid_scan",
+        "rating": _rating(actionable, scan.latency_ms),
+        "max_rating": RATING_MAX,
+        "actionable_verdict": actionable,
+        "latency_ms": scan.latency_ms,
+        "amount_micro": scan.amount_micro,
+        "tx_hash": scan.tx_hash,
+        "network": PAYMENT_NETWORK,
+    }
+
+
+def record_rating(scan: PaidScan, *, actionable: bool) -> None:
+    """Rate `scan`'s hire: always an append-only ``hire.rating`` event_log row, plus
+    the dry-run payload log when ``TILLA_RATE_HIRES`` is on.
+
+    Fire-and-forget and FAIL-OPEN: the hire has already settled and the verdict is
+    already decided, so nothing here may raise into — or change — a screening
+    decision. This is the ONLY fail-open path in the screening seam.
+    """
+    try:
+        payload = rating_payload(scan, actionable=actionable)
+        with SessionLocal() as session:
+            log_event(session, "warden_hire", "hire.rating", data=payload)
+            session.commit()
+        if _rate_hires_enabled():
+            logger.info(
+                "warden_hire: rating DRY RUN, no verified transport, nothing sent: %s",
+                payload,
+            )
+    except Exception:
+        logger.exception("warden_hire: rating write-back failed; screening unaffected")
