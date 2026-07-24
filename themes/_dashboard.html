@@ -71,6 +71,20 @@
   .mark i:nth-child(3){ background:color-mix(in srgb,var(--text) 24%,transparent); }
   .mark i:nth-child(4){ background:color-mix(in srgb,var(--text) 64%,transparent); }
   .head-right{ flex:none; }
+  /* header collapses into a hamburger dropdown below 1100px (see media query) */
+  .nav-toggle{ display:none; flex:none; width:38px; height:38px; padding:0;
+    background:transparent; border:1px solid var(--hairline); border-radius:4px; cursor:pointer;
+    align-items:center; justify-content:center; }
+  .nav-toggle:hover{ border-color:var(--text); }
+  .nav-toggle .nt-bars{ position:relative; width:18px; height:12px; }
+  .nav-toggle .nt-bars span{ position:absolute; left:0; width:18px; height:2px; border-radius:2px;
+    background:var(--text); transition:transform .18s ease, opacity .18s ease, top .18s ease; }
+  .nav-toggle .nt-bars span:nth-child(1){ top:0; }
+  .nav-toggle .nt-bars span:nth-child(2){ top:5px; }
+  .nav-toggle .nt-bars span:nth-child(3){ top:10px; }
+  header.nav-open .nt-bars span:nth-child(1){ top:5px; transform:rotate(45deg); }
+  header.nav-open .nt-bars span:nth-child(2){ opacity:0; }
+  header.nav-open .nt-bars span:nth-child(3){ top:5px; transform:rotate(-45deg); }
   .navlink{ padding:14px 4px; text-decoration:none;
     font-size:11px; font-weight:600; letter-spacing:.12em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 70%,transparent); white-space:nowrap;
@@ -261,13 +275,33 @@
     *{ transition:none !important; animation:none !important; }
   }
 
+  @media (max-width:1100px){
+    .nav-toggle{ display:inline-flex; }
+    .head-right{
+      position:fixed; top:56px; left:0; right:0; z-index:4;
+      flex-direction:column; align-items:stretch; justify-content:flex-start; gap:0;
+      padding:8px 20px 16px;
+      background:var(--bg);
+      border-bottom:1px solid var(--hairline);
+      box-shadow:0 16px 34px rgba(0,0,0,.34);
+      opacity:0; visibility:hidden; transform:translateY(-8px);
+      transition:opacity .18s ease, transform .18s ease, visibility .18s;
+    }
+    header.nav-open .head-right{ opacity:1; visibility:visible; transform:none; }
+    .head-right .navlink{ padding:13px 2px; font-size:12px; letter-spacing:.08em;
+      border-top:1px solid var(--hairline); }
+    .head-right .navlink:first-of-type{ border-top:0; }
+    .head-right .theme-toggle{ align-self:flex-start; margin:10px 0 4px; }
+    .head-right .chip.chain{ align-self:flex-start; margin:4px 0; }
+    #whoami{ align-self:flex-start; max-width:none; margin:4px 0; }
+    #signBtn, #signOut{ width:100%; margin-top:8px; }
+  }
   @media (max-width:760px){
     .cols{ grid-template-columns:1fr; }
   }
   @media (max-width:640px){
-    .chip.chain{ display:none; }
-    .navlink{ display:none; }
-    #whoami{ max-width:9ch; }
+    #mainTabs, #storeTabs{ flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    #mainTabs button, #storeTabs button{ white-space:nowrap; flex:none; }
   }
   /* store console — tabbed tool navigation */
   .store-tabs{ display:flex; flex-wrap:wrap; gap:2px; margin:16px 0 22px;
@@ -305,7 +339,10 @@
     <span class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
     <h1>Tilla · Merchant</h1>
   </a>
-  <div class="row head-right">
+  <button class="nav-toggle" id="navToggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="headMenu">
+    <span class="nt-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+  </button>
+  <div class="row head-right" id="headMenu">
     <button class="theme-toggle mono" id="themeToggle" type="button" aria-label="Switch light or dark theme" title="Switch theme">◐</button>
     <a class="navlink mono" href="/">Home</a>
     <a class="navlink mono" href="/marketplace.html">Marketplace</a>
@@ -1102,20 +1139,53 @@
       return b.getAttribute("data-tab");
     });
     function select(id) {
-      Array.prototype.forEach.call(nav.querySelectorAll("button"), function (b) {
-        b.classList.toggle("active", b.getAttribute("data-tab") === id);
+      Array.prototype.forEach.call(nav.querySelectorAll("button[data-tab]"), function (b) {
+        var on = b.getAttribute("data-tab") === id;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.tabIndex = on ? 0 : -1;
       });
       ids.forEach(function (pid) {
         var p = byId(pid); if (p) p.classList.toggle("active", pid === id);
       });
     }
+    Array.prototype.forEach.call(nav.querySelectorAll("button[data-tab]"), function (b) {
+      var on = b.classList.contains("active");
+      b.setAttribute("aria-selected", on ? "true" : "false");
+      b.setAttribute("aria-controls", b.getAttribute("data-tab"));
+      b.tabIndex = on ? 0 : -1;
+    });
     nav.addEventListener("click", function (e) {
       var b = e.target.closest("button[data-tab]"); if (b) select(b.getAttribute("data-tab"));
+    });
+    nav.addEventListener("keydown", function (e) {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      var btns = Array.prototype.slice.call(nav.querySelectorAll("button[data-tab]"));
+      var cur = btns.indexOf(document.activeElement);
+      if (cur < 0) return;
+      var n = e.key === "ArrowRight" ? (cur + 1) % btns.length : (cur - 1 + btns.length) % btns.length;
+      select(btns[n].getAttribute("data-tab")); btns[n].focus(); e.preventDefault();
     });
     return select;
   }
   var selectStoreTab = initTabs("storeTabs");
   initTabs("mainTabs");
+
+  // ---- responsive header: hamburger dropdown below 1100px ----
+  (function () {
+    var header = document.querySelector("header");
+    var btn = byId("navToggle");
+    if (!header || !btn) return;
+    function setOpen(o) { header.classList.toggle("nav-open", o); btn.setAttribute("aria-expanded", o ? "true" : "false"); }
+    btn.addEventListener("click", function (e) { e.stopPropagation(); setOpen(!header.classList.contains("nav-open")); });
+    document.addEventListener("click", function (e) { if (header.classList.contains("nav-open") && !header.contains(e.target)) setOpen(false); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape" && header.classList.contains("nav-open")) { setOpen(false); btn.focus(); } });
+    var links = header.querySelectorAll(".head-right a");
+    for (var i = 0; i < links.length; i++) links[i].addEventListener("click", function () { setOpen(false); });
+    var mq = window.matchMedia("(min-width:1101px)");
+    var onMq = function () { if (mq.matches) setOpen(false); };
+    if (mq.addEventListener) mq.addEventListener("change", onMq); else mq.addListener(onMq);
+  })();
 
   // ---- one store's orders ----
   async function openStore(slug) {
