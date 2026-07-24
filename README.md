@@ -79,7 +79,7 @@ each a single clean transaction — full receipts in [`docs/PROOF-onchain.md`](d
 
 - **Human wallet checkout** — exact-amount sweeper match flips the order to paid and releases delivery.
 - **Agent x402 store buy** — one EIP-3009 authorization, facilitator settles, order delivered.
-- **Stranger create-store** — an agent pays Tilla's 1 USDT platform fee and gets a live store back
+- **Stranger create-store** — an agent pays Tilla's create-store fee (0.05 USDT0) and gets a live store back
   (Tilla earns as an ASP).
 - **aggr_deferred** — the facilitator relayer settles batched orders on-chain; Tilla's reconciler
   detects the transfer and finalizes the orders (settling → delivered) from on-chain evidence.

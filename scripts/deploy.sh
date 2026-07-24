@@ -133,4 +133,20 @@ acp=$(smoke_code -X POST "$BASE/s/invoice-flow/checkout_sessions" \
 gk=$(smoke_code -X POST "$BASE/api/stores/invoice-flow/growth-kit")
 [ "$gk" = "401" ] || echo "smoke WARN: growth-kit unauth POST returned $gk (expected 401)" >&2
 
+# Agentic surfaces (deploy/nginx-agentic-surfaces.snippet must be applied at the
+# edge or every one of these serves the static HTML 404 while working on
+# 127.0.0.1:8040 — the exact regression that hid the whole agent surface once).
+# Each must answer app JSON, whatever the status code its own gating returns.
+for path in "mcp" "s/invoice-flow/reviews" "s/invoice-flow/quote"; do
+  ctype=$(curl -s -o /dev/null -w '%{content_type}' "$BASE/$path")
+  case "$ctype" in
+    application/json*) : ;;
+    *) echo "smoke WARN: GET /$path answered '$ctype' not JSON (check nginx-agentic-surfaces.snippet)" >&2 ;;
+  esac
+done
+mpp=$(smoke_code -X POST "$BASE/s/invoice-flow/mpp/open" -H 'content-type: application/json' -d '{}')
+[ "$mpp" != "404" ] || echo "smoke WARN: POST /s/…/mpp/open returned 404 (nginx not exposing mpp/*)" >&2
+sub=$(smoke_code -X POST "$BASE/s/invoice-flow/subscribe" -H 'content-type: application/json' -d '{}')
+[ "$sub" != "404" ] || echo "smoke WARN: POST /s/…/subscribe returned 404 (nginx not exposing subscribe*)" >&2
+
 echo "deploy ok: health up, ready 200, live stores render, create-store gated (402)"

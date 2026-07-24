@@ -381,7 +381,7 @@ def test_create_panel_states_the_real_fee_not_a_literal():
     """The panel hard-coded "1 USDT" while the rail charges PAYMENT_AMOUNT. Every
     price it shows now comes from the server, so the copy cannot drift again."""
     from app import payment
-    from app.dashboard import usdt
+    from app.dashboard import fee_usdt
 
     r = client.get("/dashboard")
     assert "1 USDT" not in r.text  # the price that was never charged
@@ -394,7 +394,7 @@ def test_create_panel_states_the_real_fee_not_a_literal():
         "/api/merchant/create-store/pending", headers=_auth(_merchant_token(acct))
     ).json()
     assert fee["fee_micro"] == int(payment.PAYMENT_AMOUNT)
-    assert fee["fee_usdt"] == usdt(int(payment.PAYMENT_AMOUNT)) == "0.050000"
+    assert fee["fee_usdt"] == fee_usdt(int(payment.PAYMENT_AMOUNT)) == "0.05"
 
 
 def test_create_panel_signs_at_most_one_transfer():

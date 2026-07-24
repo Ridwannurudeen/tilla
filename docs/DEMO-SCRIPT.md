@@ -83,7 +83,6 @@ VO (final line): *"Tilla. Describe it. It's live."*
 ---
 
 ## PRODUCTION NOTES
-- **Blocker before filming:** the dashboard's create panel still carries hardcoded "1 USDT" labels (`themes/_dashboard.html`: the panel header, the create button, and the pay-step heading) while the amount actually charged and shown beside them is 0.05 USDT0. Fix those strings first — otherwise shot 3–5 films a contradiction.
 - Both purchases on screen (the 0.05 USDT0 creation fee and the buyer's checkout) are **self-funded arm's-length tests** — paid from our own second wallet, distinct from the receiving wallet. If either is cited anywhere as proof, it carries that label.
 - Nothing is sped up in a way that misrepresents timing; if a clip is time-compressed, mark it on screen.
 - Amounts are small and real. No simulated wallets, no fake tx hashes, no re-shot "success" screens.

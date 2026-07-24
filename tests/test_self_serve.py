@@ -315,14 +315,14 @@ def test_pending_resumes_the_open_creation_owner_scoped(monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["fee_micro"] == FEE
-    assert body["fee_usdt"] == "0.050000"
+    assert body["fee_usdt"] == "0.05"
     assert [c["id"] for c in body["creations"]] == [cid]  # never the other merchant's
     open_row = body["creations"][0]
     assert open_row["status"] == "pending"
     assert open_row["description"] == "hand-thrown mugs"
     assert open_row["theme"] == "bold"
     assert open_row["pay_to"].lower() == TILLA
-    assert open_row["amount_usdt"] == "0.050000"
+    assert open_row["amount_usdt"] == "0.05"
     assert open_row["created_at"]
 
 

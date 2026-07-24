@@ -283,7 +283,7 @@ class TillaClient:
         signer: PaymentSigner,
         max_amount_micro: int,
     ) -> StoreCreated:
-        """Create a live store by paying Tilla's x402 create-store fee (1 USDT).
+        """Create a live store by paying Tilla's x402 create-store fee (currently 0.05 USDT0).
 
         payTo is Tilla's own platform wallet; it is surfaced in the challenge to
         the signer for policy, and the amount is capped at ``max_amount_micro``.

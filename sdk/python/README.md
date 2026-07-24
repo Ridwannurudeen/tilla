@@ -81,7 +81,7 @@ with TillaClient() as client:
     purchase = client.buy(
         "some-slug",
         signer=signer,
-        max_amount_micro=1_000_000,   # MANDATORY cap (1 USDT here)
+        max_amount_micro=1_000_000,   # MANDATORY cap (1 USDT — well above the 0.05 fee)
     )
     print(purchase.order_id, purchase.settle_tx, purchase.delivery)
 

@@ -105,7 +105,7 @@ const client = new TillaClient();
 
 const purchase = await client.buy("some-slug", {
   signer,
-  maxAmountMicro: 1_000_000, // MANDATORY cap (1 USDT here)
+  maxAmountMicro: 1_000_000, // MANDATORY cap (1 USDT — well above the 0.05 fee)
 });
 console.log(purchase.orderId, purchase.settleTx, purchase.delivery);
 

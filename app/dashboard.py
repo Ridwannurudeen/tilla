@@ -188,6 +188,15 @@ def usdt(micro) -> str:
     return f"{sign}{micro // 1_000_000}.{micro % 1_000_000:06d}"
 
 
+def fee_usdt(micro) -> str:
+    """Trimmed USDT display for round platform fees ("0.05", never "0.050000").
+    Order amounts keep the exact 6dp usdt() form — their micro-offsets are
+    load-bearing — but the create-store fee is a marketing number and must read
+    the same everywhere (www copy, agent card, dashboard)."""
+    s = usdt(micro)
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
 def _owned_store(session: Session, merchant: Merchant, slug: str) -> Store:
     """The store with `slug` IFF it belongs to `merchant`; 404 otherwise. The one
     IDOR gate for store-scoped routes — a non-owned or unknown slug is
@@ -1578,7 +1587,7 @@ def _creation_result(creation) -> dict:
         "slug": creation.slug,
         "url": f"/s/{creation.slug}/" if creation.slug else None,
         "amount_micro": creation.expected_micro,
-        "amount_usdt": usdt(creation.expected_micro),
+        "amount_usdt": fee_usdt(creation.expected_micro),
         "pay_to": creation.pay_to,
     }
 
@@ -1600,7 +1609,7 @@ def merchant_create_store_pending(
     rows = self_serve.list_open(session, merchant.wallet_address)
     return {
         "fee_micro": int(payment.PAYMENT_AMOUNT),
-        "fee_usdt": usdt(int(payment.PAYMENT_AMOUNT)),
+        "fee_usdt": fee_usdt(int(payment.PAYMENT_AMOUNT)),
         "creations": [
             {
                 **_creation_result(row),
