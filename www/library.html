@@ -210,6 +210,40 @@
     border:1px solid color-mix(in srgb,var(--text) 30%,transparent);
     transition:background-color .12s ease; }
   .p-copy:hover{ background-color:color-mix(in srgb,var(--text) 8%,transparent); }
+  .lib-signout{ margin-top:12px; cursor:pointer; padding:8px 14px; border-radius:3px;
+    font-size:12px; font-weight:600; color:color-mix(in srgb,var(--text) 78%,transparent);
+    background:transparent; border:1px solid color-mix(in srgb,var(--text) 26%,transparent);
+    transition:background-color .12s ease, border-color .12s ease; }
+  .lib-signout:hover{ border-color:var(--text); color:var(--text); }
+  .p-rep, .p-review{ margin-top:14px; padding-top:14px;
+    border-top:1px solid color-mix(in srgb,var(--text) 12%,transparent); }
+  .p-rep-q{ margin:0 0 10px; font-size:12px; font-weight:600;
+    color:color-mix(in srgb,var(--text) 74%,transparent); }
+  .p-rep-note{ margin:0; font-size:12.5px; font-weight:600;
+    color:color-mix(in srgb,var(--text) 82%,transparent); }
+  .p-rep-btns{ display:flex; flex-wrap:wrap; gap:10px; }
+  .p-btn{ cursor:pointer; padding:9px 14px; border-radius:3px; font-size:12px; font-weight:600;
+    color:var(--text); background:transparent;
+    border:1px solid color-mix(in srgb,var(--text) 30%,transparent);
+    transition:background-color .12s ease, border-color .12s ease; }
+  .p-btn:hover:not(:disabled){ background-color:color-mix(in srgb,var(--text) 8%,transparent); }
+  .p-btn:disabled{ opacity:.5; cursor:default; }
+  .p-btn.p-ok:hover:not(:disabled){ border-color:var(--xlayer); }
+  .p-btn.p-bad:hover:not(:disabled){ border-color:var(--accent); }
+  .p-rep-status, .p-review-status{ display:inline-block; margin-top:8px; font-size:11.5px;
+    color:color-mix(in srgb,var(--text) 62%,transparent); }
+  .p-review-form{ margin-top:12px; }
+  .p-stars{ display:flex; gap:4px; margin-bottom:10px; }
+  .p-star{ cursor:pointer; background:transparent; border:0; padding:2px; font-size:22px; line-height:1;
+    color:color-mix(in srgb,var(--text) 26%,transparent); transition:color .12s ease; }
+  .p-star:hover, .p-star.on{ color:var(--xlayer); }
+  .p-star:focus-visible{ outline:2px solid var(--text); outline-offset:2px; }
+  .p-review-text{ display:block; width:100%; min-height:80px; resize:vertical; padding:10px 12px;
+    border-radius:3px; font:inherit; font-size:13px; color:var(--text);
+    background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 20%,transparent); }
+  .p-review-text:focus-visible{ outline:2px solid var(--text); outline-offset:2px; }
+  .p-review-submit{ margin-top:10px; }
   .p-note{ margin-top:10px; font-size:12px; line-height:1.5;
     color:color-mix(in srgb,var(--text) 58%,transparent); }
 
@@ -302,6 +336,7 @@
       <p class="sec-eyebrow mono">Signed in</p>
       <h2 id="libTitle">Purchases for this wallet.</h2>
       <p class="lib-wallet mono" id="libWallet"></p>
+      <button class="lib-signout mono" type="button" id="libSignOut">Sign out</button>
       <div class="lib-status mono" id="libStatus" aria-live="polite" hidden>
         <span id="libStatusText"></span>
         <button class="lib-retry mono" type="button" id="libRetry" hidden>Retry</button>
@@ -356,8 +391,9 @@
   var libRetry = document.getElementById("libRetry");
   var libBrowse = document.getElementById("libBrowse");
   var libList = document.getElementById("libList");
+  var libSignOut = document.getElementById("libSignOut");
   if (!connectBtn || !authStatus || !librarySec || !libWallet || !libStatus ||
-      !libStatusText || !libRetry || !libBrowse || !libList) return;
+      !libStatusText || !libRetry || !libBrowse || !libList || !libSignOut) return;
 
   var sessionToken = null;
 
@@ -485,6 +521,117 @@
     for (var i = 0; i < list.length; i++) libList.appendChild(row(list[i]));
   }
 
+  /* ---- reputation: confirm/dispute (Phase 1.6) + verified-buyer review (Phase 3) ---- */
+  async function postAuthed(url, payload) {
+    try {
+      var r = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "Authorization": "Bearer " + sessionToken },
+        body: JSON.stringify(payload)
+      });
+      var data = null; try { data = await r.json(); } catch (e) {}
+      return { ok: r.ok, status: r.status, data: data };
+    } catch (e) { return { ok: false, status: 0, data: null }; }
+  }
+  function smallBtn(label, cls) {
+    var b = document.createElement("button"); b.type = "button";
+    b.className = "p-btn mono" + (cls ? " " + cls : "");
+    b.textContent = label; return b;
+  }
+  function repNote(wrap, msg) {
+    wrap.textContent = "";
+    var p = document.createElement("p"); p.className = "p-rep-note mono"; p.textContent = msg;
+    wrap.appendChild(p);
+  }
+  async function doEval(orderId, verdict, wrap, status, btns) {
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = true;
+    status.textContent = "Saving…";
+    var res = await postAuthed("/api/library/evaluate", { order_id: orderId, verdict: verdict });
+    if (res.ok) {
+      repNote(wrap, verdict === "confirm" ? "✓ Thanks — delivery confirmed." : "Thanks — we've noted the problem.");
+    } else if (res.status === 409) {
+      status.textContent = "Already evaluated.";
+    } else if (res.status === 401) {
+      status.textContent = "Session expired — sign in again.";
+    } else {
+      status.textContent = "Couldn't save — please retry.";
+      for (var j = 0; j < btns.length; j++) btns[j].disabled = false;
+    }
+  }
+  function repBlock(item) {
+    var wrap = document.createElement("div"); wrap.className = "p-rep";
+    if (item.eval_status === "confirmed" || item.eval_status === "rejected") {
+      repNote(wrap, item.eval_status === "confirmed"
+        ? "✓ You confirmed this delivery." : "You reported a problem with this delivery.");
+      return wrap;
+    }
+    var q = document.createElement("p"); q.className = "p-rep-q mono";
+    q.textContent = "Did this arrive as described?";
+    wrap.appendChild(q);
+    var btnRow = document.createElement("div"); btnRow.className = "p-rep-btns";
+    var status = document.createElement("span"); status.className = "p-rep-status mono";
+    var ok = smallBtn("Confirm delivery", "p-ok");
+    var bad = smallBtn("Report a problem", "p-bad");
+    ok.onclick = function () { doEval(item.order_id, "confirm", wrap, status, [ok, bad]); };
+    bad.onclick = function () { doEval(item.order_id, "reject", wrap, status, [ok, bad]); };
+    btnRow.appendChild(ok); btnRow.appendChild(bad);
+    wrap.appendChild(btnRow); wrap.appendChild(status);
+    return wrap;
+  }
+  async function doReview(orderId, rating, ta, wrap, status, submit) {
+    var text = String(ta.value || "").trim();
+    if (rating < 1 || rating > 5) { status.textContent = "Pick a star rating first."; return; }
+    if (!text) { status.textContent = "Write a few words first."; return; }
+    submit.disabled = true; status.textContent = "Submitting…";
+    var res = await postAuthed("/api/library/review", { order_id: orderId, rating: rating, body: text });
+    if (res.ok) {
+      repNote(wrap, "✓ Thanks for the review.");
+    } else if (res.status === 409) {
+      repNote(wrap, "You've already reviewed this order.");
+    } else if (res.status === 422) {
+      status.textContent = "That review couldn't be posted (failed safety screening or invalid)."; submit.disabled = false;
+    } else if (res.status === 401) {
+      status.textContent = "Session expired — sign in again."; submit.disabled = false;
+    } else {
+      status.textContent = "Couldn't submit — please retry."; submit.disabled = false;
+    }
+  }
+  function reviewBlock(item) {
+    var wrap = document.createElement("div"); wrap.className = "p-review";
+    var toggle = smallBtn("Write a review", "p-review-toggle");
+    var form = document.createElement("div"); form.className = "p-review-form"; form.hidden = true;
+    var rating = 0;
+    var starRow = document.createElement("div"); starRow.className = "p-stars";
+    var starBtns = [];
+    function paint(n) { for (var j = 0; j < starBtns.length; j++) starBtns[j].classList.toggle("on", j < n); }
+    for (var i = 1; i <= 5; i++) {
+      (function (n) {
+        var s = document.createElement("button"); s.type = "button"; s.className = "p-star";
+        s.setAttribute("aria-label", n + (n === 1 ? " star" : " stars")); s.textContent = "★";
+        s.onclick = function () { rating = n; paint(n); };
+        starBtns.push(s); starRow.appendChild(s);
+      })(i);
+    }
+    var ta = document.createElement("textarea"); ta.className = "p-review-text mono";
+    ta.maxLength = 2000; ta.placeholder = "What did you think? (up to 2000 characters)";
+    var submit = smallBtn("Submit review", "p-review-submit");
+    var status = document.createElement("span"); status.className = "p-review-status mono";
+    submit.onclick = function () { doReview(item.order_id, rating, ta, wrap, status, submit); };
+    toggle.onclick = function () { form.hidden = !form.hidden; if (!form.hidden) ta.focus(); };
+    form.appendChild(starRow); form.appendChild(ta); form.appendChild(submit); form.appendChild(status);
+    wrap.appendChild(toggle); wrap.appendChild(form);
+    return wrap;
+  }
+  function signOut() {
+    sessionToken = null;
+    libList.textContent = "";
+    librarySec.hidden = true;
+    libWallet.textContent = "";
+    libStatus.hidden = true;
+    connectBtn.hidden = false; connectBtn.disabled = false;
+    setAuth("Signed out.");
+  }
+
   function row(item) {
     var li = document.createElement("li");
     li.className = "p-row";
@@ -559,11 +706,14 @@
       act.appendChild(body);
     }
     li.appendChild(act);
+    li.appendChild(repBlock(item));
+    li.appendChild(reviewBlock(item));
     return li;
   }
 
   connectBtn.addEventListener("click", connectWallet);
   libRetry.addEventListener("click", loadLibrary);
+  libSignOut.addEventListener("click", signOut);
 })();
 </script>
 <script>
