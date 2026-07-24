@@ -199,11 +199,17 @@ AGGR_FACILITATOR_RELAYER = os.environ.get(
     "TILLA_AGGR_FACILITATOR_RELAYER",
     "0x0596C8A60D30195CFAddD8bB61b13dBD2AA725B7",
 ).lower()
-# How far back (in blocks) the chain poller scans for a pair's settlement transfer.
-# The facilitator settles ~30s after payment and the reaper voids a settling order
-# after 15 min, so a bounded recent window covers every finalizable order. Paged in
-# GETLOGS_MAX_SPAN-block windows (the X Layer 101-block cap), capped at
-# RECONCILE_MAX_WINDOWS windows per pair per tick.
+# How far back (in blocks) the STEADY-STATE chain scan looks for a pair's
+# settlement transfer each tick. The facilitator settles ~30s after payment, so
+# the trailing window catches the normal case on the first tick; an order OLDER
+# than this window pulls the scan anchor back to its own age and the reconciler
+# walks forward with a per-pair cursor (see reconcile._scan_start), so old
+# settlements are still reachable — raising this only adds per-tick RPC cost.
+# COUPLING: RECONCILE_MAX_WINDOWS must be >= ceil((LOOKBACK+1)/(GETLOGS_MAX_SPAN+1))
+# or a trailing scan can never complete in one tick and the reaper's
+# scanned-clean stamp starves (12 x 101 = 1212 >= 1201 today — zero margin; raise
+# both together). Paged in GETLOGS_MAX_SPAN-block windows (the X Layer 101-block
+# cap), capped at RECONCILE_MAX_WINDOWS windows per pair per tick.
 AGGR_SETTLE_LOOKBACK_BLOCKS = int(
     os.environ.get("TILLA_AGGR_SETTLE_LOOKBACK_BLOCKS", "1200")
 )
