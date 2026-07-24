@@ -264,6 +264,15 @@
     if (window.ethereum) return window.ethereum;
     return null;
   }
+  // Re-announce + brief wait so late-injecting wallets (Rabby, MetaMask, etc.) are
+  // discovered before we pick one.
+  async function resolveProvider() {
+    try { window.dispatchEvent(new Event("eip6963:requestProvider")); } catch (e) {}
+    if (!providers.length && !window.ethereum) {
+      await new Promise(function (r) { setTimeout(r, 350); });
+    }
+    return pickProvider();
+  }
   function isReject(e) { return !!(e && (e.code === 4001 || (e.data && e.data.code === 4001))); }
 
   // ---- helpers ----
@@ -446,7 +455,7 @@
     byId("coManual").style.display = "none";
     byId("payWalletBtn").style.display = "none";
     byId("coAmount").textContent = "…";
-    var provider = pickProvider();
+    var provider = await resolveProvider();
     if (!provider) { setStatus("Open this page in your wallet's browser to subscribe."); setBuysDisabled(false); return; }
     var account;
     try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
@@ -572,7 +581,7 @@
   }
 
   async function _cancelSubscription(subId, btn) {
-    var provider = pickProvider();
+    var provider = await resolveProvider();
     if (!provider || !CO.account) { setStatus("Open this page in your wallet to cancel."); return; }
     btn.disabled = true;
     setStatus("Preparing cancellation…");
@@ -621,7 +630,7 @@
   }
 
   async function payWithWallet() {
-    var provider = pickProvider();
+    var provider = await resolveProvider();
     if (!provider) { updatePayButton(); return; }
     var btn = byId("payWalletBtn");
     btn.disabled = true;
@@ -820,7 +829,7 @@
   // ---- sign-to-claim (reuses M4 auth endpoints) ----
   async function claimPurchase() {
     var btn = byId("claimBtn"); btn.disabled = true;
-    var provider = pickProvider();
+    var provider = await resolveProvider();
     if (!provider) { setClaim("No wallet detected — open this page in your wallet's browser to claim, or use your emailed link."); btn.disabled = false; return; }
     var account;
     try { var accts = await provider.request({ method: "eth_requestAccounts" }); account = accts && accts[0]; }
