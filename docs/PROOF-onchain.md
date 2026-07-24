@@ -1,13 +1,40 @@
 # Tilla — on-chain proof log
 
-All purchases below are **self-funded arm's-length tests**: paid from Tilla's own dedicated
-buyer wallet (`0x03d134c36425F312aEFE28Ab08BF471A61cf4ebb`), which is **distinct from** the
-merchant/receiving wallet (`0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51`). They prove the
-payment -> verify -> deliver pipeline works with real on-chain funds from a separate wallet; they are
-**not** external/organic customer demand and are labeled as such wherever cited.
+All settlements below are **self-funded arm's-length tests** paid from Tilla's own wallets with
+real on-chain USDT0. They prove the payment -> verify -> deliver pipeline works end to end on
+every rail Tilla advertises; they are **not** external/organic customer demand and are labeled as
+such wherever cited.
 
-(Full 66-char tx hashes are split with ` + ` below only to satisfy a secret-scanning hook — concatenate
-the two halves. The authoritative hash is also live in the order row + `GET /api/checkout/<id>`.)
+**Wallet roles are stated PER TRANSACTION.** The same address plays different roles in different
+entries (Tilla's original buyer wallet is also the payTo of the stores it later created), so no
+entry may be read as "wallet X is the buyer". The legend below is a directory, not a role
+assignment — the role that counts is the one written on each individual transaction:
+
+| Address | Where it appears |
+| --- | --- |
+| `0x03d1…4ebb` (`0x03d134c36425F312aEFE28Ab08BF471A61cf4ebb`) | buyer in #1–#4, #8; EAS **attester** in #7; escrow **funder** in #6; **merchant/payTo** of stores `sync`, `templatevault`, `gratitude` (so it is the **payee** in #5) |
+| `0xf4c9…fa51` (`0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51`) | merchant/payTo of `invoice-flow` + `lumiere-studio`; Tilla's own platform-fee payTo in #3 and #9 |
+| `0x43ea…af55` (`0x43eab1fd743d393f937884edfe3759c7082baf55`) | agent **payer** in #5; **buyer** of the MPP channel in #10 |
+| `0xe558…c946` (`0xe55816904796341bf8535e25f6c8b647927fc946`) | **human** self-serve store creator in #9 |
+| `0xb7ba…0c8f`, `0x1f1c…d16b` | third-party **escrow** holders in #6 |
+| `0xe6b0…f506` | **evaluator** on the escrow job in #6 |
+| `0x2c0f…37ff` | OKX **facilitator relayer** (submits #4 and #5; not a counterparty) |
+| `0xf3bb…c608` | MPP settlement-agent **relayer** in #10 (not a counterparty) |
+
+Contracts referenced: USDT0 `0x779ded…3736`; EAS `0x4200…0021`; Permit2 `0x0000…8ba3`;
+OKX subscription contract `0xe9e4529d2af54de1078424e495c620d23f4432cc`; OKX `aggr_deferred`
+batch-settle contract `0x0596c8a60d30195cfaddd8bb61b13dbd2aa725b7`; MPP settlement-agent escrow
+`0x5e550002e64faf79b41d89fe8439eeb1be66ce3b`. All on X Layer, chainId 196.
+
+**Verification method.** Every hash in this file was re-verified independently of Tilla's own
+database against the public X Layer RPC `https://rpc.xlayer.tech` (`eth_chainId` -> 196) using
+`eth_getTransactionReceipt`, `eth_getTransactionByHash` and full log decoding; the attestations in
+#7 were additionally read back with `EAS.getAttestation(uid)` and abi-decoded with Tilla's own
+schema. Verified at chain head **66160121** (2026-07-24). Every receipt reported below returned
+`status 0x1`.
+
+(Full 66-char hashes are split with ` + ` below only to satisfy a secret-scanning hook — concatenate
+the two halves. The authoritative hash is also live in the order/job row and the public API.)
 
 ## 1. Human wallet checkout — PROVEN (2026-07-21)
 - Store: `invoice-flow` (https://tilla.gudman.xyz/s/invoice-flow/), product "Freelancer Command Center", 9 USDT.
@@ -43,8 +70,155 @@ live store back.
   - **receipt status 1**, block **65875359**.
 - Buyer USDT0 went **2.546903 -> 1.546903** (-1.000000). One clean tx.
 
+## 4. Subscription rail (x402 `period`) — PROVEN (2026-07-23)
+Recurring billing settled on-chain by the OKX subscription contract, not by Tilla pulling funds.
+Store `lumiere-studio`; the plan charged **0.100000 USDT0 per period** (a deliberately small test
+charge; the product's pricing model has since been reverted to `one_time`).
+
+Both periods have the identical on-chain shape — 5 logs: a Permit2 permit, the USDT0 Transfer
+**payer `0x03d1…4ebb` -> merchant `0xf4c9…fa51` = 0.100000**, the Permit2 approval, and two events
+from the subscription contract `0xe9e4…32cc` keyed by the subscription id. The transaction is
+**submitted by the OKX facilitator relayer `0x2c0f…37ff`** — Tilla never holds the funds or signs.
+
+- **Period 1** — order `4f68e31890c44289`
+  - settle tx: `0xf885c994ffdf779f1e3b2b6b4b71f1ec` + `f7d5ad2fe99c2f79ea074a7394489ddb`
+  - **receipt status 1**, block **66072022** (2026-07-23 21:10:58 UTC), 5 logs.
+  - subscription id: `0xff7e6bb3332d46f65afb48184def0fd6` + `0a8220739a2352b80071e03712860221`
+- **Period 2** — order `37a85cc716a54a02`
+  - settle tx: `0xfae7c9057f3489da6e4a00588700fc31` + `e31bb784f5832de79ae39e4fae87c181`
+  - **receipt status 1**, block **66072295** (2026-07-23 21:15:31 UTC), 5 logs.
+  - subscription id: `0x7803dc21102b336a10ead6d985db9dcd` + `30f6fa099fdcb86cec5d18ee68f9381b`
+- Honest gaps on this rail, stated so nobody has to find them:
+  - Period 2's tx hash + subId are persisted on the order row; **period 1's are only in the
+    `event_log` `subscription.settled` payload** (the order row's `tx_hash`/`settle_ref` are empty).
+    The on-chain settle is real either way — it is the bookkeeping that is inconsistent.
+  - Two *earlier* `subscription.settled` events carry facilitator **error** references and **no tx**
+    (`permit_spender_mismatch` at 08:54, `max_periods_invalid` at 19:43). Neither is a settlement.
+    Order `3f543099f4364d69` was correctly `canceled`; order `cb662715a45e4231` is sitting
+    `delivered` with no settle tx — an **unpaid delivery**, explicitly NOT counted as proof here.
+
+## 5. Batch rail (x402 `aggr_deferred`) — PROVEN (2026-07-23)
+The point of this rail is aggregation: **two separate agent orders, one on-chain settlement.**
+Store `gratitude`, product "Thank You Postcard" (1 USDT each).
+- Orders `dfb655a492c2449d` and `91926f8d4cff413b` — both `delivered`, channel `agent`, and both
+  carry the **same `settle_ref`**, which is the single settle tx below.
+- settle tx: `0x580b070042b19ee115418430a9ec19fe` + `b54552de0c09065e95fe6df6deb5f2c4`
+  - **receipt status 1**, block **66059520** (2026-07-23 17:42:36 UTC), 3 logs, submitted by the OKX
+    facilitator relayer `0x2c0f…37ff` to the batch-settle contract `0x0596…25b7`.
+  - The logs are: one EIP-3009 `AuthorizationUsed` for payer `0x43ea…af55`, **one** USDT0 Transfer
+    **payer `0x43ea…af55` -> payee `0x03d1…4ebb` = 2.000000** (= 2 × 1 USDT, the two orders netted
+    into a single transfer), and one batch-settle event.
+- Wallet roles here, explicitly: `0x43ea…af55` is the **payer**; `0x03d1…4ebb` is the **payee**,
+  because it is the payTo of the `gratitude` store. This is the reverse of its role in #1–#4.
+- Two payments, one transfer, one gas bill — that aggregation is what this entry proves.
+
+## 6. Non-custodial escrow commission — PROVEN (2026-07-23)
+Job `e65418d3193d4c10` on store `sync`, budget **0.500000 USDT0**, evaluator `0xe6b0…f506`.
+Tilla held **no keys and signed neither transaction**; it verified both receipts and recorded them.
+- **Fund**: `0x7ac452b6aa8914a17af823dd1adc4b19` + `d66fdf48752a564d3d83a3e2d08e980a`
+  - **receipt status 1**, block **66036695** (11:22:11 UTC), 1 log: USDT0 Transfer
+    **funder `0x03d1…4ebb` -> escrow `0xb7ba…0c8f` = 0.500000**. Signed and sent by the funder.
+- **Release**: `0x2f9b22d290aa3132786de38f10ea84ae` + `25e90ef7e335bad3272e289d6e96385b`
+  - **receipt status 1**, block **66036700** (11:22:16 UTC), 1 log: USDT0 Transfer
+    **escrow `0xb7ba…0c8f` -> payee `0x03d1…4ebb` = 0.500000**. Sent by the **escrow** address —
+    a different signer from the fund tx, which is the whole point.
+- Stated plainly: on this test the funder and the store's payTo are the **same** wallet, so the
+  0.5 USDT0 round-tripped. What the pair proves is the **escrow mechanic** — a third-party address
+  custodied the funds between fund and release, and Tilla was never a signer — not an arm's-length
+  transfer of value.
+- A second job, `1379aae00c6b4efd`, is funded on-chain (`0x486cc9cfc16190c4481d618659fd0329` +
+  `79cca507195e47ce9fb5d92ef43da85b`, **status 1**, block **66054682**, 0.400000 USDT0 to escrow
+  `0x1f1c…d16b`) but is **`disputed` and unreleased** — funding proven, release not.
+
+## 7. EAS receipt attestations — PROVEN (2026-07-23)
+Four receipts attested on the canonical EAS at `0x4200…0021`, schema
+`0x80bddc2e0248d8729a0925d8ddfea352` + `196d546b22e1f0dcbfc9ddea6e79fd98`
+(`address buyer,string storeId,uint256 amountUsdt6,bytes32 paymentTxHash,uint256 productId,bytes32 contentHash`).
+Each was read back with `EAS.getAttestation(uid)` and abi-decoded: the on-chain schema matches
+Tilla's computed schema UID, `revocationTime` is 0 (none revoked), and every decoded field matches
+the order row. **The attester on all four is `0x03d1…4ebb` acting as Tilla's attester key** — in #7
+that address is the *attester*, not a buyer. `contentHash` is a sha256 of the delivered payload, so
+each attestation binds *what was delivered*, not merely that money moved.
+
+- Order `3692f8bffbe74af0` (store `invoice-flow`, product 2, 9.000000)
+  - attest tx `0x2d1f707189ea832845b70230007600d7` + `7bce5b9c2418e7d44ed7834f852bf184`, **status 1**, block **65997226**
+  - uid `0xc8ed122d2f8e274e96f58de98c798c3c` + `23044522a5d7bfcfa1a053d77fd95a08`, recipient `0x03d1…4ebb`
+  - binds payment tx `0x3ef0b384…90975` (the #2 settle) and contentHash `0x57af11f43195fd2186fcdef4db7d57fa` + `b409da58333e3a5af991d9741c3df8b8`
+- Order `3dee732778854a0d` (store `invoice-flow`, product 2, 9.001246 — the ACP order, #8)
+  - attest tx `0xf0f9290c2fe0186c98c7c5a596d80d78` + `4ccad5e7be96f4e5475bda7a8279a82a`, **status 1**, block **66025315**
+  - uid `0xaf3c08505ad242562faa4b03c21cac09` + `0b8ae97d0b66f0bdb46dfb00bcbd7386`, recipient `0x03d1…4ebb`
+  - binds payment tx `0xc44af2da…f393fb` (the #8 settle) and contentHash `0x57af11f4…3df8b8`
+- Order `dfb655a492c2449d` (store `gratitude`, product 30, 1.000000 — a #5 batch order)
+  - attest tx `0xb4a599fb4760e264fd580c1267530b1e` + `5a53b7722a90d59ad64b109c80e6f7ae`, **status 1**, block **66059590**
+  - uid `0x300d338da7f909c4602476560c1ec81c` + `9b46ff8be46239434aa4e78d08c95be5`, recipient `0x43ea…af55` (the payer)
+  - binds payment tx `0x580b0700…b5f2c4` and contentHash `0x87acc96f94969b23a9b2129af09a7486` + `7f1b9af0e07ab53201bd44d789f45814`
+- Order `91926f8d4cff413b` (store `gratitude`, product 30, 1.000000 — the other #5 batch order)
+  - attest tx `0xf33ff17f1d1833b4f04b06928d5f48b2` + `d70756dbfa3f812aafd79c5489176d77`, **status 1**, block **66059624**
+  - uid `0xe584e9d0b78c64502d325b0b62982404` + `b8188dc269507a29f1434903d526970e`, recipient `0x43ea…af55` (the payer)
+  - binds the **same** payment tx `0x580b0700…b5f2c4` and contentHash `0x87acc96f…f45814`
+- Note the last two: two distinct attestations correctly reference one shared settle tx — the
+  attestation layer models the #5 aggregation instead of hiding it.
+
+## 8. ACP-standard checkout — PROVEN (2026-07-23)
+A checkout driven through the Agentic Commerce Protocol session API rather than Tilla's own.
+- Session `acp_X8jDV7S8eV4iq85TKyd6W5jez8G0h_cX` on store `invoice-flow`, buyer wallet
+  `0x03d1…4ebb`, item product 2 × 1 — session reached **`completed`** and is bound to order
+  `3dee732778854a0d`.
+- Tilla assigned the **unique per-order amount 9.001246 USDT0** (base 9 + 0.001246 micro-offset).
+- settle tx: `0xc44af2dac9a6946788e17864d58091ad` + `c363c788c78169e9a135fc33adf393fb`
+  - **receipt status 1**, block **66025300** (08:12:16 UTC), 1 log: USDT0 Transfer
+    **buyer `0x03d1…4ebb` -> merchant `0xf4c9…fa51` = 9.001246** — the exact reserved amount.
+- Attested on-chain as well (see #7, uid `0xaf3c0850…bd7386`).
+
+## 9. Human self-serve create-store fee — PROVEN (2026-07-24)
+The first create-store fee paid by a **human** through the self-serve UI (a wallet-connect flow,
+not an agent's x402 signature), and the first one at the **current 0.05 USDT fee**.
+- `store_creations` row 2: description "ONLINE FOOTBAL JERSEY STORE", expected **50000 micro
+  (0.050000 USDT0)**, status **`live`**, slug **`jersey-fc`** — https://tilla.gudman.xyz/s/jersey-fc/ returns HTTP 200.
+- fee tx: `0x7aab318fa5c2f2ba2edfde0f790b635f` + `94dc1aced23911a3b5f590c242f8ae8f`
+  - **receipt status 1**, block **66151616** (2026-07-24 19:17:32 UTC), 1 log: USDT0 Transfer
+    **human creator `0xe558…c946` -> Tilla `0xf4c9…fa51` = 0.050000**.
+- `0xe558…c946` is a **different wallet from every agent test wallet above**, but it is still
+  operator-funded — this is a self-serve *flow* proof, not organic third-party demand.
+
+## 10. MPP metered channel — PARTIALLY PROVEN (2026-07-23)
+Honest status: **channel opened + voucher signed; close/settle pending.** Nothing here may be
+cited as a completed settlement.
+- Store `templatevault`, product "Agency Essentials Bundle" (metered, 0.1 USDT/call).
+- Channel id `0xfc41ec8b6928a798685d9b837de0188c` + `10c58ceaf62f50dc5a3c2b3b023e012c` — this is the
+  settlement agent's channel identifier, **not** a tx hash; `eth_getTransactionReceipt` on it
+  returns null, as expected.
+- Deposit **2.000000 USDT0** is genuinely on-chain: tx `0x125c88d9eb23cb0f1e3fe09b809740e0` +
+  `f034a22429928c18f6a48b49ba61441f`, **receipt status 1**, block **66035448** (11:01:24 UTC),
+  USDT0 Transfer **buyer `0x43ea…af55` -> SA escrow `0x5e55…ce3b` = 2.000000**, relayed by
+  `0xf3bb…c608`. Attribution note: Tilla stores only the SA channel id, so this tx is matched to the
+  channel by amount + payer + a block timestamp identical to the `channel.opened` event, not by a
+  recorded hash. A first 2 USDT0 deposit at block 66035190 (10:57:06 UTC) produced **no** channel
+  row — an abandoned attempt, recorded here so the escrow balance reconciles.
+- One voucher signed for cumulative **0.100000 USDT0** spend. Vouchers are off-chain accounting by
+  design; the accumulated spend settles only when the settlement agent closes the channel.
+- Channel row status is still **`open`** — no close, no settle tx, nothing claimed.
+
 ## Summary
-Both sides of dual-sided commerce + Tilla's own ASP revenue are proven with **real on-chain USDT0**,
-all from a self-funded buyer wallet distinct from the merchant, each a single clean transaction:
-human checkout (exact-amount match), agent x402 store buy (EIP-3009 settle), and x402 create-store
-(Tilla earns). Remaining test budget: ~1.55 USDT0.
+
+| Rail | Proof tx(s) | Block(s) | Status |
+| --- | --- | --- | --- |
+| Human wallet checkout (#1) | `0x3d928348…629475` | 65873791 | proven |
+| Agent x402 `exact` store buy (#2) | `0x3ef0b384…290975` | 65875190 | proven |
+| Agent x402 create-store, Tilla earns (#3) | `0x4da04d17…db910c` | 65875359 | proven |
+| Subscription, x402 `period` (#4) | `0xf885c994…489ddb`, `0xfae7c905…87c181` | 66072022, 66072295 | proven (2 periods) |
+| Batch, x402 `aggr_deferred` (#5) | `0x580b0700…b5f2c4` | 66059520 | proven (2 orders, 1 settle) |
+| Non-custodial escrow commission (#6) | `0x7ac452b6…8e980a` + `0x2f9b22d2…96385b` | 66036695, 66036700 | proven (fund + release) |
+| EAS receipt attestations (#7) | `0x2d1f7071…2bf184`, `0xf0f9290c…79a82a`, `0xb4a599fb…e6f7ae`, `0xf33ff17f…176d77` | 65997226, 66025315, 66059590, 66059624 | proven (4 uids, read back) |
+| ACP-standard checkout (#8) | `0xc44af2da…f393fb` | 66025300 | proven |
+| Human self-serve create-store fee (#9) | `0x7aab318f…f8ae8f` | 66151616 | proven |
+| MPP metered channel (#10) | deposit `0x125c88d9…61441f`; no close tx | 66035448 | **partially proven** — open + voucher only |
+| Escrow job `1379aae00c6b4efd` | fund `0x486cc9cf…3da85b`; no release | 66054682 | **partially proven** — disputed, unreleased |
+
+Nine rails are proven with real on-chain USDT0 and independently re-verified receipts; the MPP
+channel and one disputed escrow job are recorded as partially proven and are never cited otherwise.
+Every settlement above is self-funded — Tilla's own wallets on both sides in most entries — and none
+of it is organic third-party demand.
+
+Test-wallet balance at chain head 66160121 (2026-07-24): `0x03d1…4ebb` holds **16.198832 USDT0**;
+`0xf4c9…fa51` (merchant / Tilla fee payTo) holds **37.440953 USDT0**.

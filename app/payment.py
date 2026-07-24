@@ -32,7 +32,6 @@ PAYMENT_EIP712_NAME = "USD₮0"
 PAYMENT_EIP712_VERSION = "1"
 PAYMENT_SYMBOL = "USDT"
 PAYMENT_DECIMALS = 6
-PAYMENT_DISPLAY_PRICE = "1 USDT"
 PAYMENT_TIMEOUT_SECONDS = 300
 DEFAULT_FACILITATOR_URL = "https://web3.okx.com"
 
@@ -237,7 +236,6 @@ class PaymentRail:
     eip712_version: str
     symbol: str
     decimals: int
-    display_price: str
     pay_to: str
 
 
@@ -290,7 +288,6 @@ def load_payment_rail(environment: Mapping[str, str]) -> PaymentRail:
         eip712_version=CANONICAL_CHAIN.eip712_version,
         symbol=CANONICAL_CHAIN.asset_symbol,
         decimals=CANONICAL_CHAIN.decimals,
-        display_price=PAYMENT_DISPLAY_PRICE,
         pay_to=pay_to,
     )
 
