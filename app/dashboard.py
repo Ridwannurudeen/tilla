@@ -38,6 +38,7 @@ from app import (
     delivery,
     domains,
     engine,
+    payment,
     refunds,
     render,
     self_serve,
@@ -1582,6 +1583,36 @@ def _creation_result(creation) -> dict:
     }
 
 
+@router.get("/api/merchant/create-store/pending")
+@limiter.limit("60/minute")
+def merchant_create_store_pending(
+    request: Request, session: Session = Depends(get_session)
+):
+    """The caller's still-actionable creations (newest first) plus the current
+    create-store fee. The dashboard is in-memory only, so without this a reload
+    stranded a pending — possibly already PAID — creation and the merchant started
+    over and paid twice. Behind the same _require_merchant gate as every other
+    merchant route, and scoped to the caller's own wallet: another merchant's
+    creations are never listed. The fee comes from the same PAYMENT_AMOUNT constant
+    the intent charges, so the panel's price copy can never drift from the real
+    fee."""
+    merchant = _require_merchant(request, session)
+    rows = self_serve.list_open(session, merchant.wallet_address)
+    return {
+        "fee_micro": int(payment.PAYMENT_AMOUNT),
+        "fee_usdt": usdt(int(payment.PAYMENT_AMOUNT)),
+        "creations": [
+            {
+                **_creation_result(row),
+                "description": row.description,
+                "theme": row.theme,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ],
+    }
+
+
 @router.post("/api/merchant/create-store")
 @limiter.limit("6/minute")
 def merchant_create_store(
@@ -1613,8 +1644,10 @@ def merchant_create_store_pay(
     creation_id: int = Path(..., ge=1),
     session: Session = Depends(get_session),
 ):
-    """Verify the merchant's on-chain 1-USDT payment and generate the store. Owner-
-    scoped (a foreign id is 404). A reused payment is 409, a bad tx is 400."""
+    """Verify the merchant's on-chain create-store fee payment and generate the
+    store. Owner-scoped (a foreign id is 404). Safe to call repeatedly with the SAME
+    hash — that is how the dashboard recovers a payment it could not confirm on the
+    first POST. A reused payment is 409, a bad tx is 400."""
     merchant = _require_merchant(request, session)
     creation = self_serve.get_creation(session, creation_id, merchant.wallet_address)
     if creation is None:
@@ -1636,8 +1669,9 @@ def merchant_create_store_retry(
     creation_id: int = Path(..., ge=1),
     session: Session = Depends(get_session),
 ):
-    """Retry generation for a paid-but-ungenerated creation (after a model outage).
-    No re-charge — the payment already verified."""
+    """Regenerate a paid-but-ungenerated creation — after a model outage ('paid') or
+    after the generated content was blocked ('failed'). No re-charge: the payment
+    already verified, and both states are only reachable through it."""
     merchant = _require_merchant(request, session)
     creation = self_serve.get_creation(session, creation_id, merchant.wallet_address)
     if creation is None:

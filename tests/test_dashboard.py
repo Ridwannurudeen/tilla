@@ -363,6 +363,62 @@ def test_dashboard_shell_renders_without_data():
     assert "{{" not in r.text  # no Jinja leak; shell carries no server data
 
 
+# ------------------------------------------------- self-serve create-store panel
+def _create_panel() -> str:
+    """The dashboard's self-serve create-store code, isolated the way the
+    marketplace panel test isolates its own."""
+    from app.config import THEMES_DIR
+
+    html = (THEMES_DIR / "_dashboard.html").read_text(encoding="utf-8")
+    return html[
+        html.index("// ---- self-serve create-store") : html.index(
+            "// ---- tabbed sections"
+        )
+    ]
+
+
+def test_create_panel_states_the_real_fee_not_a_literal():
+    """The panel hard-coded "1 USDT" while the rail charges PAYMENT_AMOUNT. Every
+    price it shows now comes from the server, so the copy cannot drift again."""
+    from app import payment
+    from app.dashboard import usdt
+
+    r = client.get("/dashboard")
+    assert "1 USDT" not in r.text  # the price that was never charged
+    panel = _create_panel()
+    assert "d.fee_usdt" in panel  # the fee the server states
+    assert "d.amount_usdt" in panel  # the amount this creation is charged
+
+    acct = Account.create()
+    fee = client.get(
+        "/api/merchant/create-store/pending", headers=_auth(_merchant_token(acct))
+    ).json()
+    assert fee["fee_micro"] == int(payment.PAYMENT_AMOUNT)
+    assert fee["fee_usdt"] == usdt(int(payment.PAYMENT_AMOUNT)) == "0.050000"
+
+
+def test_create_panel_signs_at_most_one_transfer():
+    """The double-charge guard: exactly one call site may hand the wallet a transfer,
+    the hash is waited on and persisted before it is reported, and every recovery
+    path re-submits that same hash instead of signing another."""
+    panel = _create_panel()
+    assert panel.count("eth_sendTransaction") == 1
+    assert "eth_getTransactionReceipt" in panel  # broadcast is not mined
+    assert "csRecordTx(txHash)" in panel  # hash shown + stored before /pay
+    assert "tilla-create-store" in panel  # ...and it survives a reload
+    assert "https://www.oklink.com/x-layer/tx/" in panel
+    assert "retrying with the same transaction" in panel
+    assert "Already paid? Paste your transaction hash" in panel
+    assert "innerHTML" not in panel  # merchant data stays textContent-only
+
+
+def test_create_panel_resumes_and_regenerates_instead_of_recharging():
+    panel = _create_panel()
+    assert "/api/merchant/create-store/pending" in panel  # reload restores the flow
+    assert "csRenderPay(resume, true)" in panel  # ...at the pay step
+    assert 'csRetryButton(d.id, "Regenerate (no charge)")' in panel  # not "Start over"
+
+
 # --------------------------------------------------------------------- CSV export
 def _rename_product(store_id: int, name: str) -> None:
     with SessionLocal() as s:

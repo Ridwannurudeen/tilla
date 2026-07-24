@@ -425,7 +425,7 @@
       <div id="csStep1">
         <div class="row head">
           <strong>Describe it — Tilla builds it, your wallet gets every sale</strong>
-          <span class="muted mono">one-time 1 USDT fee</span>
+          <span class="muted mono" id="csFeeChip">one-time store-creation fee</span>
         </div>
         <label for="csDesc">Describe your store in one line</label>
         <textarea id="csDesc" maxlength="2000" placeholder="single-origin coffee beans, roasted to order"></textarea>
@@ -437,9 +437,9 @@
           <option value="editorial">Editorial</option>
         </select>
         <div class="row" style="margin-top:12px">
-          <button id="csCreate" class="primary">Create my store — 1 USDT</button>
+          <button id="csCreate" class="primary">Create my store</button>
         </div>
-        <p class="muted small">You pay a one-time 1 USDT store-creation fee from your wallet.
+        <p class="muted small"><span id="csFeeNote">You pay a one-time store-creation fee from your wallet.</span>
            Your wallet also receives every sale — Tilla never holds your money.</p>
       </div>
       <div id="csStep2" class="hide"></div>
@@ -786,7 +786,7 @@
     byId("signBtn").classList.add("hide");
     byId("signOut").classList.remove("hide");
     routeHash(); // restore the hash's view instead of always viewMain
-    await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace(), loadReferrals()]);
+    await Promise.all([loadSummary(), loadStores(), loadWebhook(), loadMarketplace(), loadReferrals(), loadCreateStore()]);
   }
 
   // ---- marketplace (read-only: listing status, sold split, screening receipts) ----
@@ -1011,9 +1011,13 @@
     });
   }
 
-  // ---- self-serve create-store (screen -> pay 1 USDT on-chain -> generate; every
+  // ---- self-serve create-store (screen -> pay the fee on-chain -> generate; every
   //      string rendered via textContent only) ----
-  var CS = null; // the pending creation: { id, payTo, micro }
+  var CS = null;      // the open creation: { id, payTo, micro }
+  var CS_FEE = null;  // the create-store fee, exactly as the server states it
+  var CS_KEY = "tilla-create-store";
+  var CS_TX_RE = /^0x[0-9a-fA-F]{64}$/;
+  var CS_SUBMIT_TRIES = 6;
 
   function cmsg(text, isErr) {
     var m = byId("createMsg");
@@ -1027,19 +1031,66 @@
   }
   function csErr(e) {
     if (e.status === 422) return "That description didn't pass our safety check — try describing it differently.";
-    if (e.status === 409) return "That payment was already used.";
-    if (e.status === 400) return "We couldn't verify that payment — please try again.";
+    if (e.status === 409) return "That payment already created a different store.";
+    // Never "try again" here: this reads AFTER a transfer was signed, and trying
+    // again used to mean signing a second one.
+    if (e.status === 400) return "We couldn't confirm that payment — " + e.message + ". Nothing extra was charged.";
     if (e.status === 503 || e.status === 502) return "Store creation is briefly unavailable — try again shortly.";
     return e.message;
   }
   function csReset() {
     CS = null;
+    csForget();
     byId("csDesc").value = "";
     byId("csTheme").value = "";
     clear(byId("csStep2"));
     clear(byId("csStep3"));
     cmsg("");
     csShow(1);
+  }
+
+  // Every price this panel states is the fee the SERVER charges — never a literal, so
+  // the copy can't drift from the amount actually transferred.
+  function csFeeLabel() { return CS_FEE ? ("Create my store — " + CS_FEE + " USDT0") : "Create my store"; }
+  function csPriceCopy() {
+    if (!CS_FEE) return;
+    byId("csFeeChip").textContent = "one-time " + CS_FEE + " USDT0 fee";
+    byId("csCreate").textContent = csFeeLabel();
+    byId("csFeeNote").textContent = "You pay a one-time " + CS_FEE + " USDT0 store-creation fee from your wallet.";
+  }
+
+  // A signed transfer outlives the tab: the hash is persisted the moment the wallet
+  // returns it, so a reload finishes that payment instead of asking for another one.
+  function csSave(id, txHash) {
+    try { localStorage.setItem(CS_KEY, JSON.stringify({ creationId: id, txHash: txHash, addr: ADDR })); } catch (e) {}
+  }
+  function csSaved() {
+    var raw;
+    try { raw = JSON.parse(localStorage.getItem(CS_KEY) || "null"); } catch (e) { return null; }
+    if (!raw || raw.addr !== ADDR || !CS_TX_RE.test(raw.txHash || "")) return null;
+    return raw;
+  }
+  function csForget() { try { localStorage.removeItem(CS_KEY); } catch (e) {} }
+
+  // The console keeps nothing across reloads, so the server is asked what is still
+  // open at sign-in. Without this a paid-but-unfinished creation was invisible and
+  // the only way forward looked like paying again.
+  async function loadCreateStore() {
+    var d;
+    try { d = await api("/api/merchant/create-store/pending"); } catch (e) { return; }
+    CS_FEE = d.fee_usdt;
+    csPriceCopy();
+    var resume = (d.creations || [])[0];
+    if (!resume) return;
+    if (resume.status !== "pending") { csResult(resume); return; }
+    byId("csDesc").value = resume.description || "";
+    byId("csTheme").value = resume.theme || "";
+    csRenderPay(resume, true);
+    var saved = csSaved();
+    if (saved && saved.creationId === resume.id) {
+      byId("csTxHash").value = saved.txHash;
+      byId("csPayStatus").textContent = "A payment you already sent for this store is filled in below — verify it instead of paying again.";
+    }
   }
 
   async function createStore() {
@@ -1054,21 +1105,26 @@
     try {
       d = await api("/api/merchant/create-store", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     } catch (e) {
-      btn.disabled = false; btn.textContent = "Create my store — 1 USDT";
+      btn.disabled = false; btn.textContent = csFeeLabel();
       cmsg(csErr(e), true);
       return;
     }
-    btn.disabled = false; btn.textContent = "Create my store — 1 USDT";
+    btn.disabled = false; btn.textContent = csFeeLabel();
     cmsg("");
+    csRenderPay(d, false);
+  }
+
+  function csRenderPay(d, resumed) {
     CS = { id: d.id, payTo: d.pay_to, micro: BigInt(d.amount_micro) };
     var box = byId("csStep2"); clear(box);
     var head = el("div", "row head");
-    head.appendChild(el("strong", null, "Pay 1 USDT to create your store"));
+    head.appendChild(el("strong", null, "Pay " + d.amount_usdt + " USDT0 to create your store"));
     head.appendChild(el("span", "muted mono", d.amount_usdt + " USDT0 · X Layer"));
     box.appendChild(head);
     box.appendChild(el("div", "muted small", "Approve a single transfer of " + d.amount_usdt + " USDT0 from your wallet — your store is generated as soon as it verifies on-chain."));
-    var row = el("div", "row");
-    var pay = el("button", "primary", "Pay with wallet");
+    if (resumed) box.appendChild(el("div", "muted small", "Picking up the store you started — it hasn't been paid for yet."));
+    var row = el("div", "row"); row.id = "csPayRow";
+    var pay = el("button", "primary", "Pay with wallet"); pay.id = "csPayBtn";
     pay.onclick = function () { csPay(pay); };
     row.appendChild(pay);
     var back = el("button", "ghost", "Start over");
@@ -1078,7 +1134,101 @@
     var st = el("div", "muted"); st.id = "csPayStatus"; st.style.marginTop = "10px";
     st.setAttribute("aria-live", "polite");
     box.appendChild(st);
+    var wrap = el("div"); wrap.id = "csTxWrap";
+    box.appendChild(wrap);
+    box.appendChild(csTxForm());
     csShow(2);
+  }
+
+  // The way out of every "my wallet says it went through but the page doesn't": a
+  // hash the merchant already holds is verified against this same creation, so
+  // recovering a payment never costs a second one. The server accepts any exact-fee
+  // transfer from this merchant to its pay_to.
+  function csTxForm() {
+    var wrap = el("div"); wrap.id = "csTxForm"; wrap.style.marginTop = "14px";
+    var lbl = el("label", null, "Already paid? Paste your transaction hash");
+    lbl.htmlFor = "csTxHash";
+    wrap.appendChild(lbl);
+    var input = el("input"); input.id = "csTxHash"; input.className = "mono";
+    input.placeholder = "0x…"; input.autocomplete = "off"; input.spellcheck = false;
+    wrap.appendChild(input);
+    var row = el("div", "row"); row.style.marginTop = "10px";
+    var go = el("button", "ghost", "Verify this payment");
+    go.onclick = function () {
+      var hash = (input.value || "").trim();
+      if (!CS_TX_RE.test(hash)) { cmsg("That isn't a transaction hash — paste the full 0x… hash (66 characters) from your wallet.", true); return; }
+      cmsg("");
+      csRecordTx(hash);
+      csSubmitTx(hash);
+    };
+    row.appendChild(go);
+    wrap.appendChild(row);
+    return wrap;
+  }
+
+  function csTxLine(txHash) {
+    var line = el("div", "muted small"); line.style.marginTop = "8px";
+    line.appendChild(document.createTextNode("Transaction "));
+    var a = el("a", "mono", txHash);
+    a.href = "https://www.oklink.com/x-layer/tx/" + txHash;
+    a.target = "_blank"; a.rel = "noopener";
+    line.appendChild(a);
+    return line;
+  }
+
+  // Hidden and disabled travel together, so nothing can hand the wallet a second
+  // transfer to sign while the first one is still being confirmed.
+  function csPayControls(visible) {
+    ["csPayRow", "csTxForm"].forEach(function (id) {
+      var node = byId(id);
+      if (node) node.classList.toggle("hide", !visible);
+    });
+    var pay = byId("csPayBtn");
+    if (pay) pay.disabled = !visible;
+  }
+
+  // Once a transfer is signed the pay button is GONE — re-enabling it is what charged
+  // the merchant twice. The hash goes on screen (and into localStorage) first, so it
+  // survives whatever happens next.
+  function csRecordTx(txHash) {
+    csPayControls(false);
+    csSave(CS.id, txHash);
+    var wrap = byId("csTxWrap"); clear(wrap);
+    wrap.appendChild(csTxLine(txHash));
+  }
+
+  function csShortTx(txHash) { return "tx " + txHash.slice(0, 10) + "…"; }
+  function csWait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  // Confirmation failures are retried with the SAME hash, never a new transfer.
+  async function csSubmitTx(txHash) {
+    var st = byId("csPayStatus");
+    for (var attempt = 1; attempt <= CS_SUBMIT_TRIES; attempt++) {
+      if (!TOKEN || !CS) return;
+      var d;
+      try {
+        d = await api("/api/merchant/create-store/" + CS.id + "/pay", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx_hash: txHash }) });
+      } catch (e) {
+        if (e.status === 409) {
+          // That hash funded a different store, so this one really is unpaid — the
+          // one case where offering the wallet again is not a double charge.
+          st.textContent = ""; csForget(); csPayControls(true); cmsg(csErr(e), true);
+          return;
+        }
+        if (attempt === CS_SUBMIT_TRIES) {
+          st.textContent = "";
+          cmsg("Your payment was sent (" + csShortTx(txHash) + ") but we couldn't confirm it yet. Nothing extra was charged — verify the same transaction again below in a moment.", true);
+          byId("csTxForm").classList.remove("hide");
+          byId("csTxHash").value = txHash;
+          return;
+        }
+        st.textContent = "Your payment was sent (" + csShortTx(txHash) + "). We could not confirm it yet — retrying with the same transaction.";
+        await csWait(3000 * attempt);
+        continue;
+      }
+      csResult(d);
+      return;
+    }
   }
 
   async function csPay(btn) {
@@ -1099,21 +1249,50 @@
       var data = buildTransferData(CS.payTo, CS.micro);
       txHash = await provider.request({ method: "eth_sendTransaction", params: [{ from: account, to: USDT0, value: "0x0", data: data }] });
     } catch (e) {
+      // Nothing is signed yet — this is the only side of the send where re-enabling
+      // the button (and saying "try again") is safe.
       st.textContent = "";
       cmsg(isReject(e) ? "Transaction canceled — nothing was charged. Pay when you're ready." : "Wallet error — check you hold USDT0 on X Layer.", true);
       btn.disabled = false; return;
     }
-    st.textContent = "Payment sent — verifying on X Layer and building your store…";
-    var d;
-    try {
-      d = await api("/api/merchant/create-store/" + CS.id + "/pay", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tx_hash: txHash }) });
-    } catch (e) {
+    if (!CS_TX_RE.test(txHash || "")) {
       st.textContent = "";
-      cmsg(csErr(e), true);
-      btn.disabled = false;
+      cmsg("Your wallet didn't return a usable transaction hash — copy it from your wallet and paste it below. Don't pay again.", true);
       return;
     }
-    csResult(d);
+    csRecordTx(txHash);
+    st.textContent = "Payment sent — waiting for X Layer to confirm it…";
+    var state = await csWaitForReceipt(provider, txHash);
+    if (state === "reverted") {
+      st.textContent = "";
+      csForget();
+      csPayControls(true);
+      cmsg("That transaction failed on X Layer — nothing was transferred, so you can pay again.", true);
+      return;
+    }
+    st.textContent = "Verifying your payment and building your store…";
+    await csSubmitTx(txHash);
+  }
+
+  // Broadcast is not settlement. Posting the hash the instant the wallet returned it
+  // asked the server for a receipt that didn't exist yet, and the 400 that came back
+  // read as "payment failed" — which invited a second transfer. Same bounded wait
+  // _checkout.html uses before it settles.
+  function csWaitForReceipt(provider, txHash) {
+    return new Promise(function (resolve) {
+      var tries = 0;
+      (function step() {
+        tries++;
+        provider.request({ method: "eth_getTransactionReceipt", params: [txHash] }).then(function (r) {
+          if (r && r.blockNumber) { resolve(r.status === "0x0" ? "reverted" : "mined"); return; }
+          if (tries > 60) { resolve("unconfirmed"); return; }
+          setTimeout(step, 3000);
+        }).catch(function () {
+          if (tries > 60) { resolve("unconfirmed"); return; }
+          setTimeout(step, 3000);
+        });
+      })();
+    });
   }
 
   async function csEnsureChain(provider, st) {
@@ -1136,6 +1315,7 @@
 
   function csResult(d) {
     CS = null;
+    csForget();
     var box = byId("csStep3"); clear(box);
     if (d.status === "live" && d.url) {
       box.appendChild(el("div", "ok", "Your store is live."));
@@ -1153,23 +1333,36 @@
     } else if (d.status === "paid") {
       box.appendChild(el("div", null, "Payment received — finishing your store…"));
       box.appendChild(el("div", "muted small", "Generation is briefly unavailable. Your payment is safe — retry in a moment at no extra charge."));
-      var rb = el("button", "primary", "Retry"); rb.style.marginTop = "10px";
-      rb.onclick = async function () {
-        rb.disabled = true;
-        var r;
-        try { r = await api("/api/merchant/create-store/" + d.id + "/retry", { method: "POST" }); }
-        catch (e) { rb.disabled = false; cmsg(csErr(e), true); return; }
-        cmsg("");
-        csResult(r);
-      };
-      box.appendChild(rb);
+      var prow = el("div", "row"); prow.style.marginTop = "10px";
+      prow.appendChild(csRetryButton(d.id, "Retry — no extra charge"));
+      box.appendChild(prow);
     } else {
       box.appendChild(el("div", "err", "We couldn't build a store from that description — the generated content didn't pass our safety check."));
-      var sb = el("button", "ghost", "Start over"); sb.style.marginTop = "10px";
+      // 'failed' is only reachable THROUGH a verified payment, so the fee is already
+      // spent: regenerating from the same description costs nothing, and starting
+      // over (a fresh creation, a fresh fee) is the secondary choice, not the only one.
+      box.appendChild(el("div", "muted small", "Your payment still stands — regenerate from the same description at no extra charge."));
+      var frow = el("div", "row"); frow.style.marginTop = "10px";
+      frow.appendChild(csRetryButton(d.id, "Regenerate (no charge)"));
+      var sb = el("button", "ghost", "Start over");
       sb.onclick = csReset;
-      box.appendChild(sb);
+      frow.appendChild(sb);
+      box.appendChild(frow);
     }
     csShow(3);
+  }
+
+  function csRetryButton(id, label) {
+    var b = el("button", "primary", label);
+    b.onclick = async function () {
+      b.disabled = true;
+      var r;
+      try { r = await api("/api/merchant/create-store/" + id + "/retry", { method: "POST" }); }
+      catch (e) { b.disabled = false; cmsg(csErr(e), true); return; }
+      cmsg("");
+      csResult(r);
+    };
+    return b;
   }
 
   // ---- tabbed sections (store console + main dashboard) ----

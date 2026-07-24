@@ -11,7 +11,7 @@ from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app import chain, config, engine, payment, screening
+from app import chain, config, engine, payment, screening, self_serve
 from app.screening import ScreeningBlocked
 
 client = TestClient(main.app)
@@ -263,3 +263,141 @@ def test_generation_outage_then_retry(monkeypatch):
     assert retry.status_code == 200, retry.text
     assert retry.json()["status"] == "live"
     assert retry.json()["slug"] == "recovered-store"
+
+
+def _paid_but_failed(monkeypatch, token, acct, tx="0x" + "6" * 64) -> int:
+    """A creation whose payment verified but whose GENERATED content could not clear
+    screening — status 'failed', tx consumed, no store. The dead end that burned the
+    fee before 'failed' became retryable."""
+    _stub_create_store(monkeypatch, slug="queued-store", pending=True)
+    cid = _intent(token).json()["id"]
+    _mock_tx(monkeypatch, _receipt(acct.address, TILLA, FEE))
+    pay = client.post(
+        f"/api/merchant/create-store/{cid}/pay",
+        json={"tx_hash": tx},
+        headers=_auth(token),
+    )
+    assert pay.status_code == 200, pay.text
+    assert pay.json()["status"] == "failed"
+    return cid
+
+
+def test_failed_generation_regenerates_without_recharge(monkeypatch):
+    acct = Account.create()
+    token = _merchant_token(acct)
+    _allow_screen(monkeypatch)
+    cid = _paid_but_failed(monkeypatch, token, acct)
+
+    # The tx is already consumed, so regenerating must never look at the chain again.
+    def _no_receipt(cfg, tx_hash, timeout=None):
+        raise AssertionError("a failed creation must not re-verify its payment")
+
+    monkeypatch.setattr(chain, "get_transaction_receipt", _no_receipt)
+    _stub_create_store(monkeypatch, slug="second-try")
+    r = client.post(f"/api/merchant/create-store/{cid}/retry", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "live"
+    assert r.json()["slug"] == "second-try"
+
+
+def test_pending_resumes_the_open_creation_owner_scoped(monkeypatch):
+    """A reload has nothing in memory; the open creation must come back from the
+    server — and only ever the caller's own."""
+    owner = Account.create()
+    other = Account.create()
+    token = _merchant_token(owner)
+    _allow_screen(monkeypatch)
+    _stub_create_store(monkeypatch)
+    cid = _intent(token, description="hand-thrown mugs", theme="bold").json()["id"]
+    _intent(_merchant_token(other), description="someone else's shop")
+
+    r = client.get("/api/merchant/create-store/pending", headers=_auth(token))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["fee_micro"] == FEE
+    assert body["fee_usdt"] == "0.050000"
+    assert [c["id"] for c in body["creations"]] == [cid]  # never the other merchant's
+    open_row = body["creations"][0]
+    assert open_row["status"] == "pending"
+    assert open_row["description"] == "hand-thrown mugs"
+    assert open_row["theme"] == "bold"
+    assert open_row["pay_to"].lower() == TILLA
+    assert open_row["amount_usdt"] == "0.050000"
+    assert open_row["created_at"]
+
+
+def test_pending_keeps_failed_and_drops_live(monkeypatch):
+    acct = Account.create()
+    token = _merchant_token(acct)
+    _allow_screen(monkeypatch)
+    failed = _paid_but_failed(monkeypatch, token, acct)
+    _stub_create_store(monkeypatch, slug="all-good")
+    live = _intent(token).json()["id"]
+    _mock_tx(monkeypatch, _receipt(acct.address, TILLA, FEE))
+    client.post(
+        f"/api/merchant/create-store/{live}/pay",
+        json={"tx_hash": "0x" + "3" * 64},
+        headers=_auth(token),
+    )
+    body = client.get("/api/merchant/create-store/pending", headers=_auth(token)).json()
+    ids = [c["id"] for c in body["creations"]]
+    assert failed in ids  # still actionable — regenerate at no charge
+    assert live not in ids  # nothing left to do
+
+
+def test_pending_requires_merchant_auth():
+    assert client.get("/api/merchant/create-store/pending").status_code == 401
+
+
+def test_pay_polls_a_not_yet_mined_receipt(monkeypatch):
+    """The dashboard posts the hash as soon as the wallet broadcasts it, so the first
+    receipt lookups legitimately return None — that must not read as 'not found'."""
+    acct = Account.create()
+    token = _merchant_token(acct)
+    _allow_screen(monkeypatch)
+    _stub_create_store(monkeypatch, slug="mined-late")
+    cid = _intent(token).json()["id"]
+    mined = _receipt(acct.address, TILLA, FEE)
+    seen = []
+
+    def _fake(cfg, tx_hash, timeout=None):
+        assert cfg is payment.CANONICAL_CHAIN, (
+            "verification must pin the canonical chain"
+        )
+        seen.append(tx_hash)
+        return mined if len(seen) > 2 else None
+
+    monkeypatch.setattr(chain, "get_transaction_receipt", _fake)
+    monkeypatch.setattr(self_serve, "_RECEIPT_RETRY_SECONDS", 0)
+    r = client.post(
+        f"/api/merchant/create-store/{cid}/pay",
+        json={"tx_hash": "0x" + "5" * 64},
+        headers=_auth(token),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "live"
+    assert len(seen) == 3
+
+
+def test_pay_receipt_polling_is_bounded(monkeypatch):
+    acct = Account.create()
+    token = _merchant_token(acct)
+    _allow_screen(monkeypatch)
+    _stub_create_store(monkeypatch)
+    cid = _intent(token).json()["id"]
+    seen = []
+
+    def _never(cfg, tx_hash, timeout=None):
+        seen.append(tx_hash)
+        return None
+
+    monkeypatch.setattr(chain, "get_transaction_receipt", _never)
+    monkeypatch.setattr(self_serve, "_RECEIPT_RETRY_SECONDS", 0)
+    r = client.post(
+        f"/api/merchant/create-store/{cid}/pay",
+        json={"tx_hash": "0x" + "4" * 64},
+        headers=_auth(token),
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "transaction not found"
+    assert len(seen) == self_serve._RECEIPT_TRIES
