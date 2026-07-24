@@ -728,9 +728,11 @@
     opts = opts || {};
     opts.headers = Object.assign({}, opts.headers || {}, auth());
     var r = await fetch(path, opts);
-    // A 401 signs the merchant out — EXCEPT when the caller opts out (allow401) for an
-    // optional feature whose 401 just means "not enrolled", which must not end the session.
-    if (r.status === 401 && !opts.allow401) { signOut(); throw new Error("Session expired — sign in again."); }
+    // Every call from this console is merchant-authenticated (/api/merchant/*, or the
+    // /api/stores/* growth routes which accept the owning merchant), so a 401 can only
+    // mean the session itself is over. Never point this helper at a buyer-session route:
+    // its 401 would be permanent and would sign the merchant out on every load.
+    if (r.status === 401) { signOut(); throw new Error("Session expired — sign in again."); }
     var body = null;
     try { body = await r.json(); } catch (e) {}
     if (!r.ok) {
@@ -846,61 +848,89 @@
     });
   }
 
-  // ---- referrals (this wallet's OWN rev-share earnings; the API only ever returns
-  //      the signed-in earner's balance — every string rendered via textContent) ----
+  // ---- referrals (the merchant's OWN affiliate ledger: who referred sales to their
+  //      stores and what is still owed. Merchant-authenticated, so it rides the same
+  //      dashboard session; every string rendered via textContent) ----
   async function loadReferrals() {
     var box = byId("referrals");
     var data;
-    try { data = await api("/api/affiliate/summary", { allow401: true }); }
+    try { data = await api("/api/merchant/affiliates"); }
     catch (e) {
-      // 401 here just means this wallet has no affiliate/referral record yet — it must
-      // NOT sign the merchant out (allow401 above keeps the session alive).
       clear(box);
-      var msg = (e && e.status === 401)
-        ? "No referral earnings yet — share a store link with ?ref=<your wallet> to start."
-        : "Could not load referral earnings.";
-      box.appendChild(el("div", "card muted sentence", msg));
+      box.appendChild(el("div", "card muted sentence", "Could not load referrals — " + e.message));
       return;
+    }
+    function txCell(url) {
+      var td = el("td");
+      // server-built OKLink URL (never merchant input) — same pattern as the order tx links
+      if (url) { var a = el("a", "mono", "View"); a.href = url; a.rel = "noopener"; a.target = "_blank"; td.appendChild(a); }
+      else { td.appendChild(el("span", "muted", "—")); }
+      return td;
     }
     clear(box);
-    if (!data.stores || !data.stores.length) {
-      box.appendChild(el("div", "card muted sentence", "No referral earnings yet — share a store link with ?ref=<your wallet> to start."));
-      return;
-    }
+    var referrers = data.referrers || [], orders = data.orders || [];
     var c = el("div", "card");
-    c.appendChild(el("p", "muted small", "Earnings from sales made through your referral links — share any store's link with ?ref=<your wallet> to earn a share."));
+    c.appendChild(el("p", "muted small", "Agents earn a share by sending buyers to your stores with ?ref=<their wallet>. Accrued is what you still owe them; paid out is what you have already sent."));
     var g = el("div", "grid");
     function stat(k, v) { var s = el("div", "stat"); s.appendChild(el("div", "k", k)); s.appendChild(el("div", "v", v)); g.appendChild(s); }
-    stat("Accrued (USDT0)", data.totals.accrued_usdt);
-    stat("Paid out (USDT0)", data.totals.paid_usdt);
-    stat("Void (USDT0)", data.totals.void_usdt);
+    stat("Owed now (USDT0)", data.owed_usdt);
+    stat("Referrers", String(referrers.length));
+    stat("Referred orders", String(orders.length));
     c.appendChild(g);
+    if (!referrers.length) {
+      c.appendChild(el("p", "muted sentence", "No referred sales yet — an agent earns a share by sharing your store link with ?ref=<their wallet>."));
+      box.appendChild(c);
+      return;
+    }
     var t = el("table"), thead = el("thead"), tr = el("tr");
-    ["Store", "Orders", "Accrued", "Paid out", "Void"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
+    ["Referrer", "Accrued", "Paid out", "Void"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; tr.appendChild(th); });
     thead.appendChild(tr); t.appendChild(thead);
     var tb = el("tbody");
-    data.stores.forEach(function (st) {
+    referrers.forEach(function (r) {
       var row = el("tr");
-      var std = el("td");
-      if (st.store_slug) {
-        // st.store_slug is server-validated to the slug pattern — safe in a path segment
-        var a = el("a", "mono", st.store_slug); a.href = "/s/" + st.store_slug + "/"; std.appendChild(a);
-      } else {
-        std.appendChild(el("span", "muted", "—"));
-      }
-      row.appendChild(std);
-      row.appendChild(el("td", null, String(st.orders)));
-      row.appendChild(el("td", null, st.accrued_usdt));
-      row.appendChild(el("td", null, st.paid_usdt));
-      row.appendChild(el("td", null, st.void_usdt));
+      row.appendChild(el("td", "mono", r.referrer));
+      row.appendChild(el("td", null, r.accrued_usdt));
+      row.appendChild(el("td", null, r.paid_usdt));
+      row.appendChild(el("td", null, r.void_usdt));
       tb.appendChild(row);
     });
     t.appendChild(tb);
     var wrap = el("div", "scroll"); wrap.style.marginTop = "10px";
-    wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Referral earnings by store");
+    wrap.tabIndex = 0; wrap.setAttribute("aria-label", "Referral totals by referrer");
     wrap.appendChild(t);
     c.appendChild(wrap);
     box.appendChild(c);
+    if (!orders.length) return;
+    var oc = el("div", "card");
+    oc.appendChild(el("p", "muted small", "Referred orders — the sale tx, plus the payout tx once you have paid that referrer."));
+    var ot = el("table"), othead = el("thead"), otr = el("tr");
+    ["Order", "Store", "Referrer", "Status", "Share", "Sale tx", "Payout tx"].forEach(function (h) { var th = el("th", null, h); th.scope = "col"; otr.appendChild(th); });
+    othead.appendChild(otr); ot.appendChild(othead);
+    var otb = el("tbody");
+    orders.forEach(function (o) {
+      var row = el("tr");
+      row.appendChild(el("td", "mono", o.order_id));
+      var sd = el("td");
+      if (o.store_slug) {
+        // o.store_slug is server-validated to the slug pattern — safe in a path segment
+        var sa = el("a", "mono", o.store_slug); sa.href = "/s/" + o.store_slug + "/"; sd.appendChild(sa);
+      } else {
+        sd.appendChild(el("span", "muted", "—"));
+      }
+      row.appendChild(sd);
+      row.appendChild(el("td", "mono", o.referrer));
+      row.appendChild(el("td", null, o.status));
+      row.appendChild(el("td", null, money((o.accrued_micro || 0) / 1e6)));
+      row.appendChild(txCell(o.sale_tx_url));
+      row.appendChild(txCell(o.payout_tx_url));
+      otb.appendChild(row);
+    });
+    ot.appendChild(otb);
+    var owrap = el("div", "scroll"); owrap.style.marginTop = "10px";
+    owrap.tabIndex = 0; owrap.setAttribute("aria-label", "Referred orders");
+    owrap.appendChild(ot);
+    oc.appendChild(owrap);
+    box.appendChild(oc);
   }
 
   // ---- summary ----
