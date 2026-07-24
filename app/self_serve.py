@@ -168,7 +168,10 @@ def _generate(creation: StoreCreation) -> StoreCreation:
         )
     except engine.GenerationUnavailable:
         return creation  # stays 'paid' — retry when the model is back, no recharge
-    if result.get("status") == "live" and result.get("slug"):
+    # create_store returns NO 'status' key on success — only the screening-queued path
+    # sets status='pending_screening'. Comparing against "live" (a value it never
+    # returns) marked every SUCCESSFUL generation as 'failed', burning a real payment.
+    if result.get("slug") and result.get("status") != "pending_screening":
         creation.slug = result["slug"]
         creation.status = "live"
     else:

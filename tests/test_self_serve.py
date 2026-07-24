@@ -51,10 +51,29 @@ def _allow_screen(monkeypatch):
     )
 
 
-def _stub_create_store(monkeypatch, slug="cool-beans", status="live"):
-    monkeypatch.setattr(
-        engine, "create_store", lambda *_a, **_k: {"slug": slug, "status": status}
-    )
+def _stub_create_store(monkeypatch, slug="cool-beans", pending=False):
+    # Mirror engine.create_store's REAL return shape and signature: the success dict
+    # carries NO 'status' key; only the screening-queued path sets 'pending_screening'.
+    # A stub inventing status='live' hid _generate marking every success as 'failed'.
+    def _fake(desc, addr=None, delivery=None, theme=None):
+        if pending:
+            return {
+                "slug": slug,
+                "status": "pending_screening",
+                "store_name": "Cool Beans",
+                "manage_key": "k",
+                "message": "queued",
+            }
+        return {
+            "slug": slug,
+            "store_name": "Cool Beans",
+            "url": f"https://tilla.gudman.xyz/s/{slug}/",
+            "product_name": "Beans",
+            "price_usdt": 5,
+            "manage_key": "k",
+        }
+
+    monkeypatch.setattr(engine, "create_store", _fake)
 
 
 def _pad(addr: str) -> str:
