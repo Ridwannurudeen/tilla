@@ -234,12 +234,19 @@ def test_agent_card_offering_envelope():
     skills = {s["id"]: s for s in card["skills"]}
     # create-store carries a fixed requiredFunds equal to the real /create-store 402
     # charge (PAYMENT_AMOUNT = 0.05 USDT); its nextActions POST /create-store.
+    from app import agentic
     from app.payment import PAYMENT_AMOUNT
 
     cs = skills["create-store"]
     assert cs["requiredFunds"]["amount_micro"] == int(PAYMENT_AMOUNT) == 50_000
     assert cs["requiredFunds"]["asset"] == config.USDT0
     assert any(a["endpoint"] == "/create-store" for a in cs["nextActions"])
+    # Both human-readable price strings are DERIVED from the same requiredFunds
+    # amount, so a fee change cannot desynchronize them from the real 402.
+    price = f"{agentic._usdt_str(int(PAYMENT_AMOUNT))} {agentic.CURRENCY}"
+    assert cs["requiredFunds"]["amount"] == "0.05"
+    assert cs["x402"]["price"] == price == "0.05 USDT"
+    assert f"({price})" in cs["nextActions"][0]["description"]
     # the buy skill routes to per-store surfaces for the per-offering requiredFunds
     buy_actions = {a["type"]: a for a in skills["buy"]["nextActions"]}
     assert buy_actions["x402_buy"]["endpoint"] == "/s/{slug}/buy"
