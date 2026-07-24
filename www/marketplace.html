@@ -186,6 +186,11 @@
   .market-input::placeholder{ color:color-mix(in srgb,var(--text) 38%,transparent); }
   .market-input:hover{ border-color:color-mix(in srgb,var(--text) 30%,transparent); }
   .market-input:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
+  .market-sort{ display:flex; align-items:center; gap:10px; flex:none; }
+  .market-select{ padding:9px 12px; border:1px solid var(--hairline); border-radius:3px;
+    background:var(--bg); color:var(--text); font:inherit; font-size:13px; cursor:pointer; }
+  .market-select:hover{ border-color:color-mix(in srgb,var(--text) 30%,transparent); }
+  .market-select:focus-visible{ outline:2px solid var(--text); outline-offset:3px; }
   .market-count{ font-size:12px; font-weight:600; letter-spacing:.08em; white-space:nowrap;
     color:color-mix(in srgb,var(--text) 62%,transparent); }
   .market-status{ display:flex; align-items:center; gap:14px; margin-top:28px; font-size:13px;
@@ -219,6 +224,13 @@
   .store-foot{ display:flex; align-items:center; flex-wrap:wrap; gap:10px; row-gap:6px;
     margin-top:auto; padding-top:12px; border-top:1px solid var(--hairline); }
   .store-price{ font-size:13.5px; font-weight:600; letter-spacing:.01em; white-space:nowrap; }
+  .store-rating{ flex:none; font-size:12px; font-weight:600; white-space:nowrap;
+    color:color-mix(in srgb,var(--text) 74%,transparent); }
+  .store-rating .star{ color:var(--xlayer); }
+  .store-tier{ flex:none; padding:2px 7px; border-radius:999px; border:1px solid var(--hairline);
+    font-size:9px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+    color:color-mix(in srgb,var(--text) 66%,transparent); }
+  .store-tier.trusted{ border-color:color-mix(in srgb,var(--xlayer) 70%,transparent); color:var(--text); }
   .store-sold{ flex:none; padding:3px 8px; border:1px solid var(--hairline); border-radius:3px;
     font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 72%,transparent); white-space:nowrap; }
@@ -315,6 +327,16 @@
           <label class="market-label mono" for="marketSearch">Filter</label>
           <input class="market-input" id="marketSearch" type="search" autocomplete="off"
             spellcheck="false" placeholder="Name, slug, or description…">
+        </div>
+        <div class="market-sort">
+          <label class="market-label mono" for="marketSort">Sort</label>
+          <select class="market-select mono" id="marketSort" aria-label="Sort stores">
+            <option value="sold">Best sellers</option>
+            <option value="success">Success rate</option>
+            <option value="buyers">Most buyers</option>
+            <option value="recent">Recent sales</option>
+            <option value="new">Newest</option>
+          </select>
         </div>
         <p class="market-count mono" id="marketCount" aria-live="polite"></p>
       </div>
@@ -524,6 +546,22 @@
       sold.textContent = s.sold_count + " sold";
       foot.appendChild(sold);
     }
+    var tierLabel = { trusted: "Trusted", established: "Established", emerging: "Emerging" }[s.trust_tier];
+    if (tierLabel) {
+      var tier = document.createElement("span");
+      tier.className = "store-tier mono" + (s.trust_tier === "trusted" ? " trusted" : "");
+      tier.textContent = tierLabel;
+      foot.appendChild(tier);
+    }
+    if (typeof s.review_avg === "number") {
+      var rating = document.createElement("span");
+      rating.className = "store-rating mono";
+      var star = document.createElement("span");
+      star.className = "star"; star.setAttribute("aria-hidden", "true"); star.textContent = "★ ";
+      rating.appendChild(star);
+      rating.appendChild(document.createTextNode(s.review_avg.toFixed(1) + (s.review_count ? " · " + s.review_count : "")));
+      foot.appendChild(rating);
+    }
     a.appendChild(foot);
 
     li.appendChild(a);
@@ -536,12 +574,25 @@
     statusEl.hidden = false;
   }
 
+  var sortEl = document.getElementById("marketSort");
+  var sort = "sold";
+  var searchResults = null;   // null = browse mode; array = backend search results
+  var searchSeq = 0;
+  var searchTimer = null;
+
+  function clientFilter(q) {
+    var ql = q.toLowerCase();
+    return stores.filter(function (s) {
+      return (String(s.name || "") + " " + String(s.slug || "") + " " + String(s.description || ""))
+        .toLowerCase().indexOf(ql) !== -1;
+    });
+  }
+
   function render(stagger) {
-    var q = searchEl.value.trim().toLowerCase();
-    var list = q ? stores.filter(function (s) {
-      var hay = String(s.name || "") + " " + String(s.slug || "") + " " + String(s.description || "");
-      return hay.toLowerCase().indexOf(q) !== -1;
-    }) : stores;
+    var q = searchEl.value.trim();
+    var searchMode = searchResults !== null;
+    // Backend search needs >= 2 chars; a single char filters the loaded page.
+    var list = searchMode ? searchResults : (q.length === 1 ? clientFilter(q) : stores);
 
     grid.textContent = "";
     var shown = 0;
@@ -550,18 +601,24 @@
       if (el) { grid.appendChild(el); shown++; }
     }
 
-    countEl.textContent = q ? list.length + " of " + total
-      : total + (total === 1 ? " store" : " stores");
+    if (searchMode) {
+      countEl.textContent = list.length + (list.length === 1 ? " result" : " results") + " for “" + q + "”";
+    } else if (q.length === 1) {
+      countEl.textContent = list.length + " of " + total;
+    } else {
+      countEl.textContent = total + (total === 1 ? " store" : " stores");
+    }
 
     var remaining = total - stores.length;
-    if (loaded && remaining > 0) {
+    if (!searchMode && q.length === 0 && loaded && remaining > 0) {
       moreBtn.textContent = "Load more (" + remaining + " remaining)";
       moreBtn.hidden = false;
     } else {
       moreBtn.hidden = true;
     }
 
-    if (!total) showStatus("No live storefronts yet.", false);
+    if (searchMode && !list.length) showStatus("No stores match “" + q + "”.", false);
+    else if (!searchMode && !total) showStatus("No live storefronts yet.", false);
     else if (!list.length) showStatus("No storefronts match.", false);
     else statusEl.hidden = true;
   }
@@ -570,7 +627,7 @@
     showStatus("Loading storefronts…", false);
     countEl.textContent = "";
     moreBtn.hidden = true;
-    fetch("/discovery/resources?limit=50")
+    fetch("/discovery/resources?limit=50&sort=" + encodeURIComponent(sort))
       .then(function (res) {
         if (!res.ok) throw new Error("HTTP " + res.status);
         return res.json();
@@ -590,7 +647,7 @@
     if (loadingMore) return;
     loadingMore = true;
     moreBtn.disabled = true;
-    fetch("/discovery/resources?limit=50&offset=" + stores.length)
+    fetch("/discovery/resources?limit=50&sort=" + encodeURIComponent(sort) + "&offset=" + stores.length)
       .then(function (res) {
         if (!res.ok) throw new Error("HTTP " + res.status);
         return res.json();
@@ -611,14 +668,44 @@
       });
   }
 
+  // Backend keyword search over ALL live stores (not just the loaded page). Falls
+  // back to filtering the loaded page if the request fails, so search never breaks.
+  function runSearch(q) {
+    var seq = ++searchSeq;
+    fetch("/discovery/search?q=" + encodeURIComponent(q) + "&limit=50")
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        if (seq !== searchSeq) return;
+        searchResults = (data && Array.isArray(data.resources)) ? data.resources : [];
+        render(true);
+      })
+      .catch(function () {
+        if (seq !== searchSeq) return;
+        searchResults = clientFilter(q);
+        render(true);
+      });
+  }
+
   searchEl.addEventListener("input", function () {
     var q = searchEl.value.trim();
     history.replaceState(null, "", q ? "?q=" + encodeURIComponent(q) : location.pathname);
-    if (loaded) render(false);
+    clearTimeout(searchTimer);
+    if (q.length >= 2) {
+      searchTimer = setTimeout(function () { runSearch(q); }, 250);
+    } else {
+      searchSeq++;            // cancel any in-flight/pending search
+      searchResults = null;   // back to browse (or single-char client filter)
+      if (loaded) render(false);
+    }
   });
+  if (sortEl) sortEl.addEventListener("change", function () { sort = sortEl.value; load(); });
   retryBtn.addEventListener("click", load);
   moreBtn.addEventListener("click", loadMore);
   load();
+  if (initialQ && initialQ.trim().length >= 2) runSearch(initialQ.trim());
 })();
 </script>
 <script>
