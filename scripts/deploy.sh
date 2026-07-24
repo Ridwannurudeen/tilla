@@ -12,82 +12,28 @@ BASE="https://tilla.gudman.xyz"
 # SQLAlchemy the app uses — a PATH-resolved `alembic` could be a different python.
 VENV="$REMOTE/.venv"
 
-# The app package + themes + migration tooling. These are the only paths this
-# script ever writes (stores/, tilla.db*, .env stay server-owned).
-FILES=(
-  app/__init__.py
-  app/main.py
-  app/engine.py
-  app/payment.py
-  app/config.py
-  app/render.py
-  app/screening.py
-  app/db.py
-  app/models.py
-  app/chain.py
-  app/checkout.py
-  app/delivery.py
-  app/limiter.py
-  app/agentic.py
-  app/mpp.py
-  app/subscriptions.py
-  app/import_stores.py
-  app/dashboard.py
-  app/self_serve.py
-  app/webhooks.py
-  app/refunds.py
-  app/attest.py
-  app/warden_hire.py
-  app/affiliates.py
-  app/external_feeds.py
-  app/embed.py
-  app/acp.py
-  app/growth.py
-  assets/embed.js
-  alembic.ini
-  alembic/env.py
-  alembic/script.py.mako
-  alembic/versions/0001_persistence_core.py
-  alembic/versions/0002_hardened_checkout.py
-  alembic/versions/0003_gated_delivery.py
-  alembic/versions/0004_agent_commerce.py
-  alembic/versions/0005_payment_methods.py
-  alembic/versions/0006_merchant_platform.py
-  alembic/versions/0007_marketplace_citizenship.py
-  alembic/versions/0008_onchain_receipts.py
-  alembic/versions/0009_growth.py
-  alembic/versions/0021_self_serve_create_store.py
-  scripts/backup_db.sh
-  scripts/backup_offsite.sh
-  scripts/restore_drill.sh
-  scripts/watchdog.sh
-  themes/original.html
-  themes/bold.html
-  themes/editorial.html
-  themes/_fonts.html
-  themes/_checkout.html
-  themes/_dashboard.html
-  themes/og.svg
-  www/index.html
-  www/marketplace.html
-  www/receipt-demo.html
-  www/library.html
-  www/404.html
-  www/robots.txt
-)
+cd "$(dirname "$0")/.."
+
+# The app package + themes + migration tooling — GENERATED from git so the
+# manifest can never go stale. (The old hand-maintained list silently omitted
+# 9 modules that app/main.py imports plus migrations 0011-0029: a fresh-host
+# deploy would have ImportError'd at boot, and any edit to an omitted module
+# produced a torn deploy — new main.py, stale dependency.) git only tracks
+# repo-owned paths, so `git ls-files` is exactly the ship set; stores/,
+# tilla.db*, .env and everything else server-owned is untracked by design.
+# deploy.sh itself is excluded (nothing on the server executes it).
+mapfile -t FILES < <(git ls-files \
+  'app/*.py' \
+  'assets/embed.js' \
+  'alembic.ini' 'alembic/env.py' 'alembic/script.py.mako' 'alembic/versions/*.py' \
+  'scripts/*.sh' \
+  'themes/*' \
+  'www/*' | grep -v '^scripts/deploy\.sh$')
 
 # Subscription sidecar (Node). node_modules is server-owned (installed via
 # `npm ci --omit=dev`), never scp'd. The systemd unit is copied once by hand
 # (see deploy/tilla-sidecar.service header); here we only refresh the JS.
-SIDECAR_FILES=(
-  sidecar/server.js
-  sidecar/sample-buyer.js
-  sidecar/package.json
-  sidecar/package-lock.json
-  sidecar/README.md
-)
-
-cd "$(dirname "$0")/.."
+mapfile -t SIDECAR_FILES < <(git ls-files 'sidecar/*')
 
 for f in "${FILES[@]}"; do
   ssh "$VPS" "mkdir -p '$REMOTE/$(dirname "$f")'"

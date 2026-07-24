@@ -1,0 +1,43 @@
+# Agentic-surface nginx routing — apply to /etc/nginx/sites-enabled/tilla.gudman.xyz.conf
+#
+# Problem this fixes: the app registers a root MCP concierge (app/agentic.py:1697
+# POST /mcp, :1712 GET /mcp — advertised in the live agent card's discovery block),
+# per-store MPP channel ops (app/mpp.py: /s/{slug}/mpp/open|voucher|topup|close),
+# subscriptions (app/subscriptions.py: /s/{slug}/subscribe[/prepare|/encode|
+# /cancel/prepare|/cancel]), B2B wholesale quotes (app/agentic.py:1775
+# GET /s/{slug}/quote) and verified-buyer reviews (app/agentic.py:1839
+# GET /s/{slug}/reviews) — but nginx had no locations for any of them, so every
+# one of these answered the static-site 404 while the rails behind them were
+# enabled (and in several cases already settled real value on-chain, see
+# docs/PROOF-onchain.md). The "four x402 schemes" surface existed only on
+# 127.0.0.1:8040.
+#
+# Two changes:
+#
+# 1) Root MCP concierge — add at the server{} (443) level:
+#
+#     location = /mcp { proxy_pass http://127.0.0.1:8040; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto https; }
+#
+# 2) Widen the per-store agent-surface regex. Replace:
+#
+#     location ~ ^/s/[a-z0-9][a-z0-9-]+/(buy(/[0-9]+)?|mcp|feed\.json|llms\.txt|feed/openai\.json|feed/google\.xml)$ {
+#
+#    with:
+#
+#     location ~ ^/s/[a-z0-9][a-z0-9-]+/(buy(/[0-9]+)?|mcp|reviews|quote|feed\.json|llms\.txt|feed/openai\.json|feed/google\.xml|mpp/(open|voucher|topup|close)|subscribe(/prepare|/encode|/cancel/prepare|/cancel)?)$ {
+#
+#    (body of the block unchanged — same proxy_pass + headers as before).
+#
+# Application procedure (same discipline as every nginx change):
+#   1. cp the live conf to /opt/tilla/nginx-backups/tilla.conf.pre-agentic
+#   2. Edit the two lines above.
+#   3. nginx -t   — MUST pass before any reload.
+#   4. systemctl reload nginx
+#   5. Verify from outside: POST https://tilla.gudman.xyz/mcp returns JSON (not the
+#      HTML 404 page); GET /s/invoice-flow/quote answers JSON; POST
+#      /s/invoice-flow/mpp/open and /s/invoice-flow/subscribe answer app JSON
+#      (402/4xx from the app, never text/html); GET /s/invoice-flow/reviews → 200.
+#
+# Dormancy note: exposing these locations does NOT enable anything — every rail
+# keeps its own flag/creds gating in the app. nginx exposure only makes the
+# already-enabled surfaces answer the same way they do on localhost.
