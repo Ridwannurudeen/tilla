@@ -11,7 +11,7 @@ from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app import chain, config, engine, screening
+from app import chain, config, engine, payment, screening
 from app.screening import ScreeningBlocked
 
 client = TestClient(main.app)
@@ -78,7 +78,16 @@ def _receipt(from_addr, to_addr, value, status="0x1"):
 
 
 def _mock_tx(monkeypatch, receipt):
-    monkeypatch.setattr(chain, "get_transaction_receipt", lambda *_a, **_k: receipt)
+    # Bind the REAL signature (cfg, tx_hash, timeout=None). A permissive *args stub
+    # accepts any call, which is how a receipt lookup missing its ChainConfig shipped
+    # and 500'd every payment; this way a wrong call raises TypeError here instead.
+    def _fake(cfg, tx_hash, timeout=None):
+        assert cfg is payment.CANONICAL_CHAIN, (
+            "verification must pin the canonical chain"
+        )
+        return receipt
+
+    monkeypatch.setattr(chain, "get_transaction_receipt", _fake)
 
 
 def _intent(token, description="single-origin coffee beans", theme=None):
