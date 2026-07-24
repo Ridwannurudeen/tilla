@@ -281,6 +281,9 @@
   .store-tabs button:focus-visible{ outline:2px solid var(--text); outline-offset:2px; }
   .store-tab{ display:none; }
   .store-tab.active{ display:block; }
+  .login-preview{ margin:18px 0 6px; }
+  .store-tabs.preview{ flex-wrap:wrap; opacity:.6; pointer-events:none; margin:8px 0 0; }
+  .store-tabs.preview button{ cursor:default; }
 </style>
 </head>
 <body>
@@ -294,6 +297,9 @@
     <button class="theme-toggle mono" id="themeToggle" type="button" aria-label="Switch light or dark theme" title="Switch theme">◐</button>
     <a class="navlink mono" href="/">Home</a>
     <a class="navlink mono" href="/marketplace.html">Marketplace</a>
+    <a class="navlink mono" href="/#how">How it works</a>
+    <a class="navlink mono" href="/library.html">Your purchases</a>
+    <a class="navlink mono" href="/#agents">For agents</a>
     <span class="chip chain mono"><span class="dot dot-chain" aria-hidden="true"></span>X Layer · chainId 196</span>
     <span id="whoami" class="muted mono"></span>
     <button id="signBtn" class="primary">Connect wallet</button>
@@ -317,6 +323,19 @@
       <a class="ghost-link" href="/marketplace.html">Just browsing? See the marketplace →</a>
     </div>
     <p class="note muted">New to wallets? <a href="https://www.okx.com/web3" rel="noopener">Install OKX Wallet</a> first.</p>
+    <div class="login-preview">
+      <p class="eyebrow mono">What you'll manage once connected</p>
+      <div class="store-tabs preview mono" aria-hidden="true">
+        <button type="button" disabled>Your stores</button>
+        <button type="button" disabled>Products &amp; pricing</button>
+        <button type="button" disabled>Deliverables</button>
+        <button type="button" disabled>Custom domain</button>
+        <button type="button" disabled>Growth</button>
+        <button type="button" disabled>Subscribers</button>
+        <button type="button" disabled>Orders</button>
+      </div>
+      <p class="note muted">Your stores and their tools appear here the moment you connect — nothing to see until then, because the console shows only your own wallet's stores.</p>
+    </div>
     <div class="login-rail">
       <span class="settle-chip mono">Settles on X Layer</span>
       <span class="chip mono">Non-custodial</span>
