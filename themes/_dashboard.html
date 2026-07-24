@@ -728,7 +728,9 @@
     opts = opts || {};
     opts.headers = Object.assign({}, opts.headers || {}, auth());
     var r = await fetch(path, opts);
-    if (r.status === 401) { signOut(); throw new Error("Session expired — sign in again."); }
+    // A 401 signs the merchant out — EXCEPT when the caller opts out (allow401) for an
+    // optional feature whose 401 just means "not enrolled", which must not end the session.
+    if (r.status === 401 && !opts.allow401) { signOut(); throw new Error("Session expired — sign in again."); }
     var body = null;
     try { body = await r.json(); } catch (e) {}
     if (!r.ok) {
@@ -849,8 +851,17 @@
   async function loadReferrals() {
     var box = byId("referrals");
     var data;
-    try { data = await api("/api/affiliate/summary"); }
-    catch (e) { clear(box); box.appendChild(el("div", "muted small", "Could not load referral earnings.")); return; }
+    try { data = await api("/api/affiliate/summary", { allow401: true }); }
+    catch (e) {
+      // 401 here just means this wallet has no affiliate/referral record yet — it must
+      // NOT sign the merchant out (allow401 above keeps the session alive).
+      clear(box);
+      var msg = (e && e.status === 401)
+        ? "No referral earnings yet — share a store link with ?ref=<your wallet> to start."
+        : "Could not load referral earnings.";
+      box.appendChild(el("div", "card muted sentence", msg));
+      return;
+    }
     clear(box);
     if (!data.stores || !data.stores.length) {
       box.appendChild(el("div", "card muted sentence", "No referral earnings yet — share a store link with ?ref=<your wallet> to start."));
