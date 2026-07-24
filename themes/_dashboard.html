@@ -328,6 +328,22 @@
   <div id="viewMain" class="hide">
     <div id="summary" class="grid"></div>
 
+    <nav class="store-tabs mono" id="mainTabs" role="tablist" aria-label="Dashboard">
+      <button type="button" role="tab" data-tab="main-stores" class="active">Your stores</button>
+      <button type="button" role="tab" data-tab="main-create">Create a store</button>
+      <button type="button" role="tab" data-tab="main-referrals">Referrals</button>
+      <button type="button" role="tab" data-tab="main-marketplace">Marketplace</button>
+      <button type="button" role="tab" data-tab="main-config">Configuration</button>
+    </nav>
+
+    <div class="store-tab active" id="main-stores" role="tabpanel">
+    <h2 class="sec-h"><span class="dot dot-warn" aria-hidden="true"></span>Underpaid orders needing refund</h2>
+    <div id="underpaid" class="card scroll" tabindex="0" aria-label="Underpaid orders"></div>
+    <h2 class="sec-h">Your stores</h2>
+    <div id="stores"></div>
+    </div>
+
+    <div class="store-tab" id="main-create" role="tabpanel">
     <h2 class="sec-h">Create a store</h2>
     <div class="card">
       <div id="csStep1">
@@ -354,19 +370,19 @@
       <div id="csStep3" class="hide"></div>
       <div id="createMsg" class="small hide" aria-live="polite"></div>
     </div>
+    </div>
 
-    <h2 class="sec-h"><span class="dot dot-warn" aria-hidden="true"></span>Underpaid orders needing refund</h2>
-    <div id="underpaid" class="card scroll" tabindex="0" aria-label="Underpaid orders"></div>
-
-    <h2 class="sec-h">Your stores</h2>
-    <div id="stores"></div>
-
-    <h2 class="sec-h">Marketplace <a class="sec-link mono" href="/marketplace.html">View public marketplace →</a></h2>
-    <div id="marketplace"></div>
-
+    <div class="store-tab" id="main-referrals" role="tabpanel">
     <h2 class="sec-h">Referrals</h2>
     <div id="referrals"></div>
+    </div>
 
+    <div class="store-tab" id="main-marketplace" role="tabpanel">
+    <h2 class="sec-h">Marketplace <a class="sec-link mono" href="/marketplace.html">View public marketplace →</a></h2>
+    <div id="marketplace"></div>
+    </div>
+
+    <div class="store-tab" id="main-config" role="tabpanel">
     <h2 class="sec-h">Configuration</h2>
     <div class="cols">
       <div class="card">
@@ -393,6 +409,7 @@
           <button id="csvCustomers" class="ghost">customers.csv</button>
         </div>
       </div>
+    </div>
     </div>
   </div>
 
@@ -1007,23 +1024,28 @@
     csShow(3);
   }
 
-  // ---- store console tabs ----
-  function selectStoreTab(id) {
-    var tabs = byId("storeTabs"); if (!tabs) return;
-    Array.prototype.forEach.call(tabs.querySelectorAll("button"), function (b) {
-      b.classList.toggle("active", b.getAttribute("data-tab") === id);
+  // ---- tabbed sections (store console + main dashboard) ----
+  function initTabs(navId) {
+    var nav = byId(navId);
+    if (!nav) return function () {};
+    var ids = Array.prototype.map.call(nav.querySelectorAll("button[data-tab]"), function (b) {
+      return b.getAttribute("data-tab");
     });
-    Array.prototype.forEach.call(document.querySelectorAll(".store-tab"), function (p) {
-      p.classList.toggle("active", p.id === id);
+    function select(id) {
+      Array.prototype.forEach.call(nav.querySelectorAll("button"), function (b) {
+        b.classList.toggle("active", b.getAttribute("data-tab") === id);
+      });
+      ids.forEach(function (pid) {
+        var p = byId(pid); if (p) p.classList.toggle("active", pid === id);
+      });
+    }
+    nav.addEventListener("click", function (e) {
+      var b = e.target.closest("button[data-tab]"); if (b) select(b.getAttribute("data-tab"));
     });
+    return select;
   }
-  (function () {
-    var tabs = byId("storeTabs");
-    if (tabs) tabs.addEventListener("click", function (e) {
-      var b = e.target.closest("button[data-tab]"); if (!b) return;
-      selectStoreTab(b.getAttribute("data-tab"));
-    });
-  })();
+  var selectStoreTab = initTabs("storeTabs");
+  initTabs("mainTabs");
 
   // ---- one store's orders ----
   async function openStore(slug) {
