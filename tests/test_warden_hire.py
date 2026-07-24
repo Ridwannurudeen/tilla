@@ -4,12 +4,16 @@ Everything is respx-mocked. Asserts the funds-safety invariants: the client pins
 scheme/asset/network/payTo/amount and REFUSES to sign a mismatched challenge; it
 signs at most once and never retries a signed authorization; any failure degrades to
 the free demo scan. The default (flag off) path never even constructs the signing
-code and only ever calls the demo endpoint.
+code and only ever calls the demo endpoint. The rating write-back is asserted to be
+local-only (an event_log row + a dry-run log line) and strictly fail-open.
 """
+
+import logging
 
 import httpx
 import pytest
 import respx
+from sqlalchemy import select
 from x402.http.constants import PAYMENT_RESPONSE_HEADER, PAYMENT_SIGNATURE_HEADER
 from x402.http.utils import (
     PAYMENT_REQUIRED_HEADER,
@@ -21,6 +25,8 @@ from x402.schemas import PaymentRequired, PaymentRequirements, SettleResponse
 
 from app import config, screening, warden_hire
 from app.config import WARDEN_SCREEN_URL
+from app.db import SessionLocal
+from app.models import EventLog
 from app.payment import PAYMENT_ASSET, PAYMENT_NETWORK
 
 PAID_URL = config.WARDEN_PAID_SCAN_URL
@@ -242,3 +248,133 @@ def test_screen_paid_failure_falls_back_to_demo(monkeypatch):
     assert outcome.status == "allow"
     assert outcome.receipt.mode == "demo"  # degraded to the free scan
     assert demo.called
+
+
+# ------------------------------------------------------- rating write-back
+def _ratings() -> list[dict]:
+    """Every hire.rating payload recorded, oldest first."""
+    with SessionLocal() as s:
+        return [
+            e.data
+            for e in s.scalars(
+                select(EventLog)
+                .where(EventLog.event == "hire.rating")
+                .order_by(EventLog.id)
+            )
+        ]
+
+
+@respx.mock
+def test_settled_hire_records_local_rating_event(monkeypatch):
+    _enable(monkeypatch)
+    respx.post(PAID_URL).mock(side_effect=_Warden(_challenge()))
+    screening.screen("safe")
+
+    (rating,) = _ratings()
+    assert rating["agent_id"] == 3808  # Warden, the agent Tilla paid
+    assert rating["service"] == "paid_scan"
+    assert rating["rating"] == 5  # actionable verdict, served well inside the budget
+    assert rating["max_rating"] == 5
+    assert rating["actionable_verdict"] is True
+    assert rating["tx_hash"] == TX  # the settle tx this rating is evidence for
+    assert rating["amount_micro"] == 10000
+    assert rating["network"] == PAYMENT_NETWORK
+    assert isinstance(rating["latency_ms"], int)
+
+
+@respx.mock
+def test_block_verdict_is_still_a_rated_hire(monkeypatch):
+    """A BLOCK is a hire that WORKED — Tilla paid, got an actionable answer, and
+    honored it. The rating is written before ScreeningBlocked propagates."""
+    _enable(monkeypatch)
+    warden = _Warden(_challenge(), verdict={"verdict": "BLOCK", "risk_level": "high"})
+    respx.post(PAID_URL).mock(side_effect=warden)
+    with pytest.raises(screening.ScreeningBlocked):
+        screening.screen("bad")
+
+    (rating,) = _ratings()
+    assert rating["actionable_verdict"] is True
+    assert rating["rating"] == 5
+
+
+@respx.mock
+def test_unactionable_settled_hire_rates_lowest(monkeypatch):
+    """Money spent, nothing Tilla can act on -> the floor of the scale."""
+    _enable(monkeypatch)
+    respx.post(PAID_URL).mock(
+        side_effect=_Warden(_challenge(), verdict={"verdict": "REVIEW"})
+    )
+    demo = respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    outcome = screening.screen("safe")
+    assert outcome.receipt.mode == "demo"  # unchanged fallback semantics
+    assert demo.called
+
+    (rating,) = _ratings()
+    assert rating["actionable_verdict"] is False
+    assert rating["rating"] == 1
+
+
+@respx.mock
+def test_demo_screen_records_no_rating():
+    """Nothing was hired, so nothing is rated (the dormant default path)."""
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    screening.screen("safe")
+    assert _ratings() == []
+
+
+def test_rating_penalizes_a_slow_hire(monkeypatch):
+    """Half the screen budget is the line between a fast and a slow hire."""
+    monkeypatch.setattr(config, "WARDEN_SCREEN_TIMEOUT", 10.0)
+    assert warden_hire._rating(True, 4_999) == 5
+    assert warden_hire._rating(True, 5_001) == 3
+    assert warden_hire._rating(False, 1) == 1  # unactionable outranks any speed
+
+
+@respx.mock
+def test_rating_submission_is_dry_run_only(monkeypatch, caplog):
+    """TILLA_RATE_HIRES=1 logs the payload it WOULD send and sends nothing — there
+    is no verified transport, and respx would fail this test on any stray request."""
+    _enable(monkeypatch)
+    monkeypatch.setenv("TILLA_RATE_HIRES", "1")
+    paid = respx.post(PAID_URL).mock(side_effect=_Warden(_challenge()))
+    with caplog.at_level(logging.INFO, logger="tilla"):
+        screening.screen("safe")
+    assert "rating DRY RUN" in caplog.text
+    assert "nothing sent" in caplog.text
+    assert paid.call_count == 2  # the 402 probe + the one signed replay, nothing more
+    assert len(_ratings()) == 1
+
+
+@respx.mock
+def test_rating_flag_off_still_records_locally_and_logs_nothing(monkeypatch, caplog):
+    _enable(monkeypatch)
+    monkeypatch.delenv("TILLA_RATE_HIRES", raising=False)
+    respx.post(PAID_URL).mock(side_effect=_Warden(_challenge()))
+    with caplog.at_level(logging.INFO, logger="tilla"):
+        screening.screen("safe")
+    assert "DRY RUN" not in caplog.text
+    assert len(_ratings()) == 1  # the local half is not flag-gated
+
+
+@respx.mock
+def test_rating_failure_never_moves_the_screening_decision(monkeypatch):
+    """Fail-open, and ONLY here: a broken rating write leaves the paid ALLOW intact."""
+    _enable(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("event log down")
+
+    monkeypatch.setattr(warden_hire, "log_event", _boom)
+    respx.post(PAID_URL).mock(side_effect=_Warden(_challenge()))
+    demo = respx.post(WARDEN_SCREEN_URL).mock(return_value=httpx.Response(200))
+
+    outcome = screening.screen("safe")
+    assert outcome.status == "allow"
+    assert outcome.receipt.mode == "paid"
+    assert outcome.receipt.tx_hash == TX
+    assert demo.call_count == 0  # never degraded by the rating problem
+    assert _ratings() == []

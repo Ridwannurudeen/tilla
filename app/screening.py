@@ -7,6 +7,8 @@ Contract (verified live): POST TILLA_SCREEN_URL {"payload": "<text>"} ->
 M10 entry point ``screen`` dispatches to a PAID Warden hire when enabled (dormant
 by default) and returns the verdict + a queryable receipt; on any paid-path problem
 it degrades to the free demo scan, so the ALLOW/BLOCK/pending semantics never move.
+A settled paid hire is also rated back (``warden_hire.record_rating``) — fail-open,
+after the verdict is in hand, so the rating can never influence the decision.
 """
 
 from dataclasses import dataclass
@@ -132,6 +134,11 @@ def screen(payload: str, attempts: int = 2) -> ScanOutcome:
         result = warden_hire.paid_scan(payload)
         if result is not None:
             verdict = result.verdict.get("verdict")
+            # The hire settled, so rate the agent Tilla just paid (loop 5). Only
+            # ALLOW/BLOCK are verdicts Tilla can act on, and that contract lives
+            # here, so actionability is decided here and passed in. Fail-open and
+            # fire-and-forget — it can never move the decision made below.
+            warden_hire.record_rating(result, actionable=verdict in ("ALLOW", "BLOCK"))
             if verdict == "BLOCK":
                 raise ScreeningBlocked(result.verdict)
             if verdict == "ALLOW":

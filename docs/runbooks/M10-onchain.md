@@ -9,9 +9,10 @@ What the app already ships LIVE (no on-chain action, no funds path reachable):
 `/upgrade-store` + `/add-product` (ordinary x402 HTTP services, same class as the
 live create-store), the `GET /s/:slug/buy` 402-challenge registration, migration
 0007 + demo-mode screening receipts, `app/warden_hire.py` shipped DORMANT
-(`TILLA_WARDEN_PAID` off, no payer key on the VPS), the read-only dashboard
-marketplace panel, and the `app.mark_listed` command. Everything below is PARKED
-for user approval.
+(`TILLA_WARDEN_PAID` off, no payer key on the VPS) together with its local-only
+rating write-back, the read-only dashboard marketplace panel, and the
+`app.mark_listed` command (`describe` = read-only listing prep, `<slug> <status>` =
+listing state). Everything below is PARKED for user approval.
 
 ---
 
@@ -91,6 +92,96 @@ Same review-cycle side effects as STEP A (ID reshuffle + approvalStatus 2). Re-r
 
 ---
 
+## STEP B1 (USER-GATED) — the FIRST THREE listings, prepared end to end
+
+Never hand-write the service JSON. `app.mark_listed describe` builds it from the same
+live numbers `/discovery/resources` publishes — product, price, trust tier, sales,
+clean-delivery rate, buyer rating — so a listing can never claim a number the public
+API contradicts. It is read-only: no `onchainos`, no chain, no DB write.
+
+Candidate stores, in listing order. Re-confirm against the live API before running
+(`curl -s 'https://tilla.gudman.xyz/discovery/resources?sort=sold'`) and list the
+three with the strongest live reputation — the table below is the repo's evidence,
+not a substitute for the live numbers:
+
+| # | slug | evidence it is a real, listable store |
+|---|---|---|
+| 1 | `invoice-flow` | real settled sales both ways — human wallet checkout AND an agent x402 buy (docs/PROOF-onchain.md 1 + 2), so its trust tier is earned |
+| 2 | `sync` | generated live by a stranger's paid `create-store` (docs/PROOF-onchain.md 3) |
+| 3 | `highland-roast` | registered on-chain in StoreRegistry, read-back verified (contracts/README.md) |
+
+### B1.1 Prepare — SAFE, read-only, run freely
+
+```
+cd /opt/tilla
+.venv/bin/python -m app.mark_listed describe invoice-flow
+.venv/bin/python -m app.mark_listed describe sync
+.venv/bin/python -m app.mark_listed describe highland-roast
+```
+
+Each prints `serviceName` / `serviceDescription` / `fee` / `endpoint`, then the exact
+`onchainos agent update --agent-id 6961 --service '[…]'` line to run. Shape of the
+output (invoice-flow, 4 sales, trust tier `established`):
+
+```
+serviceName:        Buy Freelancer Command Center from Invoice Flow
+serviceDescription: Freelancer Command Center from Invoice Flow, delivered as soon as the payment clears. Price 9 USDT. Sold 4 times, 100% of sales delivered with no dispute or refund, buyer rating 4.5 out of 5, seller trust tier established.
+fee:                9
+endpoint:           https://tilla.gudman.xyz/s/invoice-flow/buy
+```
+
+A store with no sales yet prints the first two sentences only — a new store reads as
+new, never as `None`. A store that is not publicly live, or has no active product, is
+refused outright rather than half-listed.
+
+### B1.2 Validate — SAFE, read-only
+
+```
+onchainos agent x402-check --endpoint https://tilla.gudman.xyz/s/invoice-flow/buy --body '{}'
+onchainos agent x402-check --endpoint https://tilla.gudman.xyz/s/sync/buy --body '{}'
+onchainos agent x402-check --endpoint https://tilla.gudman.xyz/s/highland-roast/buy --body '{}'
+onchainos agent service-list --agent-id 6961 > /root/tilla-services-before-B1.json
+```
+
+All three must report `valid:true`. Then run the CLI's `validate-listing` on each
+drafted service JSON until CLEAN: `describe` already follows the content rules above
+(no links, no prompt-like text, no tech-stack terms), but the store and product NAMES
+are merchant-authored, so they still have to pass.
+
+### B1.3 Submit — OWNER-RUN, ON-CHAIN, one approval cycle
+
+Merge the three `--service` arrays from B1.1 into ONE array and send a single update,
+so all three ride one review cycle and one ID reshuffle:
+
+```
+onchainos agent update --agent-id 6961 --service '[<service 1>,<service 2>,<service 3>]'
+onchainos agent activate --agent-id 6961 --preferred-language en-US   # only if the CLI asks for re-submission
+```
+
+Expect `approvalStatus 2` (under review, <=24h). Log the submit timestamp; do NOT poll
+aggressively. Afterwards re-run `service-list` — every service ID was reassigned.
+
+### B1.4 Record the state — SAFE, the only write in this section
+
+After submitting, then again once the services show live:
+
+```
+.venv/bin/python -m app.mark_listed invoice-flow submitted
+.venv/bin/python -m app.mark_listed sync submitted
+.venv/bin/python -m app.mark_listed highland-roast submitted
+# … after approval lands:
+.venv/bin/python -m app.mark_listed invoice-flow listed
+.venv/bin/python -m app.mark_listed sync listed
+.venv/bin/python -m app.mark_listed highland-roast listed
+```
+
+**Who runs what:** B1.1, B1.2 and B1.4 are ordinary local commands — no chain, no
+funds, and B1.4 only writes Tilla's own DB. **B1.3 is the only on-chain action in this
+section and is OWNER-RUN by hand**, after approving the exact service JSON text. No
+build agent, test, or workflow ever runs it.
+
+---
+
 ## STEP C (USER-GATED, Option B experiment — ONE store, only after A is listed)
 
 Per-store ASP identity (own listing card, own reputation). Feasible under the one
@@ -133,6 +224,30 @@ signed authorization; any paid-path failure degrades to the free demo scan.
 > receipt is real on-chain evidence of the x402 agents-hiring-agents mechanism — it
 > must NEVER be presented as external demand. Demo-mode receipts are labeled 'demo'.
 
+### Rating write-back (automatic, local, no transport)
+
+Every SETTLED paid hire also writes one append-only `hire.rating` `event_log` row
+(`app.warden_hire.record_rating`): the agent id (#3808), the score, whether the
+verdict was actionable, the hire's wall-clock latency, the amount, and the settle tx
+it is evidence for. The score is 5 for an actionable verdict inside the latency
+budget, 3 if it was slow, 1 if the settled hire returned nothing Tilla could act on.
+Whether the verdict was *correct* is deliberately not scored — Tilla cannot check it.
+
+The write-back is fail-open by design: it runs after the verdict is already decided
+and can never change, block, or slow a screening result.
+
+**No rating is submitted anywhere.** There is no documented OKX / OnchainOS rating
+endpoint or `onchainos` subcommand, and ERC-8004 is read-only from this app, so the
+submission half is a DRY RUN only: setting `TILLA_RATE_HIRES=1` logs the exact payload
+Tilla *would* send and sends nothing. Do not wire a transport until the real request
+shape is verified against OKX's published surface.
+
+To read the ratings back:
+
+```
+sqlite3 /opt/tilla/tilla.db "SELECT ts, data FROM event_log WHERE event='hire.rating' ORDER BY id;"
+```
+
 ---
 
 ## STEP E (after approvals land) — record listing state for the dashboard
@@ -153,6 +268,8 @@ read-only dashboard marketplace panel then shows the store as listed. Valid stat
   update + review cycle. Approve the exact service JSON text.
 - (STEP B) Which store(s) to list as delta-services (Option A) + the exact service
   JSON text.
+- (STEP B1) The first three store listings — approve the three slugs and the exact
+  service JSON text `describe` produced. B1.3 is the on-chain call.
 - (STEP C) Whether to run the single Option B per-store ASP experiment.
 - (STEP D) Funding the payer wallet + flipping `TILLA_WARDEN_PAID` (Tilla spends
   USDT on Warden hires).
@@ -162,3 +279,8 @@ read-only dashboard marketplace panel then shows the store as listed. Valid stat
 
 XMTP task-board participation / negotiation / ratings — the dispatch runtime is not
 provisioned, so these stay out of scope and out of claims.
+
+Submitting a rating to an external reputation graph is likewise out of claims: the
+`hire.rating` rows are LOCAL evidence, and `TILLA_RATE_HIRES=1` is a dry run. No
+rating has ever left this machine, and none can until a real submission surface is
+verified.
