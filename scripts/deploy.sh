@@ -35,10 +35,21 @@ mapfile -t FILES < <(git ls-files \
 # (see deploy/tilla-sidecar.service header); here we only refresh the JS.
 mapfile -t SIDECAR_FILES < <(git ls-files 'sidecar/*')
 
+# Ship ATOMICALLY. Copying 85 files one scp at a time leaves a minutes-long window in
+# which the running unit's directory holds a mix of old and new modules; any restart in
+# that window (systemd Restart=always, the watchdog, an operator) boots torn code. Stage
+# everything under a temp dir first, then move it into place file-by-file — the moves are
+# local renames, so the window shrinks from minutes to milliseconds.
+STAGE="$REMOTE/.deploy-stage"
+ssh "$VPS" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
 for f in "${FILES[@]}"; do
-  ssh "$VPS" "mkdir -p '$REMOTE/$(dirname "$f")'"
-  scp "$f" "$VPS:$REMOTE/$f"
+  ssh "$VPS" "mkdir -p '$STAGE/$(dirname "$f")'"
+  scp "$f" "$VPS:$STAGE/$f"
 done
+for f in "${FILES[@]}"; do
+  ssh "$VPS" "mkdir -p '$REMOTE/$(dirname "$f")' && mv -f '$STAGE/$f' '$REMOTE/$f'"
+done
+ssh "$VPS" "rm -rf '$STAGE'"
 
 # The shell scripts must stay executable — cron runs backup_db.sh/backup_offsite.sh and
 # the watchdog timer execs watchdog.sh directly (scp does not preserve the +x bit).
@@ -109,8 +120,7 @@ fi
 # (these routes require the nginx-growth.snippet locations to be applied first —
 # the orchestrator applies nginx, so on a pre-nginx deploy they may 404 at the edge
 # while answering 200 directly on 127.0.0.1:8040). Waitlist stores an email (silent
-# {ok:true}). ACP create must 503 while TILLA_ACP_ENABLED is unset (dormant mount);
-# flip the flag in .env and re-run only after smoking the tx-hash complete path.
+# {ok:true}). The ACP expectation is flag-aware — see the case below.
 smoke_code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 for path in "s/invoice-flow/feed/openai.json" "s/invoice-flow/feed/google.xml" \
             "embed.js" "feeds/openai.json"; do
@@ -124,7 +134,16 @@ wl=$(smoke_code -X POST "$BASE/api/stores/invoice-flow/waitlist" \
 [ "$wl" = "200" ] || echo "smoke WARN: waitlist returned $wl (expected 200)" >&2
 acp=$(smoke_code -X POST "$BASE/s/invoice-flow/checkout_sessions" \
   -H 'content-type: application/json' -d '{}')
-[ "$acp" = "503" ] || echo "smoke WARN: ACP create returned $acp (expected 503 while dormant)" >&2
+# 503 only while the rail is DORMANT. Prod runs TILLA_ACP_ENABLED=1 with a signing
+# secret, where an unsigned POST is correctly refused at the signature gate (401)
+# before any DB write — so a flat 503 expectation printed a WARN on EVERY deploy and
+# trained the reader to ignore smoke output. Accept either shape; never smoke the
+# enabled rail with a real signed create.
+case "$acp" in
+  503) : ;;              # dormant: router mounted, rail off
+  401|400|422) : ;;      # enabled: mounted and gated, unsigned request refused
+  *) echo "smoke WARN: ACP create returned $acp (expected 503 dormant, or 401/4xx gated)" >&2 ;;
+esac
 
 # Growth-kit is merchant-gated: an UNAUTH POST must 401 (proves the route is mounted
 # and gated without spending an LLM call or moving funds). /api/ is already proxied by

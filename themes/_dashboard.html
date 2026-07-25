@@ -423,6 +423,7 @@
     <h2 class="sec-h">Create a store</h2>
     <div class="card">
       <div id="csStep1">
+        <div id="csSpent" class="hide" style="margin-bottom:12px"></div>
         <div class="row head">
           <strong>Describe it — Tilla builds it, your wallet gets every sale</strong>
           <span class="muted mono" id="csFeeChip">one-time store-creation fee</span>
@@ -1080,17 +1081,44 @@
     try { d = await api("/api/merchant/create-store/pending"); } catch (e) { return; }
     CS_FEE = d.fee_usdt;
     csPriceCopy();
-    var resume = (d.creations || [])[0];
-    if (!resume) return;
-    if (resume.status !== "pending") { csResult(resume); return; }
+    var rows = d.creations || [];
+    if (!rows.length) return;
+    // Resume the newest UNPAID creation in the pay panel, but never drop the others:
+    // a 'paid'/'failed' row is a spent fee awaiting a free regenerate, and showing
+    // only rows[0] hid it behind whichever creation happened to be newest.
+    var resume = null;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].status === "pending") { resume = rows[i]; break; }
+    }
+    var spent = rows.filter(function (r) { return r.status !== "pending"; });
+    if (!resume) { csResult(spent[0] || rows[0]); csListSpent(spent.slice(1)); return; }
     byId("csDesc").value = resume.description || "";
     byId("csTheme").value = resume.theme || "";
     csRenderPay(resume, true);
+    csListSpent(spent);
     var saved = csSaved();
     if (saved && saved.creationId === resume.id) {
+      // A signed transfer for THIS creation already exists. Offering the wallet again
+      // is the double-charge path, so hide the pay control and leave verifying the
+      // saved hash as the only action — the same shape the retry-exhausted branch uses.
+      csPayControls(false);
+      byId("csTxForm").classList.remove("hide");
       byId("csTxHash").value = saved.txHash;
       byId("csPayStatus").textContent = "A payment you already sent for this store is filled in below — verify it instead of paying again.";
     }
+  }
+
+  function csListSpent(rows) {
+    var box = byId("csSpent");
+    if (!box) return;
+    clear(box);
+    box.classList.toggle("hide", !rows || !rows.length);
+    (rows || []).forEach(function (r) {
+      var line = el("div", "row");
+      line.appendChild(el("span", "muted small", (r.description || "store") + " — fee paid, not yet built"));
+      line.appendChild(csRetryButton(r.id, "Regenerate (no charge)"));
+      box.appendChild(line);
+    });
   }
 
   async function createStore() {

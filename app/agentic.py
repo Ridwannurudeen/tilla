@@ -828,7 +828,11 @@ async def store_settle_failed_hook(context, failure) -> HTTPResponseBody:
 
 
 def reap_agent_orders(
-    session: Session, now=None, *, chain_scanned: bool = False
+    session: Session,
+    now=None,
+    *,
+    chain_scanned: bool = False,
+    scanned_ids: set[str] | None = None,
 ) -> int:
     """Void channel='agent' orders stuck in the provisional 'settling' status older
     than the applicable deadline (a crash or lost settle between the deliver-commit and
@@ -858,6 +862,11 @@ def reap_agent_orders(
         )
     ).all()
     for o in orders:
+        if scanned_ids is not None and o.id not in scanned_ids:
+            # This order's pair was never walked to head this tick — the scan is capped
+            # at RECONCILE_MAX_PER_TICK candidates and filters on from_addr/network, so
+            # a completed scan of OTHER pairs is not evidence that THIS order is unpaid.
+            continue
         reached = checkout._naive(o.paid_at) or checkout._naive(o.created_at)
         if reached is not None and reached <= cutoff:
             if _void_settling(session, o, "agent_order.reaped"):
@@ -881,8 +890,12 @@ def _reap_tick() -> None:
     before = reconcile.LAST_CHAIN_SCAN_MONO
     reconcile.reconcile_chain_tick()
     chain_scanned = reconcile.LAST_CHAIN_SCAN_MONO > before
+    # Void ONLY the orders whose own pair walked to head this tick.
+    scanned_ids = set(reconcile.LAST_SCANNED_ORDER_IDS)
     with SessionLocal() as session:
-        if reap_agent_orders(session, chain_scanned=chain_scanned):
+        if reap_agent_orders(
+            session, chain_scanned=chain_scanned, scanned_ids=scanned_ids
+        ):
             session.commit()
 
 
@@ -2323,7 +2336,12 @@ def discovery_resources(
     offset = max(0, min(offset, 100_000))
     sort = sort if sort in DISCOVERY_SORTS else "sold"
     total = session.scalar(
-        select(func.count()).select_from(Store).where(Store.status == "live")
+        select(func.count())
+        .select_from(Store)
+        # Must mirror _discovery_rows' filter: it excludes hidden stores, so counting
+        # them here reported a total larger than any page could ever return (live: 18
+        # vs 15 rows), which reads to a paging client as missing results.
+        .where(Store.status == "live", Store.visibility == "public")
     )
     resources = _discovery_rows(session, [], limit, offset, sort)
     body: dict = {

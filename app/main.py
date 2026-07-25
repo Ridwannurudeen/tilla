@@ -67,7 +67,7 @@ from app.db import (
 )
 from app.engine import GenerationUnavailable
 from app.engine import create_store as gen_store
-from app.engine import rerender_stores, resume_pending, upgrade_store
+from app.engine import rerender_stores, resume_pending, resync_catalog, upgrade_store
 from app.limiter import limiter
 from app.models import (
     Deliverable,
@@ -715,6 +715,11 @@ def _run_add_product(
     )
     session.add(product)
     session.flush()
+    # Re-render the storefront, exactly as the dashboard's add-product does. The page
+    # is a static file: without this the paid product existed in the DB and was
+    # buyable by id, but never appeared on the store an agent or human actually
+    # looks at — a purchase that visibly changed nothing.
+    resync_catalog(session, store)
     r = outcome.receipt
     if r is not None:
         session.add(

@@ -155,7 +155,14 @@ def _sign_payload(reqs: PaymentRequirements) -> str | None:
         version = extra.get("version") or PAYMENT_EIP712_VERSION
         now = int(time.time())
         valid_after = now - _VALIDITY_BUFFER_SECONDS
-        valid_before = now + (reqs.max_timeout_seconds or PAYMENT_TIMEOUT_SECONDS)
+        # CLAMPED to Tilla's own timeout. max_timeout_seconds comes from the
+        # counterparty's challenge and is not among the pinned fields, so an oversized
+        # value would have Tilla sign an authorization that stays spendable far longer
+        # than it intends. The signature expires on our schedule, never theirs.
+        valid_before = now + min(
+            int(reqs.max_timeout_seconds or PAYMENT_TIMEOUT_SECONDS),
+            PAYMENT_TIMEOUT_SECONDS,
+        )
         nonce_bytes = os.urandom(32)
         nonce_hex = "0x" + nonce_bytes.hex()
         value = int(reqs.amount)

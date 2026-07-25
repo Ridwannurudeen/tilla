@@ -47,6 +47,11 @@ logger = logging.getLogger("tilla")
 # "this order was never paid", which is how the 2026-07-23 reap voided facilitator-
 # accepted orders. Read by ``agentic._reap_tick``; mirrors ``checkout.LAST_HEAD_MONO``.
 LAST_CHAIN_SCAN_MONO = 0.0
+# Order ids whose (buyer -> merchant) pair walked ALL THE WAY to head on the last tick.
+# The reaper may only void these: the scan is capped at RECONCILE_MAX_PER_TICK
+# candidates, so a global "scan completed" stamp licensed voiding orders the scan had
+# never looked at (a 21st order, or one excluded by the from_addr/network filters).
+LAST_SCANNED_ORDER_IDS: set[str] = set()
 
 # X Layer mines ~1 block/second (measured across the 2026-07-23 settlement window). The
 # backlog anchor turns a settling order's age into a block depth with a generous margin so
@@ -74,6 +79,7 @@ def _reset_state() -> None:
     ``attest._reset_state``)."""
     global LAST_CHAIN_SCAN_MONO
     LAST_CHAIN_SCAN_MONO = 0.0
+    LAST_SCANNED_ORDER_IDS.clear()
     _pair_cursors.clear()
     _pairs_at_head.clear()
 
@@ -323,6 +329,7 @@ def reconcile_chain_tick() -> int:
             # Nothing to look for: a scan with no candidates is a complete scan.
             _pair_cursors.clear()
             _pairs_at_head.clear()
+            LAST_SCANNED_ORDER_IDS.clear()
             LAST_CHAIN_SCAN_MONO = time.monotonic()
             return 0
         try:
@@ -340,6 +347,7 @@ def reconcile_chain_tick() -> int:
         _pairs_at_head.intersection_update(pairs)
         acted = 0
         scanned_all = True
+        scanned_ids: set[str] = set()
         for (from_addr, pay_to), pair_orders in pairs.items():
             try:
                 finalized, reached_head = _reconcile_chain_pair(
@@ -347,11 +355,16 @@ def reconcile_chain_tick() -> int:
                 )
                 acted += finalized
                 scanned_all = scanned_all and reached_head
+                if reached_head:
+                    # Only THIS pair's orders were proven unpaid by a completed walk.
+                    scanned_ids.update(o.id for o in pair_orders)
             except (chain.ChainError, httpx.HTTPError, ValueError):
                 logger.warning(
                     "reconcile: chain scan failed for %s -> %s", from_addr, pay_to
                 )
                 scanned_all = False
+        LAST_SCANNED_ORDER_IDS.clear()
+        LAST_SCANNED_ORDER_IDS.update(scanned_ids)
         if scanned_all:
             LAST_CHAIN_SCAN_MONO = time.monotonic()
     return acted

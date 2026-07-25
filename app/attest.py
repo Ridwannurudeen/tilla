@@ -535,7 +535,7 @@ def _sending_orders() -> list[tuple[str, int]]:
         return [(r[0], r[1]) for r in rows]
 
 
-def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
+def _attest_one(attester: _Attester, order_id: str, store_id: int) -> bool:
     """Build+sign, claim pending->sending (recording the nonce), broadcast, then
     sending->sent + resolve one pending order. A missing buyer/payment tx fails the row
     (can't attest a receipt without them); a gas-over-cap refusal leaves it pending for a
@@ -545,7 +545,7 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
         order = session.get(Order, order_id)
         store = session.get(Store, store_id) if order is not None else None
         if order is None or store is None or order.attest_status != "pending":
-            return
+            return True
         delivery = session.scalar(select(Delivery).where(Delivery.order_id == order_id))
         # A receipt binds to WHAT was delivered — refuse without a buyer, a payment tx,
         # or a delivery payload to hash (fail-closed, never a hollow receipt).
@@ -557,7 +557,7 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
                 "attest.failed",
                 {"reason": "missing buyer, payment tx, or delivery"},
             )
-            return
+            return True
         # Capture primitives inside the session — the send happens after it closes. The
         # content hash is computed here (attest time) from the delivered payload and the
         # product identity rides order.product_id (0 when the store has no per-product).
@@ -572,11 +572,14 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
             attester, from_addr, slug, expected_micro, tx_hash, product_id, content_hash
         )
     except _GasTooHigh as exc:
+        # Deliberate: the row stays pending for a calmer gas window. Counted as
+        # progress so a busy chain never trips the DEGRADED escalation — that marker
+        # is for an attester that CANNOT mint, not one choosing to wait.
         logger.warning("attest: order %s refused, gas %s over cap", order_id, exc)
-        return
+        return True
     except Exception:
         logger.exception("attest: prepare failed for %s (stays pending)", order_id)
-        return
+        return False  # still pending — no progress
 
     # Claim pending->sending recording the broadcast intent (tx hash + nonce + the
     # content hash we signed over) BEFORE broadcasting, so a crash in the send window
@@ -592,7 +595,7 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
         logger.warning(
             "attest: lost pending->sending claim for %s (already handled)", order_id
         )
-        return
+        return True
     _log(order_id, store_id, "attest.sending", {"tx": tx, "nonce": nonce})
 
     try:
@@ -601,16 +604,17 @@ def _attest_one(attester: _Attester, order_id: str, store_id: int) -> None:
         # Broadcast failed/uncertain — leave it 'sending'; reconcile checks the chain by
         # nonce before ever re-broadcasting (never blind, never double).
         logger.exception("attest: broadcast failed for %s (will reconcile)", order_id)
-        return
+        return False  # stuck in 'sending' — no progress
 
     if not _claim(order_id, ("sending",), attest_status="sent"):
-        return
+        return True
     _log(order_id, store_id, "attest.sent", {"tx": tx})
 
     receipt = _wait_receipt(attester, tx)
     if receipt is None:
-        return  # reconcile on a later tick
+        return True  # sent; receipt reconciles later
     _resolve_receipt(order_id, store_id, receipt)
+    return True
 
 
 def _resolve_receipt(order_id: str, store_id: int, receipt) -> None:
@@ -814,11 +818,26 @@ def attest_tick() -> int:
     _reconcile_sent(attester)
     if not _ensure_schema(attester):
         return _idle("schema unavailable")
-    _idle_ticks = 0
+    pending = _pending_orders()
+    if not pending:
+        _idle_ticks = 0  # nothing to do is a healthy tick
+        return 0
     acted = 0
-    for order_id, store_id in _pending_orders():
-        _attest_one(attester, order_id, store_id)
-        acted += 1
+    failed = 0
+    for order_id, store_id in pending:
+        if _attest_one(attester, order_id, store_id):
+            acted += 1
+        else:
+            failed += 1
+    if acted:
+        _idle_ticks = 0  # real progress
+    elif failed:
+        # Every pending attestation failed to leave 'pending'/'sending' — a persistent
+        # broadcast failure (gas exhaustion is the common one). Resetting the counter
+        # unconditionally here meant a live-but-broken attester NEVER reached the
+        # DEGRADED marker the watchdog greps for: it looked healthy while minting
+        # nothing.
+        return _idle("attestation broadcast failing")
     return acted
 
 
