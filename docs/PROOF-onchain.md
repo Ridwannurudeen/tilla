@@ -30,8 +30,12 @@ batch-settle contract `0x0596c8a60d30195cfaddd8bb61b13dbd2aa725b7`; MPP settleme
 database against the public X Layer RPC `https://rpc.xlayer.tech` (`eth_chainId` -> 196) using
 `eth_getTransactionReceipt`, `eth_getTransactionByHash` and full log decoding; the attestations in
 #7 were additionally read back with `EAS.getAttestation(uid)` and abi-decoded with Tilla's own
-schema. Verified at chain head **66160121** (2026-07-24). Every receipt reported below returned
-`status 0x1`.
+schema. First verified at chain head **66160121** (2026-07-24); **re-verified in full at chain head
+66226170 (2026-07-25)** ahead of submission. Every receipt reported below returned `status 0x1` at
+the block stated for it, and all four #7 attestations still read back with a matching schema UID and
+`revocationTime` 0. Note that ten of the split 66-char values in this file are deliberately **not**
+transactions — the EAS schema UID, four attestation UIDs, two `contentHash` values, two subscription
+ids, and the MPP channel id — so `eth_getTransactionReceipt` correctly returns null for those.
 
 (Full 66-char hashes are split with ` + ` below only to satisfy a secret-scanning hook — concatenate
 the two halves. The authoritative hash is also live in the order/job row and the public API.)
@@ -88,14 +92,28 @@ from the subscription contract `0xe9e4…32cc` keyed by the subscription id. The
   - settle tx: `0xfae7c9057f3489da6e4a00588700fc31` + `e31bb784f5832de79ae39e4fae87c181`
   - **receipt status 1**, block **66072295** (2026-07-23 21:15:31 UTC), 5 logs.
   - subscription id: `0x7803dc21102b336a10ead6d985db9dcd` + `30f6fa099fdcb86cec5d18ee68f9381b`
-- Honest gaps on this rail, stated so nobody has to find them:
-  - Period 2's tx hash + subId are persisted on the order row; **period 1's are only in the
-    `event_log` `subscription.settled` payload** (the order row's `tx_hash`/`settle_ref` are empty).
-    The on-chain settle is real either way — it is the bookkeeping that is inconsistent.
+- Honest gaps on this rail, stated so nobody has to find them — **both were found by audit and
+  remediated on 2026-07-25; the original finding is kept here rather than deleted, and what
+  changed is recorded underneath it:**
+  - Period 2's tx hash + subId were persisted on the order row; **period 1's were only in the
+    `event_log` `subscription.settled` payload** (the order row's `tx_hash`/`settle_ref` were
+    empty). The on-chain settle was real either way — it was the bookkeeping that was inconsistent.
+    **Remediated:** `scripts/remediate_subscription_settles.py` re-verified the settle against the
+    chain and backfilled the row, so order `4f68e31890c44289` now carries `tx_hash`
+    `0xf885c994…489ddb`, `settle_ref` `0xff7e6bb3…860221` and `paid_micro` 100000.
   - Two *earlier* `subscription.settled` events carry facilitator **error** references and **no tx**
     (`permit_spender_mismatch` at 08:54, `max_periods_invalid` at 19:43). Neither is a settlement.
-    Order `3f543099f4364d69` was correctly `canceled`; order `cb662715a45e4231` is sitting
-    `delivered` with no settle tx — an **unpaid delivery**, explicitly NOT counted as proof here.
+    Order `3f543099f4364d69` was correctly `canceled`; order `cb662715a45e4231` was sitting
+    `delivered` with no settle tx — an **unpaid delivery**, never counted as proof here.
+    **Remediated:** the same script asserted that order's settle event carries no txHash and then
+    voided it, revoking the entitlement — it is now `canceled`, so no delivered order on this rail
+    lacks settlement evidence.
+  - A related audit finding, recorded for completeness: ten delivered orders across the agent and
+    subscription rails carried `paid_micro=0` despite real on-chain settlements, which made them
+    unrefundable and understated merchant revenue. Corrected on 2026-07-25 by
+    `scripts/remediate_paid_micro.py`, which verifies **per settlement tx** (the `aggr_deferred`
+    rail settles a batch, so the on-chain total must cover the sum of every order claiming it).
+    No proof entry above depended on that column.
 
 ## 5. Batch rail (x402 `aggr_deferred`) — PROVEN (2026-07-23)
 The point of this rail is aggregation: **two separate agent orders, one on-chain settlement.**
@@ -242,6 +260,8 @@ channel and one disputed escrow job are recorded as partially proven and are nev
 Every settlement above is self-funded — Tilla's own wallets on both sides in most entries — and none
 of it is organic third-party demand.
 
-Test-wallet balance after entry #11 (2026-07-25, block 66208040): `0x03d1…4ebb` holds
-**16.098832 USDT0** (the 0.1 spent hiring Warden); `0xf4c9…fa51` (merchant / Tilla fee payTo /
-Warden payee) holds **37.440953 USDT0** as of the 2026-07-24 read.
+Test-wallet balances, both re-read at chain head **66226170** (2026-07-25): `0x03d1…4ebb` holds
+**16.098832 USDT0** (down 0.1 — the Warden hire in #11); `0xf4c9…fa51` (merchant / Tilla fee payTo /
+Warden payee) holds **37.540953 USDT0**. The second figure was previously stated as 37.440953 from a
+2026-07-24 read taken *before* entry #11 settled; since `0xf4c9…fa51` is Warden's payee, #11's
+0.100000 USDT0 landed in it, and the two balances now reconcile against each other as they should.

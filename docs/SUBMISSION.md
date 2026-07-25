@@ -55,11 +55,15 @@
 > Example store: https://tilla.gudman.xyz/s/invoice-flow/
 
 **Post 5b (the rails aren't a diagram — they settled)**
-> Four x402 schemes are live on X Layer, each with a real on-chain settlement in
-> Tilla's public proof log (docs/PROOF-onchain.md):
+> Four x402 schemes are live on X Layer. Three have settled on-chain, with the receipts
+> in Tilla's public proof log (docs/PROOF-onchain.md):
 >
-> exact · aggregated/deferred (one tx settling two orders) · period subscriptions ·
-> metered channels — plus EAS attestation receipts and non-custodial escrow.
+> exact · aggregated/deferred (one tx settling two orders) · period subscriptions
+>
+> The fourth, metered channels, is opened and funded on-chain (2 USDT0 in escrow) with a
+> signed voucher — settlement pending, and labeled that way in the log rather than counted.
+>
+> Plus EAS attestation receipts and non-custodial escrow, both settled.
 >
 > Non-custodial throughout: funds go buyer → merchant. Tilla never holds them.
 >

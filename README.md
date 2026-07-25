@@ -28,15 +28,17 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
 
 ## Payment rails (x402)
 
-All four x402 schemes are built and tested; the exact rail and the agent buy/create-store flows are
-proven on-chain (see [`docs/PROOF-onchain.md`](docs/PROOF-onchain.md) for real tx receipts):
+All four x402 schemes are built and tested. Three have settled on-chain — `exact` (including the
+agent buy and create-store flows), `aggr_deferred` and `period`; the metered channel is open and
+funded on-chain but has not settled. Every claim below has a re-verified receipt in
+[`docs/PROOF-onchain.md`](docs/PROOF-onchain.md):
 
 | Rail | What it is | Status |
 |---|---|---|
 | `exact` | Fixed-price checkout (human sweeper match + agent EIP-3009 settle) | **Live, proven on-chain** |
 | `aggr_deferred` | Batched/deferred settle — the OKX facilitator relayer settles buyer→merchant ~30s later, batching orders | **Proven on-chain**; Tilla auto-detects the facilitator-relayed settlement and finalizes orders |
-| `period` | Subscription billing via a Permit2 sidecar + proxy | Built + tested |
-| MPP metered | Pay-as-you-go metered payment channels (open → voucher → close/settle) | Built + tested; full channel lifecycle exercised on-chain |
+| `period` | Subscription billing via a Permit2 sidecar + proxy | **Proven on-chain**; two periods settled by the OKX subscription contract, relayed by the facilitator (blocks 66072022, 66072295) |
+| MPP metered | Pay-as-you-go metered payment channels (open → voucher → close/settle) | Built + tested; **partially proven** — channel opened and funded on-chain (2 USDT0 into the settlement-agent escrow) with one signed voucher, but **close/settle has not happened**, so no metered settlement is claimed |
 
 Settlement detection is **fail-closed**: an order is only marked delivered against a real, confirmed
 on-chain tx hash; during an RPC outage the reaper never voids a paid-but-slow order.
