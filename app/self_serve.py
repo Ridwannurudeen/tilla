@@ -180,7 +180,12 @@ def retry(session: Session, creation: StoreCreation) -> StoreCreation:
     """Retry generation for a paid-but-ungenerated creation — after a model outage
     ('paid') or after the generated content itself was blocked ('failed'). Both
     states are reached only THROUGH 'paid', so the tx is already verified and
-    consumed: generation is re-run with no payment re-check and no re-charge."""
+    consumed: generation is re-run with no payment re-check and no re-charge.
+
+    A 'queued' creation is NOT retryable: its store row already exists awaiting the
+    screening resweep, so regenerating would mint a second store from one fee (and
+    the queued one would go live anyway). The `creation.slug` guard covers it, and
+    the status check states it explicitly."""
     if creation.status not in ("paid", "failed") or creation.slug:
         raise CreationError(409, "nothing to retry")
     return _generate(creation)
@@ -216,12 +221,29 @@ def _generate(creation: StoreCreation) -> StoreCreation:
         )
     except engine.GenerationUnavailable:
         return creation  # stays 'paid' — retry when the model is back, no recharge
+    except screening.ScreeningBlocked:
+        # The GENERATED content was blocked (the description already passed, or no
+        # payment would have been taken). This is the documented 'failed' outcome, so
+        # the merchant gets the free-regenerate UI; it used to escape create_store and
+        # 500 the pay/retry route, which told them nothing and left the row mid-flight.
+        creation.status = "failed"
+        return creation
     # create_store returns NO 'status' key on success — only the screening-queued path
     # sets status='pending_screening'. Comparing against "live" (a value it never
     # returns) marked every SUCCESSFUL generation as 'failed', burning a real payment.
     if result.get("slug") and result.get("status") != "pending_screening":
         creation.slug = result["slug"]
         creation.status = "live"
+    elif result.get("status") == "pending_screening" and result.get("slug"):
+        # A store row EXISTS (queued, unrendered) awaiting the screening resweep. Claim
+        # its slug and stay 'paid': marking this merely 'failed' let retry() generate a
+        # SECOND store from the same fee while the queued one still went live — one
+        # payment, two stores. retry() refuses any creation that already has a slug, so
+        # recording it here is the guard. Status stays 'paid' rather than a new
+        # 'queued' value because ck_store_creations_status permits only
+        # pending/paid/live/failed, and a schema change is not worth it for a label:
+        # 'paid' + slug + no live page is exactly "bought, awaiting publication".
+        creation.slug = result["slug"]
     else:
         # Generated content could not clear screening — a live store was not built.
         creation.status = "failed"

@@ -300,6 +300,7 @@ def growth_outbox_list(
 
 
 @router.post("/api/stores/{slug}/growth/outbox/{draft_id}/approve")
+@limiter.limit("30/minute")
 def growth_outbox_approve(
     request: Request,
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
@@ -322,6 +323,7 @@ def growth_outbox_approve(
 
 
 @router.post("/api/stores/{slug}/growth/outbox/{draft_id}/discard")
+@limiter.limit("30/minute")
 def growth_outbox_discard(
     request: Request,
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
@@ -346,6 +348,7 @@ def growth_outbox_discard(
 
 
 @router.post("/api/stores/{slug}/growth/outbox/{draft_id}/mark-published")
+@limiter.limit("30/minute")
 def growth_outbox_mark_published(
     request: Request,
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
@@ -584,6 +587,7 @@ def latest_calendar(session: Session, store_id: int) -> dict | None:
 
 
 @router.post("/api/stores/{slug}/growth/calendar")
+@limiter.limit("30/hour")
 def growth_calendar_set(
     request: Request,
     slug: str = Path(..., pattern=config.SLUG_PATTERN),

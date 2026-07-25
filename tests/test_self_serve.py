@@ -268,10 +268,19 @@ def test_generation_outage_then_retry(monkeypatch):
 
 
 def _paid_but_failed(monkeypatch, token, acct, tx="0x" + "6" * 64) -> int:
-    """A creation whose payment verified but whose GENERATED content could not clear
-    screening — status 'failed', tx consumed, no store. The dead end that burned the
-    fee before 'failed' became retryable."""
-    _stub_create_store(monkeypatch, slug="queued-store", pending=True)
+    """A creation whose payment verified but whose GENERATED content was BLOCKED —
+    status 'failed', tx consumed, no store. The dead end that burned the fee before
+    'failed' became retryable.
+
+    A real block raises ScreeningBlocked out of create_store; this used to be faked
+    with the pending_screening return instead, which is a DIFFERENT outcome (a store
+    row exists, queued for the resweep) and must not be retryable at all.
+    """
+
+    def _blocked(*_a, **_k):
+        raise ScreeningBlocked({"risk_level": "high"})
+
+    monkeypatch.setattr(engine, "create_store", _blocked)
     cid = _intent(token).json()["id"]
     _mock_tx(monkeypatch, _receipt(acct.address, TILLA, FEE))
     pay = client.post(
@@ -462,3 +471,32 @@ def test_pay_runs_the_real_nested_session_write(monkeypatch, tmp_path):
         assert out.status == "live", "nested engine session must not deadlock"
         assert out.slug
         assert out.tx_hash == "0x" + "b" * 64  # payment durably consumed
+
+
+def test_screening_queued_creation_cannot_mint_a_second_store(monkeypatch):
+    """One fee must never produce two stores.
+
+    When generated content is QUEUED (screening unavailable) create_store has already
+    committed a Store row awaiting the resweep. Marking the creation merely 'failed'
+    left it retryable, so a retry generated a SECOND store from the same payment while
+    the queued one still went live. The creation now claims the queued slug, and
+    retry() refuses any creation that has one.
+    """
+    acct = Account.create()
+    token = _merchant_token(acct)
+    _allow_screen(monkeypatch)
+    _stub_create_store(monkeypatch, slug="queued-store", pending=True)
+    cid = _intent(token).json()["id"]
+    _mock_tx(monkeypatch, _receipt(acct.address, TILLA, FEE))
+    pay = client.post(
+        f"/api/merchant/create-store/{cid}/pay",
+        json={"tx_hash": "0x" + "7" * 64},
+        headers=_auth(token),
+    )
+    assert pay.status_code == 200, pay.text
+    assert pay.json()["slug"] == "queued-store"  # owns the queued store
+    assert pay.json()["status"] != "live"  # not published yet
+
+    r = client.post(f"/api/merchant/create-store/{cid}/retry", headers=_auth(token))
+    assert r.status_code == 409, "a queued creation must not regenerate"
+    assert r.json()["detail"] == "nothing to retry"

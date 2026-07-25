@@ -956,7 +956,13 @@ def _finalize_settled(
     them. Idempotent: the conditional UPDATE is a no-op once the order has left
     'settling'. Does NOT commit — the caller owns the transaction. Returns True on the
     winning flip."""
-    fields = {"tx_hash": tx} if tx else {}
+    # paid_micro is what refunds._amount_due subtracts from, and only the checkout
+    # sweeper used to write it — so an agent order that was delivered and genuinely
+    # paid computed due=0 and 409'd "order has nothing left to refund", making every
+    # agent sale permanently unrefundable. A settled order paid exactly expected_micro.
+    fields = {"paid_micro": order.expected_micro}
+    if tx:
+        fields["tx_hash"] = tx
     if not checkout.transition(session, order.id, ("settling",), "delivered", **fields):
         return False
     log_event(
@@ -1059,12 +1065,20 @@ async def agent_guard_dispatch(request: Request, call_next):
     """Outermost middleware (registered AFTER the x402 middleware, so it runs
     first). For POST /s/{slug}/buy it 404/409s a dead store BEFORE any payable 402
     is emitted; on the way back it records the settle tx_hash for a served buy."""
-    if request.method != "POST" or not _BUY_PATH_RE.match(request.url.path):
+    if request.method not in ("GET", "POST") or not _BUY_PATH_RE.match(
+        request.url.path
+    ):
         return await call_next(request)
     slug = _slug_from_path(request.url.path)
-    guard = await asyncio.to_thread(_guard_store_status, slug)
-    if guard is not None:
-        return JSONResponse({"detail": guard[1]}, status_code=guard[0])
+    # The dead-store guard and the settle bookkeeping below are POST-only concerns;
+    # GET /s/{slug}/buy is the discovery probe agents use to READ the challenge. It
+    # still emits a 402, so it must get the same honest accepts list — the filter was
+    # POST-gated, so a GET on a non-batch store advertised an aggr_deferred scheme its
+    # own handler would 409.
+    if request.method == "POST":
+        guard = await asyncio.to_thread(_guard_store_status, slug)
+        if guard is not None:
+            return JSONResponse({"detail": guard[1]}, status_code=guard[0])
     response = await call_next(request)
     if response.status_code == 402 and config.AGGR_DEFERRED_ENABLED:
         # CHALLENGE HONESTY: with the aggr flag on, the static accepts list carries
@@ -1080,7 +1094,7 @@ async def agent_guard_dispatch(request: Request, call_next):
                 if filtered is not None:
                     response.headers["PAYMENT-REQUIRED"] = filtered
         return response
-    if response.status_code == 200:
+    if response.status_code == 200 and request.method == "POST":
         pr = response.headers.get("PAYMENT-RESPONSE")
         order_id = getattr(request.state, "agent_order_id", None)
         if pr and order_id:

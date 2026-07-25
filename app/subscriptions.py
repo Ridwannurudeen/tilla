@@ -28,7 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import JSONResponse
 
-from app import agentic, chain, checkout, config, payment
+from app import agentic, chain, checkout, config, payment, webhooks
 from app.db import SessionLocal
 from app.limiter import limiter
 from app.models import Order, Product, Store, log_event
@@ -366,6 +366,11 @@ def _fulfill_subscription(
             x402_nonce=idem_key,
             from_addr=payer,
             paid_at=checkout._now(),
+            # paid_micro is what refunds._amount_due subtracts from. Only the checkout
+            # sweeper used to write it, so an agent/subscription order — delivered and
+            # genuinely paid — computed due=0 and 409'd "nothing left to refund",
+            # making every subscription sale permanently unrefundable.
+            paid_micro=ctx["amount_per_period_micro"],
             settle_ref=sub_id if isinstance(sub_id, str) else None,
             tx_hash=tx_hash,
         )
@@ -399,6 +404,16 @@ def _fulfill_subscription(
         # First settle: the on-chain facilitator settle authenticated the payer, so
         # the gated goods may be returned inline. include_gated=True.
         body = _subscription_body(session, order, ctx, include_gated=True)
+        # A subscription sale is a sale: fire the same merchant webhooks and queue the
+        # same on-chain receipt as every other rail. Without this a merchant's
+        # integration never learned a subscriber had paid, and the sale carried no EAS
+        # attestation — invisible where every other settled order is evidenced.
+        store = session.get(Store, ctx["store_id"])
+        if store is not None:
+            if config.ATTEST_ENABLED:
+                order.attest_status = "pending"
+            webhooks.enqueue(session, store.merchant_id, "order.paid", order)
+            webhooks.enqueue(session, store.merchant_id, "order.delivered", order)
         session.commit()
         return body
 

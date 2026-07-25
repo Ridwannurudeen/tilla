@@ -597,3 +597,31 @@ def test_agent_settle_tx_cannot_also_credit_a_web_order(make_store):
     with SessionLocal() as s:
         assert s.get(Order, wid).status == "pending", "web order must stay unpaid"
         assert s.get(Order, aid).status == "delivered"
+
+
+def test_settled_agent_order_is_refundable(make_store):
+    """A delivered agent sale must be refundable.
+
+    refunds._amount_due subtracts refunded_micro from paid_micro, and paid_micro was
+    written ONLY by the checkout sweeper — so every agent order (and every
+    subscription order) reached the refund path with paid_micro=0, computed due<=0 and
+    409'd "order has nothing left to refund". Prod had 12 such delivered orders.
+    """
+    from app import refunds
+
+    sid = make_store(slug="refagent", price_micro=1_000_000, delivery="X")
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        order, _ = agentic.fulfill_agent_order(
+            s, s.merge(store), s.merge(product), PAYER, NONCE
+        )
+        s.commit()
+        oid, want = order.id, order.expected_micro
+    with SessionLocal() as s:
+        assert agentic._finalize_settled(s, s.get(Order, oid), "0x" + "c" * 64, None)
+        s.commit()
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.paid_micro == want, "a settled order paid exactly expected_micro"
+        assert refunds._amount_due(o, "full") == want
