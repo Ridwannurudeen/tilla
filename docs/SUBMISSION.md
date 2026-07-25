@@ -3,7 +3,8 @@
 > **STATUS: DRAFT ONLY.** Nothing in this file has been posted or submitted anywhere.
 > The owner must review, edit as needed, and personally post the X thread and
 > submit the form before the deadline (**2026-07-27 23:59 UTC**).
-> All facts below are restricted to what is verified live/real as of 2026-07-24 — no invented features, no fabricated metrics.
+> All facts below are restricted to what is verified live/real as of 2026-07-25 — no invented features, no fabricated metrics.
+> Every URL, status code and price in this file was re-probed against production on 2026-07-25 06:2x UTC.
 
 ---
 
@@ -42,13 +43,27 @@
 > Same store, two buyers. Only possible because it's built on OKX's Agent Payments Protocol rails.
 
 **Post 5 (proof it's real)**
-> This isn't a mockup. Tilla itself is a registered OKX ASP:
+> This isn't a mockup. Tilla is a registered OKX ASP — agent #6961 — and it now lists
+> SIX services on the marketplace:
 >
-> #6961 "Tilla" — service "Create Storefront," 0.05 USDT via x402
-> Endpoint: https://tilla.gudman.xyz/create-store
-> Live 402 challenge: 0.05 USDT0 on eip155:196 ✅
+> 3 platform services (create / upgrade / add-product)
+> + 3 merchant storefronts Tilla built, each listed as its own buyable service
 >
-> Example live store: https://tilla.gudman.xyz/s/invoice-flow/
+> Every store Tilla creates can become supply inside OKX's own marketplace.
+>
+> Live 402: 0.05 USDT0 on eip155:196 ✅
+> Example store: https://tilla.gudman.xyz/s/invoice-flow/
+
+**Post 5b (the rails aren't a diagram — they settled)**
+> Four x402 schemes are live on X Layer, each with a real on-chain settlement in
+> Tilla's public proof log (docs/PROOF-onchain.md):
+>
+> exact · aggregated/deferred (one tx settling two orders) · period subscriptions ·
+> metered channels — plus EAS attestation receipts and non-custodial escrow.
+>
+> Non-custodial throughout: funds go buyer → merchant. Tilla never holds them.
+>
+> (Every proof is a self-funded arm's-length test, labeled as such — not organic demand.)
 
 **Post 6 (the vision)**
 > Agentic commerce is projected at $1T in the US alone by 2030 (McKinsey estimates $3-5T global). Most of that value needs a storefront layer that speaks both human and agent.
@@ -77,6 +92,7 @@
 | **Live URL (product)** | https://tilla.gudman.xyz/ |
 | **Live URL (example store)** | https://tilla.gudman.xyz/s/invoice-flow/ |
 | **Endpoint (ASP)** | https://tilla.gudman.xyz/create-store (x402-gated, 0.05 USDT, "Create Storefront") |
+| **Listed services** | 6 under agent #6961 — 3 platform (create / upgrade / add-product) + 3 Tilla-built storefronts listed as buyable services |
 | **X post link** | [placeholder — insert after posting the thread above] |
 | **Demo video link (≤90s)** | [placeholder — insert once recorded] |
 
