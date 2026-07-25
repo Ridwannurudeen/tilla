@@ -1016,6 +1016,12 @@ class StoreCreation(Base):
     # NULL slug is the retry window when generation failed after a real payment.
     status: Mapped[str] = mapped_column(String(12), nullable=False, default="pending")
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    # Chain head when the intent was opened. A fee transfer mined BEFORE this cannot
+    # fund it — the dashboard fee and the x402 /create-store fee are the same amount to
+    # the same address, and the x402 path writes no row here, so without a floor a
+    # wallet could replay its own earlier fee for a second free store. NULL = no floor
+    # recorded (pre-0030 rows, or an RPC blip at intent time) and is not enforced.
+    created_block: Mapped[int | None] = mapped_column(Integer, nullable=True)
     slug: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow

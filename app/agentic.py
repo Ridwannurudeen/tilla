@@ -179,22 +179,28 @@ def _product_for_path(session: Session, store: Store, path: str) -> Product | No
     )
 
 
-def _is_batch_store(slug: str) -> bool:
-    """True iff the store's active product declares pricing_model='batch'. The
-    agent-guard uses it to decide whether the aggr_deferred accepts-entry stays in
-    the 402 challenge. Any unknown/non-live store or DB error returns False, so the
+def _is_batch_path(path: str) -> bool:
+    """True iff the product THIS /buy path targets declares pricing_model='batch'.
+    The agent-guard uses it to decide whether the aggr_deferred accepts-entry stays
+    in the 402 challenge. It keys on the path, not the store, because a multi-product
+    store can mix rails: keying on the store's primary product advertised aggr on a
+    one_time /buy/<id> (and stripped it from a batch one) whenever the two disagreed.
+    Any unknown/non-live store, unknown product, or DB error returns False, so the
     aggr entry is stripped (fail-safe: never over-advertise a rail)."""
+    slug = _slug_from_path(path)
+    if slug is None:
+        return False
     try:
         with SessionLocal() as session:
             store = _live_store(session, slug)
             if store is None:
                 return False
-            product = _active_product(session, store.id)
+            product = _product_for_path(session, store, path)
             return (
                 product is not None and (product.pricing_model or "one_time") == "batch"
             )
     except Exception:
-        logger.exception("aggr batch-check failed for %s", slug)
+        logger.exception("aggr batch-check failed for %s", path)
         return False
 
 
@@ -566,6 +572,7 @@ def fulfill_agent_order(
         x402_nonce=nonce,
         from_addr=payer or None,
         referrer_addr=referrer_addr,
+        created_block=checkout._current_head(),
         paid_at=checkout._now(),
     )
     session.add(order)
@@ -1100,7 +1107,7 @@ async def agent_guard_dispatch(request: Request, call_next):
         # keep it. The accepts live in the base64 PAYMENT-REQUIRED header (the SDK
         # 402 JSON body is ``{}``), so filtering the header keeps body+header in
         # agreement. Flag off -> this branch never runs -> byte-identical 402.
-        if not await asyncio.to_thread(_is_batch_store, slug):
+        if not await asyncio.to_thread(_is_batch_path, request.url.path):
             header = response.headers.get("PAYMENT-REQUIRED")
             if header:
                 filtered = _filter_aggr_from_challenge(header)

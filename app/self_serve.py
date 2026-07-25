@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import chain, config, engine, payment, screening
+from app import chain, checkout, config, engine, payment, screening
 from app.models import StoreCreation
 from app.payment import PAYMENT_AMOUNT, load_payment_rail
 
@@ -65,6 +65,7 @@ def create_intent(
         expected_micro=int(PAYMENT_AMOUNT),
         pay_to=_tilla_pay_to(),
         status="pending",
+        created_block=checkout._current_head(),
     )
     session.add(creation)
     session.flush()  # assign the id for the response
@@ -107,7 +108,11 @@ def _receipt(tx_hash: str) -> dict | None:
 
 
 def _verify_payment(
-    tx_hash: str, pay_to: str, expected_micro: int, from_addr: str
+    tx_hash: str,
+    pay_to: str,
+    expected_micro: int,
+    from_addr: str,
+    created_block: int | None = None,
 ) -> None:
     """Verify the tx is a succeeded USDT0 transfer summing EXACTLY to expected_micro
     from from_addr to pay_to (exact-amount, mirroring the checkout matcher so a
@@ -129,6 +134,13 @@ def _verify_payment(
         decoded = chain.decode_transfer_log(lg)
         if decoded["to"] == want_to and decoded["from"] == want_from:
             total += decoded["value"]
+    if created_block is not None:
+        block = int(receipt.get("blockNumber", "0x0"), 16)
+        if block < created_block:
+            # Mined before this intent existed — a historical transfer (very likely the
+            # merchant's own earlier x402 create-store fee, which records no row here),
+            # never this intent's payment. Same floor orders have carried since M3.
+            raise CreationError(400, "transfer predates the create-store request")
     if total != expected_micro:
         raise CreationError(400, "payment does not match the create-store fee")
 
@@ -153,7 +165,11 @@ def pay_and_create(
         if clash is not None and clash.id != creation.id:
             raise CreationError(409, "payment already used")
         _verify_payment(
-            tx_hash, creation.pay_to, creation.expected_micro, creation.merchant_addr
+            tx_hash,
+            creation.pay_to,
+            creation.expected_micro,
+            creation.merchant_addr,
+            creation.created_block,
         )
         creation.tx_hash = tx_hash
         creation.status = "paid"

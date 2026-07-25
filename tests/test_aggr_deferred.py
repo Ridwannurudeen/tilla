@@ -107,12 +107,13 @@ def test_filter_noop_on_garbage():
 
 
 # ------------------------------------------------------- guard dispatch
-def _buy_request(slug: str) -> Request:
+def _buy_request(slug: str, path: str | None = None) -> Request:
+    path = path or f"/s/{slug}/buy"
     scope = {
         "type": "http",
         "method": "POST",
-        "path": f"/s/{slug}/buy",
-        "raw_path": f"/s/{slug}/buy".encode(),
+        "path": path,
+        "raw_path": path.encode(),
         "headers": [],
         "query_string": b"",
         "client": ("test", 1),
@@ -122,11 +123,13 @@ def _buy_request(slug: str) -> Request:
     return Request(scope)
 
 
-def _dispatch_402(slug: str, header: str) -> Response:
+def _dispatch_402(slug: str, header: str, path: str | None = None) -> Response:
     async def _call_next(_req):
         return Response(status_code=402, headers={"PAYMENT-REQUIRED": header})
 
-    return asyncio.run(agentic.agent_guard_dispatch(_buy_request(slug), _call_next))
+    return asyncio.run(
+        agentic.agent_guard_dispatch(_buy_request(slug, path), _call_next)
+    )
 
 
 def test_guard_strips_aggr_for_non_batch_store(make_store, monkeypatch):
@@ -154,6 +157,63 @@ def test_guard_keeps_aggr_for_batch_store(make_store, monkeypatch):
         ).accepts
     ]
     assert schemes == ["exact", "aggr_deferred"]  # batch keeps the option
+
+
+def _add_product(slug: str, name: str, pricing_model: str) -> int:
+    """A SECOND active product on the store, so /buy and /buy/<id> can disagree."""
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        p = Product(
+            store_id=store.id,
+            name=name,
+            price_micro=1_000_000,
+            active=True,
+            pricing_model=pricing_model,
+        )
+        s.add(p)
+        s.commit()
+        return p.id
+
+
+def test_guard_keeps_aggr_for_a_batch_product_on_a_one_time_store(
+    make_store, monkeypatch
+):
+    # The store's PRIMARY product is one_time; /buy/<id> names a batch one. Keying the
+    # filter on the store stripped the aggr entry the handler would have honoured.
+    make_store(slug="gd4")
+    pid = _add_product("gd4", "Batch thing", "batch")
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    resp = _dispatch_402(
+        "gd4", _challenge_header("exact", "aggr_deferred"), path=f"/s/gd4/buy/{pid}"
+    )
+    schemes = [
+        a.scheme
+        for a in decode_payment_required_header(
+            resp.headers["PAYMENT-REQUIRED"]
+        ).accepts
+    ]
+    assert schemes == ["exact", "aggr_deferred"]
+
+
+def test_guard_strips_aggr_for_a_one_time_product_on_a_batch_store(
+    make_store, monkeypatch
+):
+    # The mirror image: primary product is batch, /buy/<id> names a one_time one. The
+    # handler 409s aggr here, so the challenge must not advertise it.
+    make_store(slug="gd5")
+    _set_pricing("gd5", "batch")
+    pid = _add_product("gd5", "One-time thing", "one_time")
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    resp = _dispatch_402(
+        "gd5", _challenge_header("exact", "aggr_deferred"), path=f"/s/gd5/buy/{pid}"
+    )
+    schemes = [
+        a.scheme
+        for a in decode_payment_required_header(
+            resp.headers["PAYMENT-REQUIRED"]
+        ).accepts
+    ]
+    assert schemes == ["exact"]
 
 
 def test_guard_untouched_when_flag_off(make_store, monkeypatch):
@@ -616,6 +676,54 @@ def test_chain_reconcile_batches_one_transfer_to_two_orders(make_store, monkeypa
             o = s.get(Order, oid)
             assert o.status == "delivered"
             assert o.settle_ref == tx
+
+
+@respx.mock
+def test_chain_reconcile_ignores_transfer_mined_before_the_order(
+    make_store, monkeypatch
+):
+    # A settlement can only be a transfer mined at or after the order was created —
+    # the floor human checkout has enforced since M3. Without it, an EARLIER transfer
+    # between the same payer and merchant (a previous batch settling in full) is
+    # re-consumed to finalize an order it never paid for.
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    monkeypatch.setattr(checkout, "_current_head", lambda: 900)
+    oid = _chain_settling_order(make_store, "chfloor", price=1_000_000)
+    with SessionLocal() as s:
+        assert s.get(Order, oid).created_block == 900  # recorded at agent-order birth
+    tx = "0x" + "7" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, 899, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 0
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "settling"  # fail-closed: still awaiting a real settlement
+        assert o.tx_hash is None
+        assert o.settle_ref is None
+
+
+@respx.mock
+def test_chain_reconcile_settles_a_transfer_in_the_creation_block(
+    make_store, monkeypatch
+):
+    # The boundary: the settlement can land in the very block the order was created in.
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    monkeypatch.setattr(checkout, "_current_head", lambda: 900)
+    oid = _chain_settling_order(make_store, "chfloor2", price=1_000_000)
+    tx = "0x" + "8" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, 900, tx)],
+        receipts={tx: _receipt(RELAYER)},
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 1
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "delivered"
 
 
 @respx.mock

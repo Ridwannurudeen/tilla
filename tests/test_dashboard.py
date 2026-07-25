@@ -5,9 +5,12 @@ surface / refund / export routes are exercised. All chain access is mocked; no
 network, no funds.
 """
 
+import ast
 import csv
 import hashlib
 import io
+import pathlib
+import re
 import secrets
 
 import httpx
@@ -18,7 +21,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import app.main as main
-from app import checkout
+from app import checkout, self_serve
 from app.config import WARDEN_SCREEN_URL
 from app.db import SessionLocal
 from app.models import Merchant, Order, Product, Store
@@ -417,6 +420,64 @@ def test_create_panel_resumes_and_regenerates_instead_of_recharging():
     assert "/api/merchant/create-store/pending" in panel  # reload restores the flow
     assert "csRenderPay(resume, true)" in panel  # ...at the pay step
     assert 'csRetryButton(d.id, "Regenerate (no charge)")' in panel  # not "Start over"
+
+
+def _final_verdict_substrings() -> list[str]:
+    """The substrings the create-store panel matches to decide a 400 is FINAL."""
+    panel = _create_panel()
+    line = next(
+        ln for ln in panel.splitlines() if "e.status === 400" in ln and "permMsg" in ln
+    )
+    return re.findall(r'permMsg\.indexOf\("([^"]+)"\)', line)
+
+
+def _server_400_messages() -> list[str]:
+    """Every ``CreationError(400, "...")`` literal in the self-serve pay path, read
+    from the source so a new one cannot be added without this test seeing it."""
+    src = pathlib.Path(self_serve.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if getattr(fn, "id", None) != "CreationError" or len(node.args) != 2:
+            continue
+        code, msg = node.args
+        if isinstance(code, ast.Constant) and code.value == 400:
+            assert isinstance(msg, ast.Constant), "a 400 detail must be a literal"
+            out.append(msg.value)
+    return out
+
+
+# "transaction not found" is the ONE non-final 400: the hash may simply not be mined
+# yet, so the panel keeps retrying the SAME hash rather than re-offering the wallet.
+_RETRYABLE_400 = {"transaction not found"}
+
+
+def test_create_panel_classifies_every_final_400_the_server_can_raise():
+    """The panel decides 'final verdict vs retry' by substring-matching the server's
+    400 detail, so the two sides are coupled through prose. Rewording a message (or
+    adding a new final 400 — the block-floor rejection was exactly that) silently
+    demotes it onto the retry path, where the merchant is told 'we could not confirm
+    it yet' about a transaction that can never fund the store. Pin both directions."""
+    subs = _final_verdict_substrings()
+    assert subs, "the 400 classifier line was not found in the panel"
+    messages = _server_400_messages()
+    assert len(messages) >= 4, messages
+    for msg in messages:
+        if msg in _RETRYABLE_400:
+            assert not any(sub in msg for sub in subs), (
+                f"{msg!r} is meant to stay on the same-hash retry path"
+            )
+            continue
+        assert any(sub in msg for sub in subs), (
+            f"the panel would retry {msg!r} instead of treating it as final"
+        )
+    for sub in subs:
+        assert any(sub in msg for msg in messages), (
+            f"the panel matches {sub!r}, which no server message contains any more"
+        )
 
 
 # --------------------------------------------------------------------- CSV export

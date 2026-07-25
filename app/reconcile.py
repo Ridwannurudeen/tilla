@@ -272,13 +272,21 @@ def _reconcile_chain_pair(
     pending = sorted(orders, key=lambda o: checkout._naive(o.created_at))
     finalized = 0
     idx = 0
-    for _block, _log_index, value, tx_hash in transfers:
+    for block, _log_index, value, tx_hash in transfers:
         if tx_hash in consumed:
             continue
         consumed.add(tx_hash)
         remaining = value
         while idx < len(pending) and pending[idx].expected_micro <= remaining:
             order = pending[idx]
+            if order.created_block is not None and block < order.created_block:
+                # Mined before this order existed, so it can only be an earlier
+                # transfer between the same payer and merchant — never this order's
+                # settlement. The same floor human checkout has enforced since M3.
+                # pending is oldest-first and created_block rises with created_at, so
+                # no later order can be paid by this transfer either: stop the walk
+                # here and leave idx for the next (higher) transfer.
+                break
             idx += 1
             remaining -= order.expected_micro
             if agentic._finalize_settled(session, order, tx_hash, None):

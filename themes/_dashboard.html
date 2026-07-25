@@ -1244,11 +1244,14 @@
           return;
         }
         var permMsg = String(e.message || "");
-        if (e.status === 400 && (permMsg.indexOf("did not succeed") !== -1 || permMsg.indexOf("does not match") !== -1 || permMsg.indexOf("invalid transaction hash") !== -1)) {
+        if (e.status === 400 && (permMsg.indexOf("did not succeed") !== -1 || permMsg.indexOf("does not match") !== -1 || permMsg.indexOf("predates") !== -1 || permMsg.indexOf("invalid transaction hash") !== -1)) {
           // The chain has given a FINAL verdict on this hash (reverted, wrong
-          // amount/recipient, or malformed) — it can never fund this store, so
-          // re-offering the wallet is not a double charge. Only "transaction not
-          // found" (possibly just unmined) stays on the same-hash retry path.
+          // amount/recipient, older than this request, or malformed) — it can never
+          // fund this store, so re-offering the wallet is not a double charge. Only
+          // "transaction not found" (possibly just unmined) stays on the same-hash
+          // retry path. tests/test_dashboard.py pins these substrings against every
+          // 400 self_serve raises, so a reworded server message cannot silently
+          // demote a final verdict back onto the retry path.
           st.textContent = ""; csForget(); csPayControls(true); cmsg(csErr(e), true);
           return;
         }

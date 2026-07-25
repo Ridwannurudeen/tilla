@@ -11,7 +11,7 @@ from eth_account.messages import encode_defunct
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app import chain, config, engine, payment, screening, self_serve
+from app import chain, checkout, config, engine, payment, screening, self_serve
 from app.db import SessionLocal
 from app.models import StoreCreation
 from app.screening import ScreeningBlocked
@@ -82,9 +82,10 @@ def _pad(addr: str) -> str:
     return "0x" + "0" * 24 + addr.lower()[2:]
 
 
-def _receipt(from_addr, to_addr, value, status="0x1"):
+def _receipt(from_addr, to_addr, value, status="0x1", block=1):
     return {
         "status": status,
+        "blockNumber": hex(block),
         "logs": [
             {
                 "address": config.USDT0,
@@ -92,7 +93,7 @@ def _receipt(from_addr, to_addr, value, status="0x1"):
                 "data": hex(value),
                 "transactionHash": "0x" + "e" * 64,
                 "logIndex": "0x0",
-                "blockNumber": "0x1",
+                "blockNumber": hex(block),
             }
         ],
     }
@@ -197,6 +198,56 @@ def test_pay_wrong_recipient_rejected(monkeypatch):
         headers=_auth(token),
     )
     assert r.status_code == 400, r.text
+
+
+def _intent_at_block(monkeypatch, token, head):
+    """An intent opened with the chain at ``head`` — the floor a fee must clear."""
+    monkeypatch.setattr(checkout, "_current_head", lambda: head)
+    body = _intent(token).json()
+    with SessionLocal() as s:
+        assert s.get(StoreCreation, body["id"]).created_block == head
+    return body["id"]
+
+
+def test_pay_rejects_a_fee_transfer_mined_before_the_intent(monkeypatch):
+    """The dashboard fee and the agent x402 /create-store fee are the same amount to
+    the same address, and the x402 path writes no store_creations row — so without a
+    block floor a wallet could replay its own earlier fee transfer for a free second
+    store. orders have carried this floor since M3."""
+    acct = Account.create()
+    token = _merchant_token(acct)
+    _allow_screen(monkeypatch)
+    _stub_create_store(monkeypatch)
+    cid = _intent_at_block(monkeypatch, token, 900)
+    _mock_tx(monkeypatch, _receipt(acct.address, TILLA, FEE, block=899))
+    r = client.post(
+        f"/api/merchant/create-store/{cid}/pay",
+        json={"tx_hash": "0x" + "d" * 64},
+        headers=_auth(token),
+    )
+    assert r.status_code == 400, r.text
+    assert "predates" in r.json()["detail"]
+    with SessionLocal() as s:
+        creation = s.get(StoreCreation, cid)
+        assert creation.status == "pending"  # nothing was minted
+        assert creation.tx_hash is None
+
+
+def test_pay_accepts_a_fee_transfer_in_the_intent_block(monkeypatch):
+    """The boundary: the fee may land in the very block the intent was opened in."""
+    acct = Account.create()
+    token = _merchant_token(acct)
+    _allow_screen(monkeypatch)
+    _stub_create_store(monkeypatch, slug="on-the-floor")
+    cid = _intent_at_block(monkeypatch, token, 900)
+    _mock_tx(monkeypatch, _receipt(acct.address, TILLA, FEE, block=900))
+    r = client.post(
+        f"/api/merchant/create-store/{cid}/pay",
+        json={"tx_hash": "0x" + "d" * 64},
+        headers=_auth(token),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["slug"] == "on-the-floor"
 
 
 def test_pay_reused_tx_is_409(monkeypatch):
