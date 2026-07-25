@@ -486,7 +486,10 @@ import respx  # noqa: E402
 
 from app import chain  # noqa: E402
 
-RELAYER = config.AGGR_FACILITATOR_RELAYER
+# The first configured settlement callee. Production settles through MORE than one
+# (aggregated vs period contracts) — test_reconcile_accepts_every_configured_callee
+# pins that, since pinning a single callee once hid real settlements.
+RELAYER = sorted(config.AGGR_FACILITATOR_CALLEES)[0]
 
 
 class _ChainRpc:
@@ -617,8 +620,8 @@ def test_chain_reconcile_batches_one_transfer_to_two_orders(make_store, monkeypa
 
 @respx.mock
 def test_chain_reconcile_ignores_non_relayer_transfer(make_store, monkeypatch):
-    # A direct buyer->merchant transfer NOT submitted by the facilitator relayer is
-    # not a settlement — the order must stay settling (no false positive).
+    # A direct buyer->merchant transfer through an UNKNOWN callee is not a
+    # settlement — the order must stay settling (no false positive).
     monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
     oid = _chain_settling_order(make_store, "ch3", price=1_000_000)
     tx = "0x" + "3" * 64
@@ -631,6 +634,35 @@ def test_chain_reconcile_ignores_non_relayer_transfer(make_store, monkeypatch):
     assert reconcile.reconcile_chain_tick() == 0
     with SessionLocal() as s:
         assert s.get(Order, oid).status == "settling"
+
+
+@respx.mock
+def test_reconcile_accepts_every_configured_callee(make_store, monkeypatch):
+    """A settlement through the SECOND configured callee must finalize the order.
+
+    Production settles through more than one contract: receipts show callee
+    0x0596c8a6… for aggregated settles and 0xe9e4529d… for period/subscription
+    settles (submitted by several different EOAs). The scan used to pin the single
+    0x0596 address, so a real settlement through the other contract was skipped —
+    and because the scan then reported "clean", it licensed the reaper to void an
+    order the buyer had genuinely paid for. Every configured callee must pass.
+    """
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    callees = sorted(config.AGGR_FACILITATOR_CALLEES)
+    assert len(callees) >= 2, "the callee allow-list must hold every settlement route"
+    oid = _chain_settling_order(make_store, "chalt", price=1_000_000)
+    tx = "0x" + "7" * 64
+    rpc = _ChainRpc(
+        head=1000,
+        logs=[_transfer_log(PAYER, "0x" + "a" * 40, 1_000_000, 900, tx)],
+        receipts={tx: _receipt(callees[1])},  # the NON-default settlement contract
+    )
+    rpc.install()
+    assert reconcile.reconcile_chain_tick() == 1
+    with SessionLocal() as s:
+        o = s.get(Order, oid)
+        assert o.status == "delivered"
+        assert o.tx_hash == tx
 
 
 @respx.mock

@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app import chain, config, engine, payment, screening, self_serve
+from app.db import SessionLocal
+from app.models import StoreCreation
 from app.screening import ScreeningBlocked
 
 client = TestClient(main.app)
@@ -401,3 +403,62 @@ def test_pay_receipt_polling_is_bounded(monkeypatch):
     assert r.status_code == 400, r.text
     assert r.json()["detail"] == "transaction not found"
     assert len(seen) == self_serve._RECEIPT_TRIES
+
+
+def test_pay_runs_the_real_nested_session_write(monkeypatch, tmp_path):
+    """The REAL engine.create_store, not the stub — the nested-session path every
+    other test mocks away.
+
+    pay_and_create flushed the pending->paid UPDATE and then called
+    engine.create_store, which opens its OWN SessionLocal and INSERTs. SQLite has one
+    writer, so the nested INSERT blocked on this session's open write txn and died on
+    busy_timeout ("database is locked"); the route's rollback then reverted 'paid',
+    leaving a merchant who HAD paid with a 'pending' creation. Every real paid
+    creation 500'd in production while the suite stayed green, because
+    _stub_create_store replaced the one call that deadlocks.
+
+    Only the two external calls are mocked here (LLM + screening); every session and
+    DB write is real.
+    """
+    from app import engine
+
+    monkeypatch.setenv("TILLA_STORES_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        engine,
+        "generate",
+        lambda desc: {
+            "store_name": "Nested",
+            "emoji": "x",
+            "tagline": "t",
+            "hero_subcopy": "h",
+            "product_name": "Thing",
+            "product_blurb": "b",
+            "price_usdt": 5,
+            "cta": "Buy",
+            "palette": {
+                "primary": "#111",
+                "accent": "#222",
+                "bg": "#fff",
+                "text": "#000",
+            },
+        },
+    )
+    _allow_screen(monkeypatch)
+    monkeypatch.setattr(self_serve, "_verify_payment", lambda *a, **k: None)
+
+    with SessionLocal() as session:
+        creation = StoreCreation(
+            merchant_addr="0x" + "a" * 40,
+            description="nested session store",
+            theme=None,
+            expected_micro=FEE,
+            pay_to=TILLA,
+            status="pending",
+        )
+        session.add(creation)
+        session.commit()
+        out = self_serve.pay_and_create(session, creation, "0x" + "b" * 64)
+        session.commit()
+        assert out.status == "live", "nested engine session must not deadlock"
+        assert out.slug
+        assert out.tx_hash == "0x" + "b" * 64  # payment durably consumed

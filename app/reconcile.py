@@ -126,6 +126,10 @@ def _reconcile_one(session, client, order: Order) -> bool:
         # is threaded through the async reconciliation, so the settled-event payload is
         # the byte-identical non-tiered path (the price was already locked at buy time).
         if agentic._finalize_settled(session, order, tx, None):
+            # Stamp settle_ref too. _finalize_settled writes only tx_hash, and the
+            # chain scan's consume set reads both columns — an unstamped settlement
+            # left this tx eligible to finalize a second order on a later tick.
+            order.settle_ref = tx
             session.commit()
             return True
         return False
@@ -178,7 +182,14 @@ def _facilitator_transfers(
                 continue
             if str(receipt.get("status", "")).lower() != "0x1":
                 continue
-            if (receipt.get("to", "") or "").lower() != config.AGGR_FACILITATOR_RELAYER:
+            # The callee must be a KNOWN settlement contract. Checked against a set,
+            # not one address: OKX settles through several (aggregated vs period), and
+            # pinning a single one made real settlements invisible — which is worse
+            # than not checking, because the scan then reports "clean" and licenses the
+            # reaper to void an order the buyer actually paid.
+            if (
+                receipt.get("to", "") or ""
+            ).lower() not in config.AGGR_FACILITATOR_CALLEES:
                 continue
             transfers.append((d["block_number"], d["log_index"], d["value"], tx_hash))
         cursor = to_block + 1
@@ -226,8 +237,14 @@ def _reconcile_chain_pair(
     else:
         start = _scan_start(orders, head)
     transfers, cursor = _facilitator_transfers(cfg, from_addr, pay_to, start, head)
-    consumed = set(
-        session.scalars(
+    # A settlement tx is consumed if it appears on EITHER column: the three settle
+    # paths do not agree on where they put it. _finalize_settled writes only
+    # tx_hash; only this chain-scan path also stamps settle_ref; subscriptions put
+    # the facilitator subId on settle_ref and the real tx on tx_hash. Reading just
+    # settle_ref let an already-credited transfer finalize a SECOND order.
+    consumed = {
+        ref
+        for ref in session.scalars(
             select(Order.settle_ref).where(
                 Order.channel == "agent",
                 Order.from_addr == from_addr,
@@ -235,7 +252,17 @@ def _reconcile_chain_pair(
                 Order.settle_ref.is_not(None),
             )
         ).all()
-    )
+    } | {
+        tx
+        for tx in session.scalars(
+            select(Order.tx_hash).where(
+                Order.channel == "agent",
+                Order.from_addr == from_addr,
+                Order.pay_to == pay_to,
+                Order.tx_hash.is_not(None),
+            )
+        ).all()
+    }
     pending = sorted(orders, key=lambda o: checkout._naive(o.created_at))
     finalized = 0
     idx = 0

@@ -158,7 +158,17 @@ def pay_and_create(
         creation.tx_hash = tx_hash
         creation.status = "paid"
         try:
-            session.flush()
+            # COMMIT, not flush. Two reasons, both load-bearing:
+            # 1. SQLite has ONE writer. _generate -> engine.create_store opens its own
+            #    SessionLocal and INSERTs; holding this session's write txn across that
+            #    call deadlocked every real paid creation ("database is locked" after
+            #    busy_timeout) and the route's rollback then reverted this 'paid' row,
+            #    so a merchant's fee was spent with the creation left 'pending'.
+            # 2. It durably consumes the verified tx BEFORE the slow LLM call, so a
+            #    crash mid-generation cannot hand the same payment back for reuse.
+            # The caller's later commit() is then a no-op for this row; 'paid' with a
+            # NULL slug is the documented free-retry state.
+            session.commit()
         except IntegrityError as exc:
             session.rollback()
             raise CreationError(409, "payment already used") from exc

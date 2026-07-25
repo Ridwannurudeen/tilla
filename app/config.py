@@ -191,14 +191,28 @@ RECONCILE_MAX_PER_TICK = int(os.environ.get("TILLA_RECONCILE_MAX_PER_TICK", "20"
 # CHAIN settlement detection for aggr_deferred: OKX's facilitator /settle returns a
 # 200 with an EMPTY transaction, so the real settlement is only observable on-chain —
 # a USDT0 Transfer from the buyer (order.from_addr) to the merchant (order.pay_to)
-# whose transaction was submitted by the OKX facilitator RELAYER below. Settlements
+# whose transaction went through one of the settlement CALLEES below. Settlements
 # BATCH (N orders -> one summed transfer), so the poller attributes by accumulation
-# per (from_addr -> pay_to) pair. The relayer is pinned so a stray direct transfer can
-# never be mistaken for a settlement; overridable in the VPS .env if OKX rotates it.
-AGGR_FACILITATOR_RELAYER = os.environ.get(
-    "TILLA_AGGR_FACILITATOR_RELAYER",
-    "0x0596C8A60D30195CFAddD8bB61b13dBD2AA725B7",
-).lower()
+# per (from_addr -> pay_to) pair. The callee is checked so a stray direct transfer
+# between the same two wallets can never be mistaken for a facilitator settlement.
+#
+# This MUST be a set, not one address. OKX settles through more than one contract and
+# from several submitter EOAs: production receipts show callees 0x0596c8a6… (aggregated
+# settle) and 0xe9e4529d… (period/subscription settle), submitted by at least
+# 0x2c0f3450…, 0x6626a4f7… and 0x26398775…. Pinning the single 0x0596 callee made a
+# genuine settlement invisible to the scan — and an invisible settlement is worse than
+# an unchecked one, because the scan then "completes clean" and licenses the reaper to
+# void an order the buyer really paid for (the 2026-07-23 six-order incident).
+# Overridable as a comma-separated list in the VPS .env if OKX rotates them.
+AGGR_FACILITATOR_CALLEES = frozenset(
+    a.strip().lower()
+    for a in os.environ.get(
+        "TILLA_AGGR_FACILITATOR_CALLEES",
+        "0x0596C8A60D30195CFAddD8bB61b13dBD2AA725B7,"
+        "0xe9e4529d2af54de1078424e495c620d23f4432cc",
+    ).split(",")
+    if a.strip()
+)
 # How far back (in blocks) the STEADY-STATE chain scan looks for a pair's
 # settlement transfer each tick. The facilitator settles ~30s after payment, so
 # the trailing window catches the normal case on the first tick; an order OLDER
