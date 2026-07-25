@@ -13,7 +13,14 @@
 #                  A dead sidecar 503s every subscribe; nothing else notices it.
 #  5. app-side silent degradation: the journal marker app/attest.py logs after a run of
 #                  idle ticks -> alert only, throttled once/hour.
-# Both extra probes ALERT ONLY — this script restarts exactly one unit, "tilla-api".
+#  6. agent presence: the tilla-a2a daemon (agent #8333's XMTP heartbeat) and the
+#                  tilla-openclaw-gateway it dispatches through -> alert only,
+#                  throttled once/hour. A dead a2a daemon silently drops #8333 to
+#                  offline on the OKX marketplace while the website stays 200 — that
+#                  is exactly how a 23h outage went unnoticed on 2026-07-25.
+#  7. heartbeat staleness: unit up but no "heartbeat sent" in the journal for 10min
+#                  (creds/RPC failing under a live process) -> alert only.
+# All extra probes ALERT ONLY — this script restarts exactly one unit, "tilla-api".
 # Telegram uses the SOLVENT bot creds at /etc/solvent/telegram-alerts; if that file or
 # its vars are absent, alerts are skipped and the restart logic still runs.
 #
@@ -30,6 +37,11 @@ RL_MARK="/opt/tilla/.watchdog.ratelimited"  # mtime = last "rate-limited" alert
 RD_MARK="/opt/tilla/.watchdog.ready"        # content = last-alerted /ready body
 SC_MARK="/opt/tilla/.watchdog.sidecar"      # mtime = last sidecar-down alert
 AT_MARK="/opt/tilla/.watchdog.attest"       # mtime = last attest-degraded alert
+A2_UNIT="tilla-a2a"                         # agent #8333 XMTP daemon (heartbeat source)
+OC_UNIT="tilla-openclaw-gateway"            # AI dispatch gateway the daemon calls
+A2_MARK="/opt/tilla/.watchdog.a2a"          # mtime = last a2a-unit-down alert
+OC_MARK="/opt/tilla/.watchdog.openclaw"     # mtime = last gateway-down alert
+HB_MARK="/opt/tilla/.watchdog.heartbeat"    # mtime = last stale-heartbeat alert
 MAX_RESTARTS=3                              # per rolling hour
 STARTUP_GRACE=90                            # secs a just-started unit may boot in
 TG_CONF="/etc/solvent/telegram-alerts"
@@ -146,4 +158,42 @@ if journalctl -u "$UNIT" --since "-10min" --no-pager 2>/dev/null | grep -qF "$AT
   fi
 else
   rm -f "$AT_MARK" 2>/dev/null || true
+fi
+
+# Agent presence. ALERT ONLY — these are never restarted here. A unit stuck in the
+# systemd auto-restart loop reports "activating", not "active" or "failed", so the
+# check is "is it exactly active", not "has it failed". Re-probed once after a short
+# pause so a legitimate 5s restart window is not reported as an outage.
+unit_down() {
+  local u="$1"
+  [ "$(systemctl is-active "$u" 2>/dev/null)" = "active" ] && return 1
+  sleep 8
+  [ "$(systemctl is-active "$u" 2>/dev/null)" = "active" ] && return 1
+  return 0
+}
+
+if unit_down "$A2_UNIT"; then
+  if throttle_ok "$A2_MARK"; then
+    tg_send "${A2_UNIT} is NOT running ($(systemctl is-active "$A2_UNIT" 2>/dev/null)) — agent #8333 is going offline on the OKX marketplace"
+    : > "$A2_MARK"
+  fi
+else
+  rm -f "$A2_MARK" 2>/dev/null || true
+  # Unit is up: is it still heartbeating? The daemon logs "heartbeat sent" ~every
+  # minute; silence for 10min means a live process that stopped reporting presence.
+  if journalctl -u "$A2_UNIT" --since "-10min" --no-pager 2>/dev/null | grep -qF "heartbeat sent"; then
+    rm -f "$HB_MARK" 2>/dev/null || true
+  elif throttle_ok "$HB_MARK"; then
+    tg_send "${A2_UNIT} is up but has sent NO heartbeat in 10min — #8333 presence is going stale"
+    : > "$HB_MARK"
+  fi
+fi
+
+if unit_down "$OC_UNIT"; then
+  if throttle_ok "$OC_MARK"; then
+    tg_send "${OC_UNIT} is NOT running ($(systemctl is-active "$OC_UNIT" 2>/dev/null)) — autonomous store-building on A2A tasks will not dispatch"
+    : > "$OC_MARK"
+  fi
+else
+  rm -f "$OC_MARK" 2>/dev/null || true
 fi
