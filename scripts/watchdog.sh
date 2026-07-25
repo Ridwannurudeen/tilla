@@ -31,6 +31,7 @@ RD_MARK="/opt/tilla/.watchdog.ready"        # content = last-alerted /ready body
 SC_MARK="/opt/tilla/.watchdog.sidecar"      # mtime = last sidecar-down alert
 AT_MARK="/opt/tilla/.watchdog.attest"       # mtime = last attest-degraded alert
 MAX_RESTARTS=3                              # per rolling hour
+STARTUP_GRACE=90                            # secs a just-started unit may boot in
 TG_CONF="/etc/solvent/telegram-alerts"
 
 now() { date +%s; }
@@ -91,7 +92,22 @@ if curl -fsS -m 5 "$HEALTH" >/dev/null 2>&1; then
     rm -f "$RD_MARK" 2>/dev/null || true
   fi
 else
-  # Liveness FAILED -> restart within budget.
+  # Liveness FAILED. FIRST: is it merely still BOOTING? tilla-api takes ~50s to
+  # finish startup (model/registry warmup), which is longer than this timer's 60s
+  # period, so a naive restart-on-failed-health kills the process mid-boot and the
+  # next tick kills it again — a restart loop that never lets it come up. Observed
+  # in production 2026-07-25 after a deploy: three kills in ~90s, /health 502
+  # throughout, recovering only when one boot happened to land between ticks.
+  # A unit younger than STARTUP_GRACE is given time instead of a bounce.
+  pid="$(systemctl show -p MainPID --value "$UNIT" 2>/dev/null || echo 0)"
+  age=0
+  if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+    age="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0)"
+  fi
+  if [ -n "$age" ] && [ "$age" -lt "$STARTUP_GRACE" ] 2>/dev/null; then
+    exit 0   # still inside its startup window: no restart, no alert
+  fi
+  # Genuinely down -> restart within budget.
   prune_restarts
   n="$(restart_count)"
   if [ "$n" -lt "$MAX_RESTARTS" ]; then
