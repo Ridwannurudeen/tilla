@@ -539,3 +539,61 @@ def test_per_product_buy_endpoint_402_without_payment(make_store):
     with SessionLocal() as s:
         pid = s.scalar(select(Product.id).where(Product.store_id == sid))
     assert client.post(f"/s/ppb/buy/{pid}").status_code == 402
+
+
+def test_agent_settle_tx_cannot_also_credit_a_web_order(make_store):
+    """One on-chain payment must deliver exactly ONE order.
+
+    Reproduces a real production incident: settle tx 0x3ef0b384…290975 delivered
+    agent order 2d60adbba5184c17, then the sweeper matched the SAME transfer to an
+    expired web order (3692f8bffbe74af0) and revived it — one payment, two
+    deliveries. Agent settles write no ProcessedTransfer row (the settle path gets a
+    tx hash with no log index), so the (tx_hash, log_index) dedupe could not see it.
+    """
+    from app import config
+    from app.checkout import _is_agent_settlement, _process_log
+    from app.payment import PAYMENT_NETWORK as NETWORK
+
+    sid = make_store(slug="dbl", price_micro=1_000_000, delivery="X")
+    store, product = _store_product(sid)
+    tx = "0x" + "d" * 64
+
+    # An agent order settles on `tx`.
+    with SessionLocal() as s:
+        order, _ = agentic.fulfill_agent_order(
+            s, s.merge(store), s.merge(product), PAYER, NONCE
+        )
+        s.commit()
+        aid = order.id
+    with SessionLocal() as s:
+        assert agentic._finalize_settled(s, s.get(Order, aid), tx, None)
+        s.commit()
+        assert _is_agent_settlement(s, tx), "the settle tx must read as consumed"
+
+    # A pending WEB order for the same amount exists on the same store.
+    with SessionLocal() as s:
+        st = s.get(Store, sid)
+        prod = agentic._active_product(s, sid)
+        web = checkout.create_order(s, st, prod)
+        s.commit()
+        wid, want = web.id, web.expected_micro
+
+    # The sweeper now sees that very transfer. It must NOT credit the web order.
+    log = {
+        "address": config.USDT0,
+        "topics": [
+            config.TRANSFER_TOPIC,
+            "0x" + "0" * 24 + PAYER[2:],
+            "0x" + "0" * 24 + store.pay_to[2:],
+        ],
+        "data": hex(want),
+        "transactionHash": tx,
+        "logIndex": "0x0",
+        "blockNumber": "0x1",
+    }
+    with SessionLocal() as s:
+        _process_log(s, NETWORK, log, head=10, now=checkout._now())
+        s.commit()
+    with SessionLocal() as s:
+        assert s.get(Order, wid).status == "pending", "web order must stay unpaid"
+        assert s.get(Order, aid).status == "delivered"

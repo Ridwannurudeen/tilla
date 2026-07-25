@@ -508,6 +508,8 @@ def verify_txhash(session: Session, order: Order, tx_hash: str):
             if pt.order_id != order.id:
                 raise TxAlreadyUsed()
             continue  # already counted for this order — idempotent
+        if order.channel != "agent" and _is_agent_settlement(session, d["tx_hash"]):
+            raise TxAlreadyUsed()  # this transfer already settled an agent order
         total += d["value"]
         new_logs.append(d)
 
@@ -708,6 +710,31 @@ def _active_addresses(session: Session, network: str, now: datetime) -> list[str
     return sorted(addrs)
 
 
+def _is_agent_settlement(session: Session, tx_hash: str) -> bool:
+    """True if `tx_hash` is already recorded as an agent order's settlement.
+
+    Agent settles do NOT write ProcessedTransfer rows (the x402 middleware hands the
+    settle path a tx hash with no log index), so the (tx_hash, log_index) dedupe both
+    callers use cannot see them. Without this guard the sweeper re-credited a settle
+    transfer to a DIFFERENT order: in production tx 0x3ef0b384…290975 delivered agent
+    order 2d60adbba5184c17 AND revived expired web order 3692f8bffbe74af0 — one
+    payment, two deliveries, violating the one-transfer-one-order invariant.
+
+    Batched settles legitimately carry one tx across several agent orders, so this
+    only ever suppresses re-crediting, never a first credit.
+    """
+    if not tx_hash:
+        return False
+    return bool(
+        session.scalar(
+            select(Order.id)
+            .where(Order.channel == "agent")
+            .where((Order.tx_hash == tx_hash) | (Order.settle_ref == tx_hash))
+            .limit(1)
+        )
+    )
+
+
 def _process_log(session: Session, network: str, log: dict, head: int, now: datetime):
     d = chain.decode_transfer_log(log)
     if session.scalar(
@@ -717,6 +744,8 @@ def _process_log(session: Session, network: str, log: dict, head: int, now: date
         )
     ):
         return  # replayed window — no-op
+    if _is_agent_settlement(session, d["tx_hash"]):
+        return  # already paid an agent order — never re-credit it to another
     order = _match_order(session, network, d["to"], d["value"], now)
     if order is None:
         # self-sends, dust, unrelated buyers, round-price payments missing the

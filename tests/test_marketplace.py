@@ -675,3 +675,59 @@ def test_describe_service_name_respects_the_registry_cap(make_store):
     name = out["service"]["serviceName"]
     assert len(name) <= SERVICE_NAME_MAX
     assert name.startswith("Buy ")
+
+
+def test_upgrade_keeps_the_catalog_in_sync_with_checkout(make_store, monkeypatch):
+    """A paid upgrade must not advertise products checkout cannot sell.
+
+    generate() is prompted for 1-4 products with LLM-chosen prices and no ids, while
+    upgrade_store deliberately leaves the Product rows untouched. Rendering the
+    generated list directly desynced page from checkout: invented items 2-4 have no
+    real row (buy falls back to product_index -> "product_index out of range") and
+    item 1 charged the OLD price whatever the page displayed.
+    """
+    from app import engine, screening
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    sid = make_store(slug="upsync", price_micro=9_000_000)
+    monkeypatch.setattr(
+        engine,
+        "generate",
+        lambda desc: {
+            "store_name": "Upgraded",
+            "emoji": "x",
+            "tagline": "t",
+            "hero_subcopy": "h",
+            "product_name": "Invented One",
+            "product_blurb": "b",
+            "price_usdt": 999,  # LLM price that must NOT reach checkout
+            "cta": "Buy",
+            "palette": {
+                "primary": "#111",
+                "accent": "#222",
+                "bg": "#fff",
+                "text": "#000",
+            },
+            "products": [
+                {"name": "Invented One", "price_usdt": 999, "blurb": "b"},
+                {"name": "Invented Two", "price_usdt": 42, "blurb": "b"},
+                {"name": "Invented Three", "price_usdt": 7, "blurb": "b"},
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        screening, "screen", lambda *a, **k: screening.ScanOutcome("allow", None)
+    )
+    with SessionLocal() as s:
+        engine.upgrade_store(s, s.get(Store, sid), description="a refreshed store")
+    with SessionLocal() as s:
+        rows = s.scalars(
+            select(Product).where(Product.store_id == sid, Product.active)
+        ).all()
+        listed = s.get(Store, sid).content.get("products") or []
+        assert len(listed) == len(rows), "page must list exactly the sellable rows"
+        assert [p["price_usdt"] for p in listed] == [
+            r.price_micro / 1_000_000 for r in rows
+        ], "listed prices must be the prices checkout charges"
+        assert all(p.get("id") for p in listed), "every listed item needs a real id"

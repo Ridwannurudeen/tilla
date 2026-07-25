@@ -656,6 +656,17 @@ def upgrade_store(session, store, description=None, theme=None) -> dict:
     if description is not None:
         store.description = desc
     store.theme = theme_file
+    # Re-derive the catalog from the ACTIVE Product rows before rendering. generate()
+    # is asked for 1-4 products with LLM-chosen prices and NO ids, but an upgrade must
+    # not change what the store SELLS — the Product rows (and their prices) are
+    # deliberately untouched here. Rendering the generated list directly desynced the
+    # page from checkout: buy buttons fall back to product_index when content items
+    # lack ids, so an invented 2nd-4th item 400'd ("product_index out of range") and
+    # the first charged the OLD product at the OLD price whatever the page showed.
+    # resync_catalog rewrites content['products'] from the real rows (keeping the new
+    # blurb/cta by id) so page and checkout agree.
+    resync_catalog(session, store)
+    content = store.content
     d = STORES_DIR / store.slug
     d.mkdir(parents=True, exist_ok=True)
     _write_store_pages(d, content, store.pay_to, store.slug, theme_file)
