@@ -335,16 +335,20 @@ def test_rating_penalizes_a_slow_hire(monkeypatch):
 
 
 @respx.mock
-def test_rating_submission_is_dry_run_only(monkeypatch, caplog):
-    """TILLA_RATE_HIRES=1 logs the payload it WOULD send and sends nothing — there
-    is no verified transport, and respx would fail this test on any stray request."""
+def test_rating_submission_emits_the_command_and_sends_nothing(monkeypatch, caplog):
+    """With an INDEPENDENT counterparty and TILLA_RATE_HIRES=1, the seam logs the
+    exact verified `onchainos agent feedback-submit` line and still sends nothing —
+    --task-id is the operator's to supply, and respx fails this test on any stray
+    request. (This test previously asserted a "no verified transport" dry run; the
+    CLI contract has since been read off the installed binary.)"""
     _enable(monkeypatch)
+    _owners(monkeypatch, "0xf4c9", "0xsomeoneelse")
     monkeypatch.setenv("TILLA_RATE_HIRES", "1")
     paid = respx.post(PAID_URL).mock(side_effect=_Warden(_challenge()))
     with caplog.at_level(logging.INFO, logger="tilla"):
         screening.screen("safe")
-    assert "rating DRY RUN" in caplog.text
-    assert "nothing sent" in caplog.text
+    assert "onchainos agent feedback-submit" in caplog.text
+    assert "--task-id" in caplog.text  # never auto-filled
     assert paid.call_count == 2  # the 402 probe + the one signed replay, nothing more
     assert len(_ratings()) == 1
 
@@ -378,3 +382,83 @@ def test_rating_failure_never_moves_the_screening_decision(monkeypatch):
     assert outcome.receipt.tx_hash == TX
     assert demo.call_count == 0  # never degraded by the rating problem
     assert _ratings() == []
+
+
+def _owners(monkeypatch, mine: str | None, theirs: str | None):
+    """Stub the on-chain ownerOf read b2b performs, by agent id."""
+    from app import b2b
+
+    monkeypatch.setattr(
+        b2b,
+        "verify_agent_owner",
+        lambda agent_id, *, fresh=False: mine if int(agent_id) == 6961 else theirs,
+    )
+
+
+def test_self_review_is_refused_when_owners_match(monkeypatch):
+    """The real production condition: Warden #3808 and Tilla #6961 both resolve to
+    0xf4c9…fa51, so a rating of Warden is a review of the reviewer's own owner."""
+    _owners(monkeypatch, "0xf4c9", "0xf4c9")
+    with pytest.raises(warden_hire.SelfReviewRefused) as exc:
+        warden_hire.assert_not_self_review(3808)
+    assert "shares Tilla's owner" in str(exc.value)
+
+
+def test_unreadable_ownership_is_refused_not_assumed_independent(monkeypatch):
+    # Fail CLOSED: an unverifiable counterparty is not evidence of independence.
+    _owners(monkeypatch, "0xf4c9", None)
+    with pytest.raises(warden_hire.SelfReviewRefused):
+        warden_hire.assert_not_self_review(3808)
+    _owners(monkeypatch, None, "0xother")
+    with pytest.raises(warden_hire.SelfReviewRefused):
+        warden_hire.assert_not_self_review(3808)
+
+
+def test_third_party_owner_passes_the_guard(monkeypatch):
+    _owners(monkeypatch, "0xf4c9", "0xsomeoneelse")
+    warden_hire.assert_not_self_review(3808)  # no raise
+
+
+@respx.mock
+def test_settled_hire_withholds_the_rating_when_not_independent(monkeypatch):
+    """The hire is still recorded locally — honest bookkeeping — but marked
+    independent=False with the reason, and nothing is prepared for submission."""
+    _enable(monkeypatch)
+    _owners(monkeypatch, "0xf4c9", "0xf4c9")
+    respx.post(PAID_URL).mock(side_effect=_Warden(_challenge()))
+    screening.screen("safe")
+
+    (rating,) = _ratings()
+    assert rating["independent"] is False
+    assert "shares Tilla's owner" in rating["withheld_reason"]
+    assert rating["tx_hash"] == TX  # the paid hire itself is still evidenced
+
+
+@respx.mock
+def test_settled_hire_marks_an_independent_rating(monkeypatch):
+    _enable(monkeypatch)
+    _owners(monkeypatch, "0xf4c9", "0xsomeoneelse")
+    respx.post(PAID_URL).mock(side_effect=_Warden(_challenge()))
+    screening.screen("safe")
+
+    (rating,) = _ratings()
+    assert rating["independent"] is True
+    assert "withheld_reason" not in rating
+
+
+def test_submit_command_matches_the_verified_cli_contract():
+    """Pins the flags of `onchainos agent feedback-submit` as read from the
+    installed CLI on 2026-07-25: --agent-id, --creator-id, --score (0.00-5.00),
+    --task-id (REQUIRED), --description."""
+    cmd = warden_hire._submit_command(
+        {
+            "agent_id": 3808,
+            "rating": 5,
+            "actionable_verdict": True,
+            "latency_ms": 120,
+        }
+    )
+    assert cmd.startswith("onchainos agent feedback-submit")
+    for flag in ("--agent-id 3808", "--creator-id 6961", "--score 5.00", "--task-id"):
+        assert flag in cmd
+    assert "--description" in cmd

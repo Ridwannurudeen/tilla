@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import time
 from dataclasses import dataclass
 
@@ -312,17 +313,77 @@ def _rating(actionable: bool, latency_ms: int) -> int:
     return RATING_MAX
 
 
-def rating_payload(scan: PaidScan, *, actionable: bool) -> dict:
-    """The rating Tilla WOULD submit for one settled hire of Warden #3808.
+class SelfReviewRefused(Exception):
+    """Raised when the agent to be rated shares Tilla's owner wallet.
 
-    UNVERIFIED TRANSPORT — this shape is Tilla's own, NOT an external contract. No
-    rating / feedback / reputation submission surface is documented anywhere in this
-    repo: there is no such ``onchainos`` subcommand in docs/runbooks/M10-onchain.md,
-    ERC-8004 is read-only here (config.py: "Tilla never writes to it"), and the
-    runbook lists ratings as out of scope. So this payload is only ever logged.
-    Do NOT wire a transport until the real request shape is verified against OKX's
-    published surface — writing to an imagined contract is how the last three
-    production bugs happened.
+    A public star rating carries the implicit claim that an independent party
+    assessed the service. When both agents belong to one owner that claim is false,
+    and the rating would inflate a reputation graph other people rely on. Splitting
+    the wallets would only make the relationship harder to see, not make the review
+    independent — so the refusal keys on the OWNER, and there is deliberately no
+    override flag.
+    """
+
+
+def _owner_of(agent_id: int) -> str | None:
+    """The on-chain owner wallet of `agent_id`, lowercased, or None if unreadable.
+
+    Delegates to the ERC-8004 registry read b2b already owns and tests (a read-only
+    ``ownerOf`` eth_call, ``fresh=True`` so an ownership transfer inside the cache
+    TTL cannot hide a self-review). Imported lazily: b2b pulls in the agentic module
+    graph, and this seam is only reached on a settled paid hire.
+    """
+    from app import b2b
+
+    return b2b.verify_agent_owner(agent_id, fresh=True)
+
+
+def assert_not_self_review(target_agent_id: int) -> None:
+    """Fail CLOSED unless `target_agent_id` provably belongs to a different owner.
+
+    Raises SelfReviewRefused when the owners match OR when either is unreadable —
+    an unverifiable counterparty is not evidence of independence.
+
+    Production reality on 2026-07-25, both facts measured, not assumed:
+      * OKX's agent API (``onchainos agent get-agents``) reports Warden #3808 and
+        Tilla #6961 under the SAME ownerAddress 0xf4c9…fa51 — so a rating of Warden
+        by Tilla is a review of one owner's agent by the same owner's agent.
+      * The ERC-8004 registry this function reads returns None for BOTH ids, i.e.
+        OKX marketplace agent ids do not resolve through it.
+    So today every hire is refused on the unreadable branch rather than the
+    same-owner branch. Both roads lead to "not provably independent", which is the
+    intended outcome: the loop is built, wired and tested, and declines to publish
+    a rating it cannot justify. Making it fire for a genuine third party needs an
+    ownership source that covers OKX agent ids — do NOT swap in an HTTP endpoint
+    whose contract has not been read off the wire first.
+    """
+    from app.agentic import AGENT_ID
+
+    mine = _owner_of(AGENT_ID)
+    theirs = _owner_of(target_agent_id)
+    if mine is None or theirs is None:
+        raise SelfReviewRefused(
+            f"cannot verify independent ownership (self={mine}, target={theirs})"
+        )
+    if mine == theirs:
+        raise SelfReviewRefused(
+            f"agent {target_agent_id} shares Tilla's owner {mine} — a review from"
+            " one wallet's agent about another is not an independent assessment"
+        )
+
+
+def rating_payload(scan: PaidScan, *, actionable: bool) -> dict:
+    """The rating Tilla submits for one settled hire of Warden #3808.
+
+    Transport VERIFIED 2026-07-25 against the installed onchainos CLI:
+    ``agent feedback-submit --agent-id <target> --creator-id <mine> --score
+    <0.00-5.00> --task-id <id> [--description ...]``. Note --task-id is REQUIRED and
+    belongs to OKX's task lifecycle (create-task -> asp-match -> confirm-accept ->
+    complete); a direct x402 endpoint hire like Tilla's screening has no task id, so
+    submission stays gated on one being supplied by the caller.
+
+    Earlier revisions of this docstring said no such surface existed. That was true
+    of this repo and false of the platform — the CLI has had it all along.
     """
     return {
         "agent_id": WARDEN_AGENT_ID,
@@ -347,13 +408,58 @@ def record_rating(scan: PaidScan, *, actionable: bool) -> None:
     """
     try:
         payload = rating_payload(scan, actionable=actionable)
+        try:
+            assert_not_self_review(WARDEN_AGENT_ID)
+            payload["independent"] = True
+        except SelfReviewRefused as exc:
+            # Recorded, never submitted: the local row is honest bookkeeping of a
+            # hire Tilla made; publishing it would be self-review.
+            payload["independent"] = False
+            payload["withheld_reason"] = str(exc)
         with SessionLocal() as session:
             log_event(session, "warden_hire", "hire.rating", data=payload)
             session.commit()
+        if not payload["independent"]:
+            logger.info(
+                "warden_hire: rating WITHHELD (not independent): %s",
+                payload["withheld_reason"],
+            )
+            return
         if _rate_hires_enabled():
             logger.info(
-                "warden_hire: rating DRY RUN, no verified transport, nothing sent: %s",
+                "warden_hire: rating ready to submit (%s); submission requires an OKX"
+                " task id — see rating_payload for the verified CLI contract: %s",
+                _submit_command(payload),
                 payload,
             )
     except Exception:
         logger.exception("warden_hire: rating write-back failed; screening unaffected")
+
+
+def _submit_command(payload: dict) -> str:
+    """The exact, verified `onchainos agent feedback-submit` line for `payload`.
+
+    Built rather than executed: --task-id is required by the CLI and belongs to
+    OKX's task lifecycle, which a direct x402 hire has none of, so the operator
+    supplies it. Emitting the precise command keeps the last mile a human decision
+    without inventing a request shape.
+    """
+    from app.agentic import AGENT_ID
+
+    return (
+        "onchainos agent feedback-submit"
+        f" --agent-id {payload['agent_id']}"
+        f" --creator-id {AGENT_ID}"
+        f" --score {payload['rating']:.2f}"
+        " --task-id <OKX task id>"
+        f" --description {shlex.quote(_review_text(payload))}"
+    )
+
+
+def _review_text(payload: dict) -> str:
+    """Buyer-vocabulary review text derived only from what this client observed."""
+    verdict = "actionable" if payload["actionable_verdict"] else "unusable"
+    return (
+        f"Paid scan settled in {payload['latency_ms']}ms and returned an"
+        f" {verdict} verdict."
+    )
