@@ -1215,6 +1215,15 @@
           st.textContent = ""; csForget(); csPayControls(true); cmsg(csErr(e), true);
           return;
         }
+        var permMsg = String(e.message || "");
+        if (e.status === 400 && (permMsg.indexOf("did not succeed") !== -1 || permMsg.indexOf("does not match") !== -1 || permMsg.indexOf("invalid transaction hash") !== -1)) {
+          // The chain has given a FINAL verdict on this hash (reverted, wrong
+          // amount/recipient, or malformed) — it can never fund this store, so
+          // re-offering the wallet is not a double charge. Only "transaction not
+          // found" (possibly just unmined) stays on the same-hash retry path.
+          st.textContent = ""; csForget(); csPayControls(true); cmsg(csErr(e), true);
+          return;
+        }
         if (attempt === CS_SUBMIT_TRIES) {
           st.textContent = "";
           cmsg("Your payment was sent (" + csShortTx(txHash) + ") but we couldn't confirm it yet. Nothing extra was charged — verify the same transaction again below in a moment.", true);

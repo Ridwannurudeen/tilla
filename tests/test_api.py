@@ -400,3 +400,22 @@ def test_erc20_transfer_calldata_parity_vector():
     assert built == expected
     assert len(built) == 2 + 8 + 64 + 64  # 0x + selector + to word + amount word
     assert format(micro, "x") == "8967c7"
+
+
+def test_www_fee_copy_tracks_payment_amount():
+    """www/index.html hand-types the create-store fee (static page, no templating).
+    Pin those strings to PAYMENT_AMOUNT so a fee change can never ship without the
+    public copy — the exact 1-USDT drift that reached production once. The old
+    price string must never reappear in any form ("0.01 USDT0" would substring-
+    match "1 USDT", which is why service-fee copy stays out of this page)."""
+    import pathlib as _pathlib
+
+    from app.dashboard import fee_usdt
+    from app.payment import PAYMENT_AMOUNT
+
+    html = (
+        _pathlib.Path(__file__).resolve().parent.parent / "www" / "index.html"
+    ).read_text(encoding="utf-8")
+    fee = fee_usdt(int(PAYMENT_AMOUNT))
+    assert html.count(f"{fee} USDT0") >= 4
+    assert "1 USDT" not in html

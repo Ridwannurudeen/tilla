@@ -55,6 +55,10 @@ def _stats_sentence(row: dict) -> str:
     return ", ".join(clauses) + "."
 
 
+# OKX registry cap on serviceName, learned from the live Wallet API (code 81001).
+SERVICE_NAME_MAX = 30
+
+
 def describe(slug: str) -> dict:
     """Build `slug`'s OKX service listing from live data, plus the exact
     ``onchainos agent update`` command line the owner runs by hand.
@@ -89,10 +93,19 @@ def describe(slug: str) -> dict:
         stats = _stats_sentence(row)
         if stats:
             description = f"{description} {stats}"
+        # The registry rejects serviceName over 30 chars (Wallet API code 81001,
+        # hit on the first live B1.3 submit). Prefer "Buy <product> from <store>",
+        # fall back to "Buy <product>", then truncate the product name — the store
+        # identity always survives in the description.
+        name = f"Buy {product.name} from {store_name}"
+        if len(name) > SERVICE_NAME_MAX:
+            name = f"Buy {product.name}"
+        if len(name) > SERVICE_NAME_MAX:
+            name = name[:SERVICE_NAME_MAX].rstrip()
         service = [
             {
                 "operation": "create",
-                "serviceName": f"Buy {product.name} from {store_name}",
+                "serviceName": name,
                 "serviceDescription": description,
                 "serviceType": "A2MCP",
                 "fee": fee,

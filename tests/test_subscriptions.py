@@ -322,6 +322,32 @@ def test_settle_without_settlement_tx_creates_no_order(monkeypatch):
 
 
 @respx.mock
+def test_settle_with_malformed_tx_hash_creates_no_order(monkeypatch):
+    # Pins _settle_tx_hash's ^0x[0-9a-fA-F]{64}$ shape check: a truncated or
+    # unprefixed hash is not settlement evidence, however "settled" the flag says.
+    for i, bad in enumerate(("0x" + "a" * 62, "b" * 64, "0x" + "c" * 63 + "g")):
+        _sub_store(f"svbad{i}")
+        _enable(monkeypatch)
+        _mock_challenge()
+        respx.post(f"{SIDECAR}/subscriptions/verify").mock(
+            return_value=httpx.Response(200, json={"localVerify": {"ok": True}})
+        )
+        reference = _facilitator_ok()
+        reference["data"]["txHash"] = bad
+        respx.post(f"{SIDECAR}/subscriptions/settle").mock(
+            return_value=httpx.Response(200, json=_settle_body(reference))
+        )
+        r = client.post(
+            f"/s/svbad{i}/subscribe",
+            headers={"PAYMENT-SIGNATURE": "sig"},
+            json={"requirements": {"scheme": "period"}},
+        )
+        assert r.status_code == 502, bad
+        assert _orders() == []
+        assert "subscription.settled" not in _events()
+
+
+@respx.mock
 def test_replayed_signature_is_idempotent(monkeypatch):
     # A replayed PAYMENT-SIGNATURE returns the existing order WITHOUT re-settling.
     _sub_store("sv6")

@@ -561,7 +561,10 @@ def test_describe_quotes_the_live_reputation_numbers(make_store):
     listing = describe("desc-rep")
     service = listing["service"]
 
-    assert service["serviceName"] == "Buy Freelancer Command Center from Invoice Flow"
+    # "… from Invoice Flow" would be 47 chars — over the registry's 30-char cap
+    # (Wallet API 81001), so the name degrades to the product-only form. This
+    # exact string was accepted by the live registry on the first real listing.
+    assert service["serviceName"] == "Buy Freelancer Command Center"
     text = service["serviceDescription"]
     assert text == (
         "Freelancer Command Center from Invoice Flow, delivered as soon as the "
@@ -649,3 +652,26 @@ def test_describe_refuses_a_store_with_no_active_product(make_store):
         s.commit()
     with pytest.raises(LookupError):
         describe("desc-noprod")
+
+
+def test_describe_service_name_respects_the_registry_cap(make_store):
+    """The live Wallet API rejects serviceName > 30 chars (code 81001, hit on the
+    first real B1.3 submit). A long product+store combination must degrade to
+    "Buy <product>", then to a hard truncation — never an over-length submit."""
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.mark_listed import SERVICE_NAME_MAX, describe
+    from app.models import Product, Store
+
+    sid = make_store(slug="longnames")
+    with SessionLocal() as session:
+        product = session.scalar(select(Product).where(Product.store_id == sid))
+        product.name = "Grand Unified Mega Bundle Of Everything Wonderful"
+        store = session.get(Store, sid)
+        store.content = {"store_name": "The Extremely Long Store Name Emporium"}
+        session.commit()
+    out = describe("longnames")
+    name = out["service"]["serviceName"]
+    assert len(name) <= SERVICE_NAME_MAX
+    assert name.startswith("Buy ")
