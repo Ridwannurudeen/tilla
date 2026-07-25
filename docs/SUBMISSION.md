@@ -65,6 +65,25 @@
 >
 > (Every proof is a self-funded arm's-length test, labeled as such — not organic demand.)
 
+**Post 5c (the part almost nobody has: Tilla BUYS too)**
+> Every "agent commerce" demo shows an agent selling. Tilla also spends.
+>
+> Before a store goes live, Tilla hires another agent to security-screen the content
+> and pays for it over x402 — 0.1 USDT0, settled on X Layer:
+> tx 0xf546da66…f403cc
+>
+> Paid, answered, and the verdict actually gated the content.
+>
+> Tilla is a customer in the agent economy, not just a vendor.
+
+**Post 5d (the boring part that matters)**
+> Tilla rates the agents it hires — and it refused to publish this one.
+>
+> The scan agent shares Tilla's owner wallet, so a 5-star review would be us rating
+> ourselves. The code checks the owner and declines. No override flag.
+>
+> Reputation you can't verify is worth nothing. We'd rather ship the guard than the star.
+
 **Post 6 (the vision)**
 > Agentic commerce is projected at $1T in the US alone by 2030 (McKinsey estimates $3-5T global). Most of that value needs a storefront layer that speaks both human and agent.
 >
@@ -93,6 +112,7 @@
 | **Live URL (example store)** | https://tilla.gudman.xyz/s/invoice-flow/ |
 | **Endpoint (ASP)** | https://tilla.gudman.xyz/create-store (x402-gated, 0.05 USDT, "Create Storefront") |
 | **Listed services** | 6 under agent #6961 — 3 platform (create / upgrade / add-product) + 3 Tilla-built storefronts listed as buyable services |
+| **On-chain proof log** | `docs/PROOF-onchain.md` — 10 rails proven with re-verified receipts, incl. Tilla *paying* another agent (0.1 USDT0, block 66208040). All self-funded arm's-length tests, labeled as such; none is organic third-party demand. |
 | **X post link** | [placeholder — insert after posting the thread above] |
 | **Demo video link (≤90s)** | [placeholder — insert once recorded] |
 

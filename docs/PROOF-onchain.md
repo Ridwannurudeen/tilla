@@ -199,6 +199,27 @@ cited as a completed settlement.
   design; the accumulated spend settles only when the settlement agent closes the channel.
 - Channel row status is still **`open`** — no close, no settle tx, nothing claimed.
 
+## 11. Tilla HIRES an agent — paid Warden scan — PROVEN (2026-07-25)
+The loop the other ten do not cover: Tilla as the **buyer**. Every prior entry has Tilla selling
+(a store, a service) or a merchant being paid. Here Tilla spends its own USDT0 to hire another
+agent's service over x402 and uses the answer in its own pipeline.
+- Service: Warden's payload security scan, `https://warden.gudman.xyz/scan`, x402 `exact`,
+  **100000 micro (0.100000 USDT0)** on `eip155:196` — the live 402 challenge was re-read at hire
+  time and the payer refuses to sign unless scheme/asset/network/payTo/amount all match its pins.
+- settle tx: `0xf546da669bdd980c878008fb3e3cd215` + `9a9495c0a3fdec13cc55ac29ddf403cc`
+  - **receipt status 1**, block **66208040**, 1 USDT0 Transfer log:
+    **Tilla payer `0x03d1…4ebb` -> Warden `0xf4c9…fa51` = 0.100000**.
+  - payer balance moved **16.198832 -> 16.098832 USDT0**, exactly -0.100000.
+- Receipt recorded `mode='paid'` (the prior 14 screenings all ran `mode='demo'`, no tx), verdict
+  **ALLOW**, and the verdict was honored by the caller — a paid answer that actually gated content.
+- The hire was rated locally (`hire.rating`: score **3/5**, latency 7217ms — an actionable verdict
+  that took more than half the screen budget). The rating was **withheld from publication**
+  (`independent: false`): Warden #3808 and Tilla #6961 report the same ownerAddress, so publishing
+  a star rating would be one owner reviewing themselves. The guard refused on its first real hire.
+- **Same-operator disclosure:** Warden is also operator-owned, so this is a real x402 settlement
+  between two agents under one owner — a proof of the *mechanism*, not of third-party demand.
+  Recorded here exactly as loudly as the settlement itself.
+
 ## Summary
 
 | Rail | Proof tx(s) | Block(s) | Status |
@@ -214,11 +235,13 @@ cited as a completed settlement.
 | Human self-serve create-store fee (#9) | `0x7aab318f…f8ae8f` | 66151616 | proven |
 | MPP metered channel (#10) | deposit `0x125c88d9…61441f`; no close tx | 66035448 | **partially proven** — open + voucher only |
 | Escrow job `1379aae00c6b4efd` | fund `0x486cc9cf…3da85b`; no release | 66054682 | **partially proven** — disputed, unreleased |
+| Tilla hires an agent, paid Warden scan (#11) | `0xf546da66…f403cc` | 66208040 | proven (Tilla as buyer) |
 
-Nine rails are proven with real on-chain USDT0 and independently re-verified receipts; the MPP
+Ten rails are proven with real on-chain USDT0 and independently re-verified receipts; the MPP
 channel and one disputed escrow job are recorded as partially proven and are never cited otherwise.
 Every settlement above is self-funded — Tilla's own wallets on both sides in most entries — and none
 of it is organic third-party demand.
 
-Test-wallet balance at chain head 66160121 (2026-07-24): `0x03d1…4ebb` holds **16.198832 USDT0**;
-`0xf4c9…fa51` (merchant / Tilla fee payTo) holds **37.440953 USDT0**.
+Test-wallet balance after entry #11 (2026-07-25, block 66208040): `0x03d1…4ebb` holds
+**16.098832 USDT0** (the 0.1 spent hiring Warden); `0xf4c9…fa51` (merchant / Tilla fee payTo /
+Warden payee) holds **37.440953 USDT0** as of the 2026-07-24 read.
