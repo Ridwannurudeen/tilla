@@ -20,7 +20,14 @@ from x402.schemas import AssetAmount, SettleResponse
 import app.main as main
 from app import agentic, checkout, delivery
 from app.db import SessionLocal
-from app.models import Deliverable, Delivery, Entitlement, Order, Store
+from app.models import (
+    Deliverable,
+    Delivery,
+    Entitlement,
+    EventLog,
+    Order,
+    Store,
+)
 from app.payment import build_store_payment_option, load_payment_rail
 
 client = TestClient(main.app)
@@ -310,10 +317,13 @@ def test_record_settlement_sets_tx_hash(make_store):
         assert o.status == "delivered"  # settling -> delivered on settle success
 
 
-def test_record_settlement_delivers_even_when_header_unparsable(make_store):
-    # A successful settle whose PAYMENT-RESPONSE header is undecodable/empty must
-    # still flip settling -> delivered (a served 200+header IS the success signal),
-    # so the reaper never voids a genuinely-paid order (finding #3).
+def test_record_settlement_holds_when_header_unparsable(make_store):
+    # A settle whose PAYMENT-RESPONSE header carries no decodable tx is NOT evidence
+    # that funds moved, so it must NOT flip settling -> delivered. This test used to
+    # assert the opposite ("a served 200 IS the success signal"); production disproved
+    # it — OKX's listing validators drove three served 200s with undecodable headers
+    # and a 900-block scan found no transfer to any merchant, i.e. goods delivered for
+    # free. The order now stays provisional until reconcile finds the real transfer.
     sid = make_store(slug="rs2", price_micro=1_000_000, delivery="X")
     store, product = _store_product(sid)
     with SessionLocal() as s:
@@ -325,16 +335,27 @@ def test_record_settlement_delivers_even_when_header_unparsable(make_store):
     agentic.record_settlement(oid, "not-a-decodable-header")
     with SessionLocal() as s:
         o = s.get(Order, oid)
-        assert o.status == "delivered"
+        assert o.status == "settling"  # held, not delivered
         assert o.tx_hash is None
-    # aged, but settled: the reaper leaves it alone
+        events = [
+            e.event for e in s.query(EventLog).filter(EventLog.order_id == oid).all()
+        ]
+        assert "agent_order.settle_pending" in events
+        assert "agent_order.settled" not in events  # never claim an unevidenced settle
+    # Aged: the reaper still cannot void it without a completed chain scan proving
+    # no payment — an RPC blackout must never read as "never paid".
     with SessionLocal() as s:
         o = s.get(Order, oid)
-        o.paid_at = checkout._now() - timedelta(minutes=30)
+        o.paid_at = checkout._now() - timedelta(hours=7)
         s.commit()
     with SessionLocal() as s:
         assert agentic.reap_agent_orders(s) == 0
-        assert s.get(Order, oid).status == "delivered"
+        assert s.get(Order, oid).status == "settling"
+    with SessionLocal() as s:
+        assert agentic.reap_agent_orders(s, chain_scanned=True) == 1
+        s.commit()
+    with SessionLocal() as s:
+        assert s.get(Order, oid).status == "canceled"
 
 
 def test_settling_order_not_claimable_via_library_until_settle(make_store):
@@ -396,7 +417,9 @@ def test_reaper_voids_old_settling_agent_order(make_store):
         recent_id = order2.id
 
     with SessionLocal() as s:
-        assert agentic.reap_agent_orders(s) == 1
+        # voiding now REQUIRES a completed chain scan on every rail
+        assert agentic.reap_agent_orders(s) == 0
+        assert agentic.reap_agent_orders(s, chain_scanned=True) == 1
         s.commit()
     with SessionLocal() as s:
         assert s.get(Order, old_id).status == "canceled"

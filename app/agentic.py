@@ -837,12 +837,12 @@ def reap_agent_orders(
     every human order are never touched — the reaper keys on 'settling', never on
     tx_hash, so a genuinely-paid order can never be clawed back.
 
-    On the aggr_deferred rail the facilitator returns no tx ref, so an unsettled order is
-    indistinguishable from a paid one still waiting on the relayer: those orders wait
-    ``DEFERRED_REAP_AFTER`` and are voided ONLY when ``chain_scanned`` says a full
-    reconcile chain scan completed (an eth_getLogs blackout must never read as
-    'never paid')."""
-    if config.AGGR_DEFERRED_ENABLED and not chain_scanned:
+    An unsettled order is indistinguishable from a paid one still waiting on the
+    relayer (the facilitator can return no tx ref at serve time, and since the
+    unparsed-header fallback was removed ANY rail can leave a paid order provisional),
+    so voiding requires ``chain_scanned`` — a completed reconcile chain scan that found
+    no transfer. An eth_getLogs blackout must never read as 'never paid'."""
+    if not chain_scanned:
         return 0
     now = now or checkout._now()
     cutoff = now - (DEFERRED_REAP_AFTER if config.AGGR_DEFERRED_ENABLED else REAP_AFTER)
@@ -866,22 +866,21 @@ def reap_agent_orders(
 
 
 def _reap_tick() -> None:
-    # A live OKX aggr_deferred settle carries NO tx hash, so those orders sit 'settling'
-    # with settle_ref NULL until the chain reconciler finds the facilitator transfer —
+    # A settle can carry NO tx hash at serve time (the live OKX aggr_deferred case, and
+    # any rail whose PAYMENT-RESPONSE header does not decode), so those orders sit
+    # 'settling' with settle_ref NULL until the chain reconciler finds the transfer —
     # the settle_ref exemption in reap_agent_orders does NOT protect them. The reaper
     # needs no RPC but the reconciler does, so a silently-failing RPC would make every
-    # slow-but-paid order look unpaid. Fail-closed: when the rail is live, skip entirely
-    # if the chain is unreachable, and only let the reaper void deferred orders when this
-    # tick's chain scan actually COMPLETED (LAST_CHAIN_SCAN_MONO advanced).
+    # slow-but-paid order look unpaid. Fail-closed on every rail: skip entirely if the
+    # chain is unreachable, and only let the reaper void when this tick's chain scan
+    # actually COMPLETED (LAST_CHAIN_SCAN_MONO advanced).
     from app import reconcile
 
-    chain_scanned = False
-    if config.AGGR_DEFERRED_ENABLED:
-        if not reconcile.chain_reachable():
-            return
-        before = reconcile.LAST_CHAIN_SCAN_MONO
-        reconcile.reconcile_chain_tick()
-        chain_scanned = reconcile.LAST_CHAIN_SCAN_MONO > before
+    if not reconcile.chain_reachable():
+        return
+    before = reconcile.LAST_CHAIN_SCAN_MONO
+    reconcile.reconcile_chain_tick()
+    chain_scanned = reconcile.LAST_CHAIN_SCAN_MONO > before
     with SessionLocal() as session:
         if reap_agent_orders(session, chain_scanned=chain_scanned):
             session.commit()
@@ -1013,15 +1012,24 @@ def record_settlement(
         order = session.get(Order, order_id)
         if order is None or order.channel != "agent":
             return
-        # aggr_deferred is UNCONFIRMED at serve time when there is no decoded tx OR the
-        # facilitator marks the aggregated tx 'pending' — in both cases the on-chain tx
-        # is not yet final, so we do NOT flip to a terminal 'delivered' or log
+        # NO decoded tx (any rail) or a 'pending' aggregated tx means settlement is
+        # UNCONFIRMED at serve time, so we do NOT flip to a terminal 'delivered' or log
         # 'agent_order.settled' (which would claim settlement with no evidence). The
         # order stays provisional 'settling' with the 'agent_order.settle_pending'
         # marker; when a pending aggregated ref IS present we persist it so the
         # reconciliation poller (app.reconcile) can later finalize on its confirmed tx.
-        if scheme == PAYMENT_SCHEME_AGGR_DEFERRED and (
-            tx is None or status == "pending"
+        #
+        # The exact rail USED to deliver on an undecodable header, on the reasoning
+        # that a served 200 proves payment and holding risked the reaper voiding a
+        # paid order. Production disproved the premise: OKX's listing validators drove
+        # three served 200s whose headers carried no tx, and a 900-block scan around
+        # them found NO transfer to any of the three merchants — goods delivered, zero
+        # settled. Holding is now the safe side: reconcile_chain_tick scans EVERY
+        # settling agent order (not just deferred), and the reaper cannot void one
+        # without a completed chain scan, so a genuinely-paid order is finalized with
+        # its real tx within a tick instead of being taken on faith.
+        if tx is None or (
+            scheme == PAYMENT_SCHEME_AGGR_DEFERRED and status == "pending"
         ):
             if order.status == "settling":
                 if tx is not None and order.settle_ref != tx:
@@ -1041,12 +1049,8 @@ def record_settlement(
         # the settled event; a below-base settle a fresh read cannot certify is
         # flagged. No agent id ⇒ the log payload is byte-identical to the pre-M16
         # exact-buy path.
-        if agent_id is not None:
-            settle_data: dict | None = _settle_tier_data(session, order, agent_id)
-            if not tx:
-                settle_data["tx"] = "unparsed"
-        else:
-            settle_data = None if tx else {"tx": "unparsed"}
+        # tx is non-None past the guard above, so there is no "unparsed" fallback here.
+        settle_data = _settle_tier_data(session, order, agent_id) if agent_id else None
         if _finalize_settled(session, order, tx, settle_data):
             session.commit()
 
