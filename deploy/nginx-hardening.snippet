@@ -79,16 +79,38 @@
 # warnings. Keep vhost backups OUTSIDE sites-enabled.
 #
 # ---------------------------------------------------------------------------
+# 6. limit_req on the write endpoints and /mcp — APPLIED
+#
+# The `tilla_create` zone (12r/m) was DEFINED in conf.d/tilla-limit-req.conf and
+# referenced NOWHERE, so the three paid write endpoints ran unthrottled — and
+# /create-store both spends an LLM call and writes a store to disk. /mcp was
+# likewise open. Now:
+#
+#     location = /create-store   limit_req zone=tilla_create burst=5  nodelay;
+#     location = /upgrade-store  limit_req zone=tilla_create burst=5  nodelay;
+#     location = /add-product    limit_req zone=tilla_create burst=5  nodelay;
+#     location = /mcp            limit_req zone=tilla_api    burst=20 nodelay;
+#
+# (/api/ and the checkout_sessions regex were already on tilla_api.)
+# Backup before this step: tilla.gudman.xyz.conf.PRE-RATELIMIT.
+#
+# ---------------------------------------------------------------------------
 # NOT DONE — deliberately left for after the hackathon
 #
 # * CSP: the pages use inline <style>/<script> throughout, so a meaningful CSP
 #   needs nonces or hashes threaded through the generator. Not a same-day change.
-# * limit_req on /create-store, /add-product, /upgrade-store, /mcp, /feeds/ and
-#   the store-action regex. The `tilla_create` zone (12r/m) is DEFINED in
-#   /etc/nginx/conf.d/tilla-limit-req.conf but referenced NOWHERE — it was
-#   clearly meant for the three write endpoints, and store creation writes to
-#   disk while unthrottled. Add `limit_req zone=tilla_create burst=5 nodelay;`
-#   there, and `tilla_api` on /mcp and the store-action block.
+# * limit_req on /feeds/ and the store-action regex (buy|mcp|reviews|quote|…).
+#   Read-only or already-priced paths, so lower urgency than the writes above.
 # * Cache-Control on static HTML and og.png (ETag/Last-Modified only today).
 # * A real /favicon.ico (pages use an inline SVG icon, so tabs render; only
 #   direct /favicon.ico fetches by old crawlers 404).
+#
+# ---------------------------------------------------------------------------
+# NOT A DEFECT, checked and recorded so nobody re-opens it
+#
+# * `https://<custom-domain>/s/{slug}/` is a 404, and that is correct. Store
+#   HTML is served by nginx from /opt/tilla/stores/ on the PLATFORM host only;
+#   the app has no /s/{slug}/ HTML route. A custom domain serves its store at
+#   its ROOT (`custom_domain_root`), which is what the canonical URL points at.
+#   Only the app-routed children (/s/{slug}/feed.json etc.) answer under /s/
+#   there, because those live on the agentic router.
