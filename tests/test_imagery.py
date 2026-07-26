@@ -984,7 +984,9 @@ def test_supporting_nouns_alone_cannot_qualify_a_photo(monkeypatch, keyed, tmp_p
         FakeSession(
             {
                 "q": [
-                    photo(1, "High-quality black fabric with intricate folds and texture")
+                    photo(
+                        1, "High-quality black fabric with intricate folds and texture"
+                    )
                 ]
             }
         ),
