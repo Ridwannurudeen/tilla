@@ -663,19 +663,21 @@ def generate(desc):
         # a single hue (app.palette). What is left here is the part the model is
         # genuinely better at than a PRNG: which hue suits what is being sold, and
         # which named personality the brand is.
-        "brand (object with EXACTLY these keys: "
+        # ONE style question, deliberately. Measured against the live model: asked
+        # for a hue it answers well and variously (25 for roasted coffee, 210 for a
+        # productivity tool, 45 for beeswax). Asked in the same breath for a
+        # harmony it said "analogous" three times out of three, and for a persona
+        # it said "warm-craft" two out of three. The modal-answer problem is not
+        # specific to the style axes — it appears wherever the model is offered a
+        # menu. So it is asked only for the judgement that is genuinely semantic,
+        # and everything else is seeded from the slug.
+        "brand (object with EXACTLY one key: "
         "hue (a number 0-359, the brand's base colour on the colour wheel — "
         "0 red, 30 orange, 45 amber, 60 yellow, 120 green, 175 teal, 210 blue, "
         "265 violet, 320 pink; choose what the product itself evokes, e.g. "
-        "roasted coffee near 25, fresh produce near 110, fintech near 215), "
-        "harmony (one of exactly: mono, analogous, complementary, triadic), "
-        "mood (one of exactly: midnight, ink, paper, bone — midnight and ink are "
-        "dark grounds, paper and bone are light grounds)), "
-        "design_persona (one of exactly: quiet-luxury, editorial-classic, gallery, "
-        "bold-statement, poster, monument, zine, technical, warm-craft, "
-        "minimal-shop — the single named personality that best fits this brand). "
-        "Do NOT output palette hex values, a theme, or a design_dna object; those "
-        "are computed. "
+        "roasted coffee near 25, fresh produce near 110, fintech near 215)). "
+        "Do NOT output palette hex values, a theme, a design_dna object, a "
+        "design_persona, a harmony or a mood; those are all computed. "
         "Make copy crisp and compelling, no placeholders."
     )
     resp = _post_generation(prompt)
