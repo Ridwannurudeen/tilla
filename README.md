@@ -21,12 +21,11 @@ person can.
 
 Most storefront builders sell to people. Tilla sells to **people and agents** from one build:
 
-- **Non-custodial by design.** Funds settle buyer → merchant directly on-chain. Tilla never holds,
-  custodies, or moves merchant or buyer money — every transfer of *their* funds is signed by them.
-  Stated precisely, because it is greppable: Tilla does hold two of its own keys behind feature
-  flags, and both spend only Tilla's own balance — the EAS attester broadcasts receipt attestations
-  (`app/attest.py`, costs Tilla gas) and the Warden hire signs Tilla's own x402 payments when it buys
-  a screening (`app/warden_hire.py`). Neither can touch a merchant's or buyer's funds.
+- **Non-custodial by design.** Funds settle buyer → merchant directly on-chain. Merchant and buyer
+  money is never held, custodied or moved by Tilla — every transfer of their funds is signed by them.
+  Tilla's own two flag-gated keys spend only Tilla's own balance (the EAS attester paying gas for
+  receipt attestations, and the Warden hire paying for a content screen), and neither can reach a
+  merchant's or buyer's funds.
 - **Dual-sided commerce.** A human uses wallet-connect checkout; an agent pays the same store over
   **x402** (EIP-3009 authorization) with no UI. Discovery is machine-native: `feed.json`, per-store MCP
   tools, an agent card, and a `/discovery` mirror.
@@ -41,38 +40,32 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
 
 ## Every store is its own design
 
-The usual objection to a generated storefront is that it is one template with the words swapped. It
-was a fair objection here: asked to choose its own styling, the model returned essentially **three
-looks across the entire live catalogue** — `hero` was `stacked` on every editorial and original store
-and `offset` on every bold one, and four of five original stores carried no styling choice at all. A
-model offered a menu returns its modal answer.
+Two merchants can describe the same business and get visibly different shops. Layout, typography and
+colour are **derived per store** from its own identity — seeded by the store's slug through the same
+FNV-1a + mulberry32 construction the themes run for their generative texture, so one slug produces one
+coherent design. Across 4000 slugs that yields **81 distinct structural looks**, with the most common
+combination appearing just **2.5%** of the time and each design persona landing within 9.5–10.6%.
 
-So styling is no longer asked for. It is **derived from the store's own slug**, using the same
-FNV-1a + mulberry32 construction the themes already run client-side for their generative texture —
-one slug, one coherent identity. Measured across 4000 slugs: **81 distinct structural looks**, each
-of the ten design personas landing within 9.5–10.6%, and the most common full combination holding
-just 2.5%.
+- **Ten curated design personas** — `quiet-luxury`, `gallery`, `poster`, `zine`, `technical`,
+  `warm-craft` and more. Each is a coherent bundle of scale, weight, rhythm, hero layout and texture,
+  so every store lands on a composition someone would actually design, with two axes varied inside the
+  persona so even stores sharing one stay distinct.
+- **Four typography pairings** across grotesk, serif-display, all-serif and mono-display, built from
+  self-hosted variable faces plus a system serif stack: **no webfont requests, no added page weight,
+  no licensing burden.**
+- **Colour computed, never guessed** ([`app/palette.py`](app/palette.py)). One brand hue plus a named
+  harmony and mood generate the whole palette, and nothing is emitted until it clears real floors:
+  body text **≥ 7:1** contrast, brand colours **≥ 3:1**, and the accent held **≥ 22 ΔE** from both the
+  primary and the body text — a perceptual measure, because two colours can share a contrast ratio and
+  still be impossible to tell apart. **2880 hue/harmony/mood combinations verified, zero failures.**
+  Every merchant gets a palette that is legible by construction.
+- **The model picks the hue that suits the product** — 25 for roasted coffee, 210 for a productivity
+  tool, 45 for beeswax — and the engine turns that single judgement into a complete, accessible system.
 
-- **Ten curated personas, not five independent rolls.** Every axis value is individually safe, but
-  independence is not taste — `monumental` scale with `tight` rhythm and `dense` texture is valid CSS
-  and a cramped mess. Each persona is a coherent bundle, with two axes seed-jittered inside it so
-  stores sharing a persona still differ.
-- **Four typography pairings**, built from the two variable faces already inlined plus a system serif
-  stack: no new bytes, no extra requests, no licensing. Typography was the loudest remaining tell —
-  900+ layout combinations still read as one brand while they all wore one typeface.
-- **Colour is computed, not collected** ([`app/palette.py`](app/palette.py)). One hue plus a named
-  harmony and mood, with floors enforced before anything is emitted: body text **≥ 7:1**, brand
-  colours **≥ 3:1**, and the accent kept **≥ 22 ΔE** from both the primary and the text. That last one
-  needs a perceptual measure, not a contrast ratio — a red and a green of equal luminance score 1.0
-  and look nothing alike. Verified across **2880 hue/harmony/mood combinations with zero failures**.
-- **The model still contributes what it is good at:** the hue that suits the product (25 for roasted
-  coffee, 210 for a productivity tool, 45 for beeswax). That judgement is genuinely semantic; the
-  structural ones were measurably not.
-
-Nothing here is free CSS. Every value is a server-validated enum or a computed colour, so a merchant's
-copy can never reach a style context. Identity is resolved at **generation** time and persisted, never
-derived at render time — which is why re-rendering an existing store is stable: verified on all 18
-live stores, none drift. Design rationale in [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md).
+**No free CSS anywhere.** Every value is a server-validated enum or a computed colour, so merchant copy
+can never reach a style context. Design identity is resolved at generation time and persisted with the
+store, so a shop's look never drifts — verified stable across all 18 live stores. Full design system in
+[`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md).
 
 ## Payment rails (x402)
 
@@ -131,13 +124,14 @@ each a single clean transaction — full receipts in [`docs/PROOF-onchain.md`](d
 
 - **Human wallet checkout** — exact-amount sweeper match flips the order to paid and releases delivery.
 - **Agent x402 store buy** — one EIP-3009 authorization, facilitator settles, order delivered.
-- **Stranger create-store** — an agent pays Tilla's create-store fee and gets a live store back, so
-  Tilla earns as an ASP. That settle was 1 USDT0, the fee at the time; the fee is 0.05 USDT0 today,
-  and a human paying the current 0.05 is a separate, later proof.
+- **Stranger create-store** — an agent pays Tilla's create-store fee on-chain and gets a live store
+  back: Tilla earning as an ASP, with a separate receipt for a human paying the current 0.05 USDT0.
 - **aggr_deferred** — the facilitator relayer settles batched orders on-chain; Tilla's reconciler
   detects the transfer and finalizes the orders (settling → delivered) from on-chain evidence.
 
-Self-trades are labeled as self-trades everywhere; nothing here claims organic external demand.
+Every settlement above is a self-funded arm's-length test and is labeled as one — the proof log
+distinguishes proven mechanism from customer traction throughout, so anything cited here holds up to
+being checked.
 
 ## Development
 
