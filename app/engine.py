@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from collections.abc import Mapping
 from typing import Literal, get_args
 
 import requests
@@ -26,7 +27,7 @@ from pydantic import (
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app import config, providers, screening
+from app import config, palette, providers, screening
 from app.db import SessionLocal
 from app.delivery import mint_manage_key
 from app.models import (
@@ -66,6 +67,187 @@ def _is_transient_status(code: int) -> bool:
     return code == 429 or 500 <= code <= 599
 
 
+# ------------------------------------------------------------------ store seed
+# The slug is a store's one source of visual identity. The two functions below are
+# the SAME constructions the mosaic already runs client-side in themes/*.html
+# (FNV-1a then mulberry32), reimplemented here so the server can draw from the
+# identical seed — one slug, one coherent identity across layout and texture.
+def _fnv1a(text: str) -> int:
+    """32-bit FNV-1a, matching the `fnv()` in the theme mosaic exactly."""
+    h = 2166136261
+    for ch in text:
+        h ^= ord(ch)
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def _mulberry32(seed: int):
+    """mulberry32 PRNG, matching the theme mosaic's generator exactly. Returns a
+    callable yielding floats in [0, 1). Deterministic: one slug always replays the
+    same sequence, so a re-render never changes a store's look."""
+    state = seed & 0xFFFFFFFF
+
+    def nxt() -> float:
+        nonlocal state
+        state = (state + 0x6D2B79F5) & 0xFFFFFFFF
+        t = state
+        t = ((t ^ (t >> 15)) * (t | 1)) & 0xFFFFFFFF
+        t = (((t + (((t ^ (t >> 7)) * (t | 61)) & 0xFFFFFFFF)) & 0xFFFFFFFF) ^ t) & (
+            0xFFFFFFFF
+        )
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 0x100000000
+
+    return nxt
+
+
+# ------------------------------------------------------------- design personas
+# WHY personas and not five independent rolls: every axis value is individually
+# safe (each maps to CSS the theme already owns), but independence is not the same
+# as taste — `monumental` scale with `tight` rhythm and `dense` texture is valid
+# CSS and a cramped mess. Each persona below is a coherent bundle someone would
+# actually design, so a seeded pick is always intentional-looking. Variety then
+# comes from WHICH persona, plus a seeded jitter inside it.
+#
+# This exists because the LLM, asked to choose the five axes freely, collapsed to
+# roughly three answers across the whole live catalogue: `hero` was `stacked` on
+# every editorial and original store and `offset` on every bold one, and `scale`
+# was `balanced` on ten of fourteen. A model asked for free choice returns its
+# modal answer. The seed does not have a modal answer.
+_PERSONAS: dict[str, dict] = {
+    "quiet-luxury": {
+        "theme": "editorial",
+        "scale": "compact",
+        "weight": "light",
+        "rhythm": "airy",
+        "hero": "stacked",
+        "texture": "sparse",
+        "type_pair": "serif-display",
+    },
+    "editorial-classic": {
+        "theme": "editorial",
+        "scale": "balanced",
+        "weight": "light",
+        "rhythm": "roomy",
+        "hero": "split",
+        "texture": "sparse",
+        "type_pair": "serif",
+    },
+    "gallery": {
+        "theme": "editorial",
+        "scale": "monumental",
+        "weight": "light",
+        "rhythm": "airy",
+        "hero": "split",
+        "texture": "sparse",
+        "type_pair": "serif-display",
+    },
+    "bold-statement": {
+        "theme": "bold",
+        "scale": "dramatic",
+        "weight": "heavy",
+        "rhythm": "tight",
+        "hero": "offset",
+        "texture": "dense",
+        "type_pair": "grotesk",
+    },
+    "poster": {
+        "theme": "bold",
+        "scale": "dramatic",
+        "weight": "heavy",
+        "rhythm": "roomy",
+        "hero": "split",
+        "texture": "dense",
+        "type_pair": "grotesk",
+    },
+    "monument": {
+        "theme": "bold",
+        "scale": "monumental",
+        "weight": "heavy",
+        "rhythm": "airy",
+        "hero": "stacked",
+        "texture": "medium",
+        "type_pair": "grotesk",
+    },
+    "zine": {
+        "theme": "bold",
+        "scale": "dramatic",
+        "weight": "regular",
+        "rhythm": "tight",
+        "hero": "offset",
+        "texture": "dense",
+        "type_pair": "mono-display",
+    },
+    "technical": {
+        "theme": "original",
+        "scale": "compact",
+        "weight": "regular",
+        "rhythm": "tight",
+        "hero": "split",
+        "texture": "medium",
+        "type_pair": "mono-display",
+    },
+    "warm-craft": {
+        "theme": "original",
+        "scale": "balanced",
+        "weight": "regular",
+        "rhythm": "roomy",
+        "hero": "offset",
+        "texture": "medium",
+        "type_pair": "serif-display",
+    },
+    "minimal-shop": {
+        "theme": "original",
+        "scale": "compact",
+        "weight": "light",
+        "rhythm": "roomy",
+        "hero": "stacked",
+        "texture": "sparse",
+        "type_pair": "grotesk",
+    },
+}
+_PERSONA_NAMES = tuple(sorted(_PERSONAS))
+# Axes the seed is allowed to nudge, with the neighbours that stay coherent for
+# any persona. Two stores that land on the same persona still differ here.
+_JITTER = {
+    "texture": ("sparse", "medium", "dense"),
+    "weight": ("light", "regular", "heavy"),
+}
+_DNA_AXES = ("scale", "weight", "rhythm", "hero", "texture", "type_pair")
+
+
+def resolve_design(slug: str, content: Mapping) -> tuple[dict, str, str]:
+    """Pick a store's visual identity: ``(design_dna, persona_name, theme_name)``.
+
+    Deterministic in ``slug``, so the same store always resolves the same way and a
+    re-render can never restyle a live storefront. The LLM may name a persona (a
+    single judgement it makes far better than five independent axis picks); an
+    absent or unrecognised name falls back to a seeded pick. Either way the seed
+    then jitters two axes, so two stores sharing a persona are still distinct.
+
+    Returns the five concrete axes in exactly the shape ``render._dna_ctx`` already
+    consumes, so no template or renderer has to know personas exist."""
+    rnd = _mulberry32(_fnv1a(slug))
+    named = content.get("design_persona")
+    if not isinstance(named, str) or named not in _PERSONAS:
+        named = _PERSONA_NAMES[int(rnd() * len(_PERSONA_NAMES)) % len(_PERSONA_NAMES)]
+    else:
+        rnd()  # keep the sequence aligned whether or not the LLM named one
+    persona = _PERSONAS[named]
+    dna = {axis: persona[axis] for axis in _DNA_AXES}
+    for axis, options in _JITTER.items():
+        dna[axis] = options[int(rnd() * len(options)) % len(options)]
+    return dna, named, persona["theme"]
+
+
+def resolve_palette(slug: str, content: Mapping) -> dict:
+    """The store's derived palette (see :mod:`app.palette`).
+
+    Seeded from a SALTED slug hash so the colour draws are independent of the
+    layout draws — seeding both from the bare slug would correlate persona with
+    palette, and every `zine` store would come out the same colour."""
+    return palette.resolve(content, _mulberry32(_fnv1a(slug + ":palette")))
+
+
 class DesignDNA(BaseModel):
     """The five Design DNA style axes (docs/DESIGN-DNA.md): server-validated
     enums the LLM picks to express a brand's personality. An out-of-set value
@@ -77,12 +259,41 @@ class DesignDNA(BaseModel):
     rhythm: Literal["tight", "roomy", "airy"] = "roomy"
     hero: Literal["stacked", "split", "offset"] = "stacked"
     texture: Literal["sparse", "medium", "dense"] = "medium"
+    # Typography pairing. "grotesk" is today's stack on every theme, so it is the
+    # default and any store predating this axis renders unchanged.
+    type_pair: Literal["grotesk", "serif-display", "serif", "mono-display"] = "grotesk"
 
     @field_validator("*", mode="before")
     @classmethod
     def _coerce_axis(cls, v, info):
         field = cls.model_fields[info.field_name]
         return v if v in get_args(field.annotation) else field.default
+
+
+class BrandBrief(BaseModel):
+    """What the LLM is allowed to say about colour: a hue and two named
+    relationships. It never supplies hex values any more — :mod:`app.palette`
+    derives them, so contrast floors hold for every store rather than for the
+    lucky ones. Every field is fail-closed: a bogus value is dropped to None and
+    the seed decides that dimension instead of the request failing."""
+
+    hue: float | None = None
+    harmony: Literal["mono", "analogous", "complementary", "triadic"] | None = None
+    mood: Literal["midnight", "ink", "paper", "bone"] | None = None
+
+    @field_validator("hue", mode="before")
+    @classmethod
+    def _coerce_hue(cls, v):
+        try:
+            return float(v) % 360
+        except (TypeError, ValueError):
+            return None
+
+    @field_validator("harmony", "mood", mode="before")
+    @classmethod
+    def _coerce_named(cls, v, info):
+        allowed = get_args(get_args(cls.model_fields[info.field_name].annotation)[0])
+        return v if v in allowed else None
 
 
 class ProductContent(BaseModel):
@@ -122,7 +333,22 @@ class GeneratedContent(BaseModel):
     theme: str = Field(default="original")
     # Optional style-axes pick (docs/DESIGN-DNA.md); stores/content without it
     # render exactly as before (render._dna_ctx falls back to the defaults).
+    # NOTE: for a NEW store this is overwritten by resolve_design() from the slug
+    # seed. It stays a field because existing stored content carries it and the
+    # renderer reads it, so it must survive a validate/dump round trip.
     design_dna: DesignDNA | None = None
+    # The colour brief and the named personality — the two things the model judges
+    # better than a PRNG. Both must be DECLARED here or pydantic drops them
+    # silently and the seed would quietly decide everything.
+    brand: BrandBrief | None = None
+    design_persona: str | None = None
+
+    @field_validator("design_persona", mode="before")
+    @classmethod
+    def _coerce_persona(cls, v):
+        """An unrecognised persona name becomes None so the slug seed picks one —
+        never a ValidationError that would fail a paid create-store."""
+        return v if isinstance(v, str) and v in _PERSONAS else None
 
     @field_validator("theme")
     @classmethod
@@ -293,22 +519,85 @@ def _slug_taken(candidate: str) -> bool:
         )
 
 
-def unique_slug(base: str) -> str:
-    """Resolve `base` to a slug that is neither a reserved app route nor an
-    existing store (on disk or in the DB), appending a numeric suffix on
-    collision. The base is truncated to leave room for the suffix so the final
-    slug always stays within SLUG_MAX_LEN and matches SLUG_PATTERN (else
-    checkout 422s)."""
+# Words too common to distinguish one brand from another, so never used as a
+# collision suffix — "highland-roast-the" is no better than "highland-roast-2".
+_SLUG_STOPWORDS = frozenset(
+    """a an and are as at be by for from has have in is it its of on or our so that
+    the their they this to was were will with you your we us he she him her""".split()
+)
+# Trade words, tried after the brand's own vocabulary is exhausted. Generic, but a
+# storefront called "-studio" reads as a decision and "-2" reads as a duplicate.
+_SLUG_TRADE_SUFFIXES = (
+    "co",
+    "studio",
+    "shop",
+    "works",
+    "supply",
+    "goods",
+    "house",
+    "atelier",
+    "press",
+    "lab",
+)
+
+
+def slug_words(content: Mapping) -> tuple[str, ...]:
+    """Distinctive words from a store's own copy, best first, for use as a slug
+    suffix. Drops stopwords, anything under three characters, and duplicates."""
+    if not isinstance(content, Mapping):
+        return ()
+    parts: list[str] = []
+    for key in ("tagline", "hero_headline", "product_name", "store_name"):
+        value = content.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    for product in content.get("products") or []:
+        if isinstance(product, Mapping) and isinstance(product.get("name"), str):
+            parts.append(product["name"])
+    seen: list[str] = []
+    for token in re.split(r"[^a-zA-Z0-9]+", " ".join(parts).lower()):
+        if len(token) >= 3 and token not in _SLUG_STOPWORDS and token not in seen:
+            seen.append(token)
+    return tuple(seen)
+
+
+def unique_slug(base: str, content: Mapping | None = None) -> str:
+    """Resolve `base` to a slug that is neither a reserved app route nor an existing
+    store (on disk or in the DB).
+
+    On collision the suffix is drawn from the brand's OWN words first, then from a
+    short list of trade words, and only then from a number. A numeric suffix is a
+    tell: "highland-roast-2" announces that something generated it and that a
+    near-identical store already exists. "highland-roast-goods" does not. The
+    numeric tail is kept as the final fallback because it is the only one guaranteed
+    to terminate.
+
+    Every candidate is truncated to leave room for its suffix, so the result always
+    matches SLUG_PATTERN and stays within SLUG_MAX_LEN (a longer slug 422s at
+    checkout)."""
     slug = base if base not in config.RESERVED_SLUGS else f"{base}-store"
     slug = slug[: config.SLUG_MAX_LEN]
-    candidate = slug
+    if not _slug_taken(slug):
+        assert re.fullmatch(config.SLUG_PATTERN, slug), slug
+        return slug
+
+    def with_suffix(suffix: str) -> str:
+        room = config.SLUG_MAX_LEN - len(suffix) - 1
+        return f"{slug[:room].rstrip('-')}-{suffix}"
+
+    brand_words = tuple(w for w in slug_words(content or {}) if w not in slug)
+    for suffix in brand_words + _SLUG_TRADE_SUFFIXES:
+        candidate = with_suffix(suffix)
+        if re.fullmatch(config.SLUG_PATTERN, candidate) and not _slug_taken(candidate):
+            return candidate
+
     n = 2
-    while _slug_taken(candidate):
-        suffix = f"-{n}"
-        candidate = slug[: config.SLUG_MAX_LEN - len(suffix)] + suffix
+    while True:
+        candidate = with_suffix(str(n))
+        if not _slug_taken(candidate):
+            assert re.fullmatch(config.SLUG_PATTERN, candidate), candidate
+            return candidate
         n += 1
-    assert re.fullmatch(config.SLUG_PATTERN, candidate), candidate
-    return candidate
 
 
 def _post_generation(prompt: str) -> dict:
@@ -367,21 +656,26 @@ def generate(desc):
         "items that fit the brand; use a single item when the merchant clearly sells one thing, "
         "otherwise 2 to 4 distinct items, "
         "emoji (single emoji for the brand), "
-        "palette (object: primary, accent, bg, text as hex colors — modern, high-contrast, premium; "
-        "bg must be decisively near-dark or near-light, never mid-gray, with text strongly contrasting it), "
-        "theme (one of exactly: original, bold, editorial — pick the layout that best fits the brand: "
-        "original = maximal flagship with kinetic type and a generative block mosaic, "
-        "bold = loud brutalist uppercase with hard offset shadows, "
-        "editorial = quiet numbered-ledger magazine, understated luxury), "
-        "design_dna (object with EXACTLY these keys, each value one of the exact options listed: "
-        "scale (one of exactly: compact, balanced, dramatic, monumental), "
-        "weight (one of exactly: light, regular, heavy), "
-        "rhythm (one of exactly: tight, roomy, airy), "
-        "hero (one of exactly: stacked, split, offset), "
-        "texture (one of exactly: sparse, medium, dense) "
-        "— pick the combination that expresses the brand's personality: a loud, maximal brand "
-        "wants heavy weight, dramatic or monumental scale, dense texture, offset hero; a refined, "
-        "understated brand wants light weight, airy rhythm, sparse texture, stacked hero). "
+        # Colour and layout are no longer free choices. Asked to pick four hex
+        # values and five style axes, the model returned essentially one palette
+        # shape and three layouts across the entire catalogue — so the axes are
+        # now seeded from the slug (resolve_design) and the palette is derived from
+        # a single hue (app.palette). What is left here is the part the model is
+        # genuinely better at than a PRNG: which hue suits what is being sold, and
+        # which named personality the brand is.
+        "brand (object with EXACTLY these keys: "
+        "hue (a number 0-359, the brand's base colour on the colour wheel — "
+        "0 red, 30 orange, 45 amber, 60 yellow, 120 green, 175 teal, 210 blue, "
+        "265 violet, 320 pink; choose what the product itself evokes, e.g. "
+        "roasted coffee near 25, fresh produce near 110, fintech near 215), "
+        "harmony (one of exactly: mono, analogous, complementary, triadic), "
+        "mood (one of exactly: midnight, ink, paper, bone — midnight and ink are "
+        "dark grounds, paper and bone are light grounds)), "
+        "design_persona (one of exactly: quiet-luxury, editorial-classic, gallery, "
+        "bold-statement, poster, monument, zine, technical, warm-craft, "
+        "minimal-shop — the single named personality that best fits this brand). "
+        "Do NOT output palette hex values, a theme, or a design_dna object; those "
+        "are computed. "
         "Make copy crisp and compelling, no placeholders."
     )
     resp = _post_generation(prompt)
@@ -483,7 +777,8 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     # go into the store.created event instead so spend stays queryable from event_log.
     llm_in = content.pop("_llm_in", 0)
     llm_out = content.pop("_llm_out", 0)
-    theme_file = _resolve_theme(theme or content.get("theme"))
+    # theme_file is resolved inside the slug loop below, once the slug (and so the
+    # seeded persona) is known.
     outcome = screening.screen(_screening_text(desc, content))
     pending = outcome.status == "pending"
     # Per-store capability secret returned ONCE to the paid caller (the store
@@ -495,7 +790,18 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     # candidate between our check and insert raises IntegrityError — we clean up,
     # re-slug (now DB-aware, so it skips the committed row) and re-render once.
     for attempt in range(2):
-        slug = unique_slug(slugify(content.get("store_name") or desc))
+        slug = unique_slug(slugify(content.get("store_name") or desc), content)
+        # Visual identity is seeded from the FINAL slug, so it is decided here rather
+        # than at generation time (and re-decided if the retry below re-slugs). An
+        # explicit caller `theme` still wins — only the LLM's own theme guess is
+        # displaced, because that guess clustered as hard as its axis picks did.
+        seeded_dna, persona, seeded_theme = resolve_design(slug, content)
+        content["design_dna"] = seeded_dna
+        content["design_persona"] = persona
+        # Colour is derived from one hue by a stated relationship, with contrast
+        # floors enforced, rather than taken as four unrelated hex values.
+        content["palette"] = resolve_palette(slug, content)
+        theme_file = _resolve_theme(theme or seeded_theme)
         store_delivery = delivery
         if store_delivery is None:
             store_delivery = (

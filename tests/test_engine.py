@@ -7,9 +7,11 @@ import respx
 from app import config
 from app.config import WARDEN_SCREEN_URL
 from app.engine import (
+    _PERSONAS,
     _resolve_theme,
     _screening_text,
     generate,
+    resolve_design,
     slugify,
     unique_slug,
 )
@@ -42,13 +44,34 @@ def test_unique_slug_reserved_name_gets_suffix(tmp_path, monkeypatch):
     assert engine.unique_slug("health") == "health-store"
 
 
-def test_unique_slug_collision_gets_numeric_suffix(tmp_path, monkeypatch):
+def test_unique_slug_collision_prefers_the_brands_own_words(tmp_path, monkeypatch):
+    """A numeric suffix announces that something generated the store and that a
+    near-identical one already exists. The brand's own vocabulary does not."""
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    (tmp_path / "highland-roast").mkdir()
+    content = {
+        "store_name": "Highland Roast",
+        "tagline": "Small batch beans",
+        "products": [{"name": "Ethiopia Single Origin"}],
+    }
+    assert unique_slug("highland-roast", content) == "highland-roast-small"
+
+
+def test_unique_slug_falls_back_to_trade_words_then_numbers(tmp_path, monkeypatch):
+    """With no brand vocabulary to draw on, a trade word still reads as a decision.
+    The numeric tail is kept only as the fallback that is guaranteed to terminate."""
     import app.engine as engine
 
     monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
     (tmp_path / "acme").mkdir()
-    (tmp_path / "acme-2").mkdir()
-    assert unique_slug("acme") == "acme-3"
+    assert unique_slug("acme") == "acme-co"
+
+    # exhaust every trade word and the numeric tail takes over
+    for suffix in engine._SLUG_TRADE_SUFFIXES:
+        (tmp_path / f"acme-{suffix}").mkdir()
+    assert unique_slug("acme") == "acme-2"
 
 
 def test_unique_slug_no_collision_passthrough(tmp_path, monkeypatch):
@@ -78,7 +101,8 @@ def test_unique_slug_db_row_without_disk_dir_gets_suffix(tmp_path, monkeypatch):
             )
         )
         s.commit()
-    assert engine.unique_slug("x") == "x-2"
+    # taken in the DB but not on disk -> still treated as taken, so it gets a suffix
+    assert engine.unique_slug("x") == "x-co"
 
 
 def test_unique_slug_maxlen_collision_stays_within_pattern(tmp_path, monkeypatch):
@@ -403,3 +427,125 @@ def test_create_store_populates_content_product_ids(tmp_path, monkeypatch):
         assert [it["id"] for it in store.content["products"]] == [r.id for r in rows]
     html = (tmp_path / result["slug"] / "index.html").read_text(encoding="utf-8")
     assert f'data-pid="{rows[0].id}"' in html and f'data-pid="{rows[1].id}"' in html
+
+
+# ------------------------------------------------------- seeded visual identity
+def test_resolve_design_is_deterministic_in_the_slug():
+    """A store's look must never drift. resync_catalog re-renders on any pricing or
+    product edit, so a non-deterministic pick would silently restyle a live shop."""
+    first = resolve_design("highland-roast", {})
+    for _ in range(5):
+        assert resolve_design("highland-roast", {}) == first
+
+
+def test_resolve_design_spreads_across_the_space():
+    """The bug this replaces: asked to choose the five axes freely, the LLM returned
+    ~3 answers for the whole catalogue. A seeded pick must not have a modal answer."""
+    slugs = [f"store-{n}" for n in range(300)]
+    combos, themes, heroes = set(), set(), set()
+    for slug in slugs:
+        dna, _persona, theme = resolve_design(slug, {})
+        combos.add(tuple(sorted(dna.items())))
+        themes.add(theme)
+        heroes.add(dna["hero"])
+    assert len(combos) >= 40, f"only {len(combos)} distinct looks across 300 slugs"
+    assert themes == {"original", "bold", "editorial"}, themes
+    assert heroes == {"stacked", "split", "offset"}, heroes
+
+
+def test_resolve_design_honours_an_llm_named_persona():
+    dna, persona, theme = resolve_design("some-slug", {"design_persona": "poster"})
+    assert persona == "poster"
+    assert theme == _PERSONAS["poster"]["theme"]
+    # scale/rhythm/hero come from the persona; weight+texture are seed-jittered
+    assert dna["scale"] == _PERSONAS["poster"]["scale"]
+    assert dna["hero"] == _PERSONAS["poster"]["hero"]
+
+
+def test_resolve_design_ignores_a_bogus_persona_name():
+    """An unrecognised name must fall back to the seed, never raise or blank out —
+    same fail-closed spirit as the theme and palette validators."""
+    seeded = resolve_design("some-slug", {})
+    for bogus in ["", "nope", 42, None, [], {"a": 1}]:
+        assert resolve_design("some-slug", {"design_persona": bogus}) == seeded
+
+
+def test_resolve_design_emits_only_valid_axis_values():
+    """Every value must be one the DesignDNA enum accepts, or render falls back to
+    defaults and the whole exercise silently does nothing."""
+    valid = {
+        "scale": {"compact", "balanced", "dramatic", "monumental"},
+        "weight": {"light", "regular", "heavy"},
+        "rhythm": {"tight", "roomy", "airy"},
+        "hero": {"stacked", "split", "offset"},
+        "texture": {"sparse", "medium", "dense"},
+        "type_pair": {"grotesk", "serif-display", "serif", "mono-display"},
+    }
+    for n in range(200):
+        dna, _persona, theme = resolve_design(f"s-{n}", {})
+        assert set(dna) == set(valid)
+        for axis, allowed in valid.items():
+            assert dna[axis] in allowed, (axis, dna[axis])
+        assert theme in config.ALLOWED_THEMES
+
+
+def test_every_persona_is_coherent_and_complete():
+    """A persona missing an axis would silently render that axis as a default,
+    quietly collapsing the variety this table exists to create."""
+    for name, persona in _PERSONAS.items():
+        assert set(persona) == {
+            "theme",
+            "scale",
+            "weight",
+            "rhythm",
+            "hero",
+            "texture",
+            "type_pair",
+        }, name
+        assert persona["theme"] in config.ALLOWED_THEMES, name
+
+
+def test_slug_words_skips_stopwords_and_short_tokens():
+    from app.engine import slug_words
+
+    words = slug_words(
+        {
+            "store_name": "The Ember Co",
+            "tagline": "For the love of it",
+            "products": [{"name": "Oak Candle"}],
+        }
+    )
+    assert "the" not in words and "of" not in words and "it" not in words
+    assert "co" not in words  # under three characters
+    assert "ember" in words and "candle" in words and "oak" in words
+
+
+def test_slug_words_tolerates_junk_content():
+    from app.engine import slug_words
+
+    for junk in [None, "not-a-mapping", 7, {"products": "nope"}, {"tagline": 5}]:
+        assert isinstance(slug_words(junk), tuple)
+
+
+def test_unique_slug_never_reuses_a_word_already_in_the_base(tmp_path, monkeypatch):
+    """ "ember-ember" would be worse than a number."""
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    (tmp_path / "ember").mkdir()
+    slug = engine.unique_slug("ember", {"store_name": "Ember", "tagline": "Ember only"})
+    assert slug != "ember-ember"
+    assert slug.startswith("ember-")
+
+
+def test_unique_slug_stays_in_pattern_with_a_long_brand_word(tmp_path, monkeypatch):
+    """A long suffix must not push the slug past SLUG_MAX_LEN — a slug over the
+    bound 422s at checkout, so the store would be unbuyable."""
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    base = "b" * (config.SLUG_MAX_LEN - 2)
+    (tmp_path / base).mkdir()
+    slug = engine.unique_slug(base, {"tagline": "extraordinarily-long-descriptor"})
+    assert len(slug) <= config.SLUG_MAX_LEN
+    assert re.fullmatch(config.SLUG_PATTERN, slug), slug

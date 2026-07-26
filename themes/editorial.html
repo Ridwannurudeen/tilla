@@ -21,6 +21,23 @@
 {% include "_fonts.html" %}
 <style>
   :root{ --primary:{{C_PRIMARY}}; --accent:{{C_ACCENT}}; --bg:{{C_BG}}; --text:{{C_TEXT}}; }
+
+  /* ---- Design DNA type pairing (docs/DESIGN-DNA.md). Typography was the one
+     thing identical on every store in the catalogue, which is the loudest
+     "same template" signal there is - 900+ layout combinations still read as one
+     brand while they all wear one typeface.
+     Zero new bytes and zero extra requests: the two variable faces already
+     inlined, plus a system serif stack present on every mainstream OS.
+     "grotesk" is byte-for-byte today's typography, so a store that predates this
+     axis renders exactly as before.
+     Both vars are set explicitly in EVERY variant on purpose: writing
+     `--font-display:var(--font-body)` would substitute at :root, so a later
+     `--font-body` override on body would not flow through to the display face. ---- */
+  :root{ --font-body:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif; --font-display:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif; }
+  body[data-type="serif-display"]{ --font-body:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif; --font-display:Georgia,'Iowan Old Style','Palatino Linotype',Palatino,'Times New Roman',serif; }
+  body[data-type="serif"]{ --font-body:Georgia,'Iowan Old Style','Palatino Linotype',Palatino,'Times New Roman',serif; --font-display:Georgia,'Iowan Old Style','Palatino Linotype',Palatino,'Times New Roman',serif; }
+  body[data-type="mono-display"]{ --font-body:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif; --font-display:'TillaMono',ui-monospace,'Cascadia Code',Consolas,monospace; }
+  h1,h2,h3,h4{ font-family:var(--font-display); }
   :root{
     --on-primary:{{C_ON_PRIMARY}};
     --xlayer:#BCFF2F; --on-xlayer:#000; --xlayer-tint:#e6ffb0;
@@ -52,7 +69,7 @@
 
   *{ box-sizing:border-box; margin:0; padding:0; }
   body{
-    font-family:'TillaGrotesk','Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif;
+    font-family:var(--font-body);
     font-weight:400; background:var(--bg); color:var(--text); line-height:1.7;
     -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
   }
@@ -316,7 +333,7 @@
   }
 </style>
 </head>
-<body data-hero="{{DNA_HERO}}" data-texture="{{DNA_TEXTURE}}">
+<body data-hero="{{DNA_HERO}}" data-texture="{{DNA_TEXTURE}}" data-type="{{DNA_TYPE}}">
 <a class="skip" href="#buy">Skip to products</a>
 <div class="wrap">
   <header class="masthead">

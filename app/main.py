@@ -441,19 +441,52 @@ def _request_host(request: Request) -> str:
     return host.split(":", 1)[0].strip().lower()
 
 
+def _platform_subdomain_slug(host: str) -> str | None:
+    """The store slug in ``<slug>.tilla.gudman.xyz``, or None if this host is not a
+    single-label subdomain of the platform domain.
+
+    Deliberately strict. A store slug reaching this point has already satisfied
+    SLUG_PATTERN at creation, but the Host header is attacker-controlled, so the
+    label is re-validated here rather than trusted: exactly one label, matching the
+    slug pattern, and never a reserved name — otherwise ``api.tilla.gudman.xyz``
+    could be made to serve a storefront. The platform host itself returns None so it
+    keeps serving the landing page."""
+    suffix = "." + config.DOMAIN.lower()
+    if not host.endswith(suffix):
+        return None
+    label = host[: -len(suffix)]
+    if not label or "." in label:
+        return None
+    if label in config.RESERVED_SLUGS:
+        return None
+    return label if re.fullmatch(config.SLUG_PATTERN, label) else None
+
+
 def _store_for_host(request: Request, session: Session) -> Store | None:
-    """The live store whose VERIFIED custom domain equals this request's Host, or None.
-    Fail-closed: an unverified/unclaimed domain, a non-live store, or a non-matching host
-    all yield None (the caller 404s), so an unverified domain can never serve a store."""
+    """The live store this request's Host resolves to, or None.
+
+    Two ways a host names a store: a VERIFIED custom domain the merchant owns, or a
+    ``<slug>.tilla.gudman.xyz`` platform subdomain. Fail-closed throughout — an
+    unverified or unclaimed domain, a non-live store, a reserved label, or a
+    non-matching host all yield None and the caller 404s, so a host header can never
+    conjure a storefront that is not live."""
     host = _request_host(request)
     if not host:
         return None
-    return session.scalar(
+    store = session.scalar(
         select(Store).where(
             Store.custom_domain == host,
             Store.custom_domain_verified_at.isnot(None),
             Store.status == "live",
         )
+    )
+    if store is not None:
+        return store
+    slug = _platform_subdomain_slug(host)
+    if slug is None:
+        return None
+    return session.scalar(
+        select(Store).where(Store.slug == slug, Store.status == "live")
     )
 
 
@@ -468,7 +501,10 @@ def custom_domain_root(request: Request, session: Session = Depends(get_session)
     store = _store_for_host(request, session)
     if store is None or not isinstance(store.content, dict):
         raise HTTPException(404, "not found")
-    base_url = f"https://{store.custom_domain}"
+    # From the REQUEST host, not store.custom_domain: a platform subdomain store has
+    # no custom_domain at all, and reading the column would put the literal "None"
+    # into every canonical and Open Graph URL on the page.
+    base_url = f"https://{_request_host(request)}"
     html = render.render(
         store.content, store.pay_to, store.slug, store.theme, base_url=base_url
     )

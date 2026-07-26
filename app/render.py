@@ -95,6 +95,16 @@ _DNA_WEIGHT = {"light": "300", "regular": "450", "heavy": "700"}
 _DNA_SPACE = {"tight": "0.82", "roomy": "1", "airy": "1.35"}
 _DNA_HERO = {"stacked": "stacked", "split": "split", "offset": "offset"}
 _DNA_TEXTURE = {"sparse": "sparse", "medium": "medium", "dense": "dense"}
+# Type pairing: the token is a bare keyword only. Every quoted font stack lives in
+# the theme's own CSS, because autoescape would turn quotes in a templated stack
+# into &#39; and break the declaration. "grotesk" is today's typography exactly, so
+# it is the default and pre-axis stores are unaffected.
+_DNA_TYPE = {
+    "grotesk": "grotesk",
+    "serif-display": "serif-display",
+    "serif": "serif",
+    "mono-display": "mono-display",
+}
 
 
 def _safe_enum(value: object, mapping: Mapping, fallback: str) -> str:
@@ -120,6 +130,7 @@ def _dna_ctx(content: Mapping) -> dict:
         "DNA_TEXTURE": _safe_enum(
             dna.get("texture"), _DNA_TEXTURE, _DNA_TEXTURE["medium"]
         ),
+        "DNA_TYPE": _safe_enum(dna.get("type_pair"), _DNA_TYPE, _DNA_TYPE["grotesk"]),
     }
 
 

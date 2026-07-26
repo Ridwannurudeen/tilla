@@ -320,6 +320,9 @@ DNA_DEFAULTS = {
     "DNA_SPACE": "1",
     "DNA_HERO": "stacked",
     "DNA_TEXTURE": "medium",
+    # "grotesk" is the stack all three themes hardcoded before the type axis
+    # existed, so the pre-DNA look is still exactly the default look.
+    "DNA_TYPE": "grotesk",
 }
 
 VALID_DNA = {
@@ -328,6 +331,7 @@ VALID_DNA = {
     "rhythm": "airy",
     "hero": "offset",
     "texture": "dense",
+    "type_pair": "serif",
 }
 
 
@@ -338,7 +342,9 @@ def test_dna_ctx_defaults_when_design_dna_absent():
     assert _dna_ctx({"design_dna": {}}) == DNA_DEFAULTS
 
 
-@pytest.mark.parametrize("axis", ["scale", "weight", "rhythm", "hero", "texture"])
+@pytest.mark.parametrize(
+    "axis", ["scale", "weight", "rhythm", "hero", "texture", "type_pair"]
+)
 @pytest.mark.parametrize("bogus", ["BOGUS", "", None, 7, ["dense"], {"x": 1}])
 def test_dna_ctx_coerces_bogus_axis_value_to_default(axis, bogus):
     # one bogus axis (every other axis absent) -> every token at its default;
@@ -355,6 +361,7 @@ def test_dna_ctx_maps_valid_values_to_tokens():
         "DNA_SPACE": "1.35",
         "DNA_HERO": "offset",
         "DNA_TEXTURE": "dense",
+        "DNA_TYPE": "serif",
     }
     assert _dna_ctx(
         {
@@ -364,6 +371,7 @@ def test_dna_ctx_maps_valid_values_to_tokens():
                 "rhythm": "tight",
                 "hero": "split",
                 "texture": "sparse",
+                "type_pair": "mono-display",
             }
         }
     ) == {
@@ -372,6 +380,7 @@ def test_dna_ctx_maps_valid_values_to_tokens():
         "DNA_SPACE": "0.82",
         "DNA_HERO": "split",
         "DNA_TEXTURE": "sparse",
+        "DNA_TYPE": "mono-display",
     }
 
 
@@ -407,3 +416,53 @@ def test_render_ctx_carries_default_dna_tokens_when_absent(monkeypatch):
     monkeypatch.setattr(render_mod, "_env", _probe_env())
     html = render_mod.render({"store_name": "X"}, ADDR, SLUG, "probe.html")
     assert html == "1.25|450|1|stacked|medium"
+
+
+# ---------- type pairing reaches the page, and only as a bare keyword ----------
+_TYPE_CONTENT = {
+    "store_name": "Type Probe",
+    "hero_headline": "H",
+    "products": [{"name": "P", "blurb": "B", "price_usdt": 9}],
+}
+
+
+def _render_with_type(pair, theme="original.html"):
+    content = dict(_TYPE_CONTENT)
+    if pair is not None:
+        content["design_dna"] = {"type_pair": pair}
+    return render(content, "0x" + "1" * 40, "type-probe", theme)
+
+
+@pytest.mark.parametrize("theme", ["original.html", "bold.html", "editorial.html"])
+def test_type_pair_reaches_the_body_attribute(theme):
+    for pair in ["grotesk", "serif-display", "serif", "mono-display"]:
+        html = _render_with_type(pair, theme)
+        assert f'data-type="{pair}"' in html, (theme, pair)
+    # and a bogus value falls back to the default rather than reaching the page
+    bogus = _render_with_type("../../etc/passwd", theme)
+    assert 'data-type="grotesk"' in bogus
+    assert "etc/passwd" not in bogus
+
+
+@pytest.mark.parametrize("theme", ["original.html", "bold.html", "editorial.html"])
+def test_type_stacks_live_in_css_never_in_a_templated_value(theme):
+    """Font stacks contain quotes, and autoescape inside <style> would turn them
+    into &#39; and break the declaration. So the stacks must be static theme CSS and
+    only the keyword may be templated. This asserts the escaping never happened."""
+    html = _render_with_type("serif", theme)
+    assert "--font-body" in html and "--font-display" in html
+    assert "&#39;" not in html, "a quoted font stack was escaped into the page"
+    assert "h1,h2,h3,h4{ font-family:var(--font-display); }" in html
+
+
+@pytest.mark.parametrize("theme", ["original.html", "bold.html", "editorial.html"])
+def test_absent_type_pair_keeps_the_pre_axis_typography(theme):
+    """A store created before this axis has no type_pair. It must render with the
+    exact stack the themes used to hardcode, or every existing storefront restyles
+    itself the next time resync_catalog re-renders it."""
+    html = _render_with_type(None, theme)
+    assert 'data-type="grotesk"' in html
+    assert (
+        "--font-body:'TillaGrotesk','Space Grotesk',-apple-system,"
+        "'Segoe UI',Roboto,sans-serif" in html
+    )

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import app.main as main
-from app import domains
+from app import config, domains
 from app.db import SessionLocal
 from app.models import Store
 
@@ -286,3 +286,97 @@ def test_unknown_host_root_is_404():
         client.get("/llms.txt", headers={"host": "random.example.org"}).status_code
         == 404
     )
+
+
+# ------------------------------------------- platform subdomains: <slug>.DOMAIN
+def _live_store(make_store, slug="sub-shop"):
+    acct = Account.create()
+    _seed_store(acct, slug, make_store, content=_content())
+    return slug
+
+
+def test_platform_subdomain_serves_a_live_store(make_store):
+    slug = _live_store(make_store)
+    host = f"{slug}.{config.DOMAIN}"
+    r = client.get("/", headers={"host": host})
+    assert r.status_code == 200
+    # canonical/OG must name the subdomain, not the literal "None" that reading
+    # store.custom_domain would produce for a store that has no custom domain
+    assert f'href="https://{host}/"' in r.text
+    assert "https://None" not in r.text
+
+
+def test_platform_subdomain_serves_the_root_feed_and_llms(make_store):
+    slug = _live_store(make_store, "sub-feed")
+    host = f"{slug}.{config.DOMAIN}"
+    feed = client.get("/feed.json", headers={"host": host})
+    assert feed.status_code == 200
+    assert feed.json()["products"]
+    assert client.get("/llms.txt", headers={"host": host}).status_code == 200
+
+
+def test_platform_host_itself_is_not_a_store(make_store):
+    """The bare platform domain must keep serving the landing page, not a store."""
+    _live_store(make_store, "sub-bare")
+    assert client.get("/", headers={"host": config.DOMAIN}).status_code == 404
+
+
+@pytest.mark.parametrize("reserved", ["api", "admin", "health", "s", "static"])
+def test_reserved_labels_can_never_serve_a_store(make_store, reserved):
+    """Host is attacker-controlled. api.tilla.gudman.xyz must not be able to serve a
+    storefront even if someone contrives a store row named for a reserved route."""
+    assert (
+        client.get("/", headers={"host": f"{reserved}.{config.DOMAIN}"}).status_code
+        == 404
+    )
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "deep.nested.{d}",  # more than one label
+        "UPPER.{d}",  # pattern is lowercase-only
+        "bad_underscore.{d}",
+        "-leading.{d}",
+        "sub-shop.evil.com",  # right label, wrong domain
+        "sub-shop.{d}.evil.com",  # our domain as a prefix of theirs
+        "{d}",
+        "",
+    ],
+)
+def test_malformed_or_foreign_hosts_are_404(make_store, host):
+    _live_store(make_store, "sub-shop")
+    assert (
+        client.get("/", headers={"host": host.format(d=config.DOMAIN)}).status_code
+        == 404
+    )
+
+
+def test_subdomain_of_a_non_live_store_is_404(make_store):
+    """A blocked or pending store must not become reachable via its subdomain."""
+    acct = Account.create()
+    _seed_store(acct, "sub-dead", make_store, content=_content())
+    with SessionLocal() as s:
+        s.scalar(select(Store).where(Store.slug == "sub-dead")).status = "blocked"
+        s.commit()
+    assert (
+        client.get("/", headers={"host": f"sub-dead.{config.DOMAIN}"}).status_code
+        == 404
+    )
+
+
+def test_a_verified_custom_domain_still_wins(make_store, monkeypatch):
+    """Custom domains are checked first; adding subdomains must not shadow them."""
+    acct = Account.create()
+    _seed_store(acct, "s1", make_store, content=_content())
+    _claim(acct, "s1")
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        token = s.scalar(select(Store).where(Store.slug == "s1")).custom_domain_token
+    monkeypatch.setattr(
+        domains, "_lookup_txt", lambda name: [domains.txt_record_value(token)]
+    )
+    client.post("/api/merchant/stores/s1/custom-domain/verify", headers=_auth(tok))
+    assert client.get("/", headers={"host": DOMAIN}).status_code == 200
+    # and the same store is reachable on its platform subdomain too
+    assert client.get("/", headers={"host": f"s1.{config.DOMAIN}"}).status_code == 200

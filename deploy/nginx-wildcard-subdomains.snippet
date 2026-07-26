@@ -1,0 +1,105 @@
+# Wildcard store subdomains — <slug>.tilla.gudman.xyz
+#
+# STATUS: the APP SIDE IS BUILT, TESTED AND DEPLOYED. The DNS record and the
+# certificate below are NOT done and are owner-gated — see "What is blocked".
+# Until they exist, nothing regresses: the subdomains simply do not resolve, and
+# every store stays reachable at https://tilla.gudman.xyz/s/<slug>/ as before.
+#
+# ---------------------------------------------------------------------------
+# Why bother
+#
+# `tilla.gudman.xyz/s/highland-roast/` reads as an entry in somebody else's
+# directory. `highland-roast.tilla.gudman.xyz` reads as the merchant's own shop.
+# Same store, same rails; the difference is whose it feels like. Merchants who want
+# a true custom domain already have that path (docs/runbooks/custom-domains.md);
+# this is the good default for everyone who does not.
+#
+# ---------------------------------------------------------------------------
+# What the app already does (app/main.py)
+#
+# `_store_for_host` resolves a Host header two ways: a VERIFIED custom domain, then
+# a single-label platform subdomain via `_platform_subdomain_slug`. The custom
+# domain is checked FIRST so this cannot shadow one.
+#
+# The subdomain path is deliberately strict, because Host is attacker-controlled:
+#   * exactly one label  — `deep.nested.tilla.gudman.xyz` is refused
+#   * must match SLUG_PATTERN — so `UPPER`, `bad_underscore`, `-leading` are refused
+#   * must NOT be in RESERVED_SLUGS — so `api.tilla.gudman.xyz` can never serve a
+#     storefront even if a row were somehow named `api`
+#   * the store must be `status='live'` — a blocked or pending store stays dark
+#   * the bare platform host resolves to no store, so it keeps serving the landing
+#     page rather than becoming a shop
+# All of those are covered by tests in tests/test_custom_domains.py.
+#
+# Note `custom_domain_root` builds its canonical and Open Graph URLs from the
+# REQUEST host, not from `store.custom_domain` — a subdomain store has no
+# custom_domain, and reading the column put the literal "None" into every URL on
+# the page. That was a real bug caught in testing; do not "simplify" it back.
+#
+# ---------------------------------------------------------------------------
+# The vhost to add once DNS and the certificate exist
+#
+#     server {
+#         listen 80; listen [::]:80;
+#         server_name *.tilla.gudman.xyz;
+#         location /.well-known/acme-challenge/ { root /var/www/html; }
+#         location / { return 301 https://$host$request_uri; }
+#     }
+#     server {
+#         listen 443 ssl http2; listen [::]:443 ssl http2;
+#         server_name *.tilla.gudman.xyz;
+#
+#         ssl_certificate     /etc/letsencrypt/live/tilla-wildcard/fullchain.pem;
+#         ssl_certificate_key /etc/letsencrypt/live/tilla-wildcard/privkey.pem;
+#
+#         # Same six headers as the platform vhost. Restate them in full in any
+#         # location that adds one of its own — a single add_header inside a
+#         # location cancels EVERY inherited one (see nginx-hardening.snippet).
+#         add_header X-Content-Type-Options nosniff always;
+#         add_header Referrer-Policy strict-origin-when-cross-origin always;
+#         add_header X-Frame-Options SAMEORIGIN always;
+#         add_header Strict-Transport-Security "max-age=31536000" always;
+#         add_header Content-Security-Policy "frame-ancestors 'self'; base-uri 'self'; object-src 'none'; form-action 'self'" always;
+#         add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+#
+#         location / {
+#             limit_req zone=tilla_api burst=30 nodelay;
+#             client_max_body_size 26m;
+#             proxy_pass http://127.0.0.1:8040;
+#             proxy_set_header Host $host;              # REQUIRED: the app resolves
+#             proxy_set_header X-Real-IP $remote_addr;  # the store from Host
+#             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#             proxy_set_header X-Forwarded-Proto https;
+#         }
+#     }
+#
+# `proxy_set_header Host $host` is load-bearing, not boilerplate: the app has no
+# other way to know which store was asked for. Drop it and every subdomain 404s.
+#
+# IMPORTANT ordering note: the existing `server_name tilla.gudman.xyz` block is an
+# EXACT name and nginx prefers exact names over wildcards, so adding this cannot
+# steal traffic from the platform host. Keep the vhost file OUT of a `.bak` name
+# inside sites-enabled — that directory is globbed unfiltered.
+#
+# ---------------------------------------------------------------------------
+# What is blocked, and on whom
+#
+# 1. DNS — a wildcard A record on gudman.xyz:
+#        *.tilla   A   75.119.153.252
+#    Owner action, at the registrar (Namecheap; authoritative NS are
+#    registrar-servers.com per docs/runbooks/custom-domains.md).
+#
+# 2. Certificate — a wildcard cert REQUIRES the DNS-01 challenge; the webroot
+#    challenge every other Tilla cert uses cannot prove `*.`:
+#        certbot certonly --cert-name tilla-wildcard \
+#            --preferred-challenges dns \
+#            -d '*.tilla.gudman.xyz' -d tilla.gudman.xyz
+#    Manual DNS-01 means pasting a TXT record per issuance and again at every
+#    renewal, which is a standing chore and will eventually be missed. Prefer the
+#    Namecheap DNS API with a certbot DNS plugin so renewal stays unattended, and
+#    only then raise this vhost's HSTS to a year — the same discipline applied in
+#    nginx-hardening.snippet: prove renewal, THEN commit browsers to HTTPS.
+#
+# Do not add the vhost before both exist. nginx would answer for `*.` with the
+# platform certificate and every store subdomain would greet visitors with a
+# certificate-name mismatch.
