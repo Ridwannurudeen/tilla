@@ -552,6 +552,46 @@ def test_customers_csv_groups_by_buyer(make_store):
     assert body["0x" + "6" * 40][1] == "1"
 
 
+def test_customers_csv_excludes_non_buyers(make_store):
+    """An abandoned or underpaid checkout records a from_addr but never settles.
+    It must not be exported as a customer, and must not report the timestamp of
+    a checkout nobody paid for as a purchase date."""
+    acct = Account.create()
+    _owned_store(acct, "custfilter", make_store)
+    buyer = "0x" + "7" * 40
+    underpayer = "0x" + "8" * 40
+    abandoner = "0x" + "9" * 40
+    _seed_sale("custfilter", from_addr=buyer)
+    # underpaid: from_addr recorded, order never reaches a delivered state
+    cid = _order_id("custfilter")
+    _apply(cid, _expected(cid) - 1, underpayer)
+    # abandoned: paid nothing, later canceled by the reaper
+    dead = _order_id("custfilter")
+    with SessionLocal() as s:
+        o = s.get(Order, dead)
+        o.from_addr, o.status = abandoner, "canceled"
+        s.commit()
+
+    token = _merchant_token(acct)
+    rows = [
+        row
+        for row in csv.reader(
+            io.StringIO(
+                client.get(
+                    "/api/merchant/export/customers.csv", headers=_auth(token)
+                ).text
+            )
+        )
+        if row
+    ]
+    body = {row[0]: row for row in rows[1:]}
+    assert buyer in body
+    assert underpayer not in body
+    assert abandoner not in body
+    # and the real buyer's row still carries a real settled amount
+    assert float(body[buyer][2]) > 0
+
+
 def test_export_store_param_must_be_owned(make_store):
     a, b = Account.create(), Account.create()
     _owned_store(a, "exp-a", make_store)

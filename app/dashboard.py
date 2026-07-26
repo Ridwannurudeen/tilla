@@ -1206,17 +1206,27 @@ def _customers_csv_gen(store_ids):
     if not store_ids:
         return
     with SessionLocal() as session:
+        # Only orders that actually settled. An abandoned or underpaid checkout
+        # still records a from_addr, so filtering on from_addr alone exported
+        # non-buyers as customers — with the timestamp of a checkout they never
+        # paid for reported as their "purchase" date. Same TERMINAL_DELIVERED
+        # gate `_store_stats` and `merchant_summary` already use.
+        paid_ts = func.coalesce(Order.paid_at, Order.created_at)
         rows = session.execute(
             select(
                 Order.from_addr,
                 func.count(),
                 func.coalesce(func.sum(Order.paid_micro), 0),
-                func.min(Order.created_at),
-                func.max(Order.created_at),
+                func.min(paid_ts),
+                func.max(paid_ts),
             )
-            .where(Order.store_id.in_(store_ids), Order.from_addr.isnot(None))
+            .where(
+                Order.store_id.in_(store_ids),
+                Order.from_addr.isnot(None),
+                Order.status.in_(checkout.TERMINAL_DELIVERED),
+            )
             .group_by(Order.from_addr)
-            .order_by(func.max(Order.created_at).desc())
+            .order_by(func.max(paid_ts).desc())
         ).all()
         for addr, count, paid, first, last in rows:
             writer.writerow(

@@ -475,6 +475,36 @@ def custom_domain_root(request: Request, session: Session = Depends(get_session)
     return HTMLResponse(html)
 
 
+@app.get("/feed.json")
+@limiter.limit("60/minute")
+def custom_domain_feed(request: Request, session: Session = Depends(get_session)):
+    """The store's product feed at the root of its VERIFIED custom domain.
+
+    The themes advertise the feed relative to the canonical URL
+    (``<link rel="alternate" href="{{CANONICAL_URL}}feed.json">``), which resolves to
+    ``/s/{slug}/feed.json`` on the platform host but to ``/feed.json`` on a custom
+    domain — where nothing served it, so every custom-domain store advertised a 404
+    to the crawlers and agents most likely to read it. Serving it here makes the
+    theme's relative link correct on both hosts. Same fail-closed host match as
+    :func:`custom_domain_root`; the body is the per-store handler's, verbatim."""
+    store = _store_for_host(request, session)
+    if store is None:
+        raise HTTPException(404, "not found")
+    return agentic.feed_json(request, slug=store.slug, session=session)
+
+
+@app.get("/llms.txt")
+@limiter.limit("60/minute")
+def custom_domain_llms(request: Request, session: Session = Depends(get_session)):
+    """The store's llms.txt at the root of its VERIFIED custom domain — the
+    conventional location an LLM crawler looks for it. Same reasoning and same
+    fail-closed host match as :func:`custom_domain_feed`."""
+    store = _store_for_host(request, session)
+    if store is None:
+        raise HTTPException(404, "not found")
+    return agentic.llms_txt(request, slug=store.slug, session=session)
+
+
 @app.get("/og.png")
 @app.get("/og.svg")
 def custom_domain_og(request: Request, session: Session = Depends(get_session)):

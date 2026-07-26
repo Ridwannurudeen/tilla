@@ -2208,7 +2208,17 @@ def _discovery_row(
                 "type": "mcp",
                 "method": "POST",
                 "endpoint": f"/s/{store.slug}/mcp",
-                "tools": ["list_products", "get_product", "create_checkout", "pay"],
+                # Must stay in step with the tools `tools/list` actually serves
+                # and with docs/specs/schemas/mcp-tools-list.yaml — this advert
+                # had gone stale at four, omitting preview_order, so discovery
+                # under-sold the catalogue it was pointing agents at.
+                "tools": [
+                    "list_products",
+                    "get_product",
+                    "preview_order",
+                    "create_checkout",
+                    "pay",
+                ],
                 "description": "Browse products and check out via JSON-RPC.",
             },
             {

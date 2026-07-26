@@ -247,6 +247,42 @@ def test_release_stops_serving(make_store, monkeypatch):
     assert client.get("/", headers={"host": DOMAIN}).status_code == 404
 
 
+def test_verified_domain_serves_feed_and_llms_at_root(make_store, monkeypatch):
+    """The theme advertises the feed relative to the canonical URL, which on a custom
+    domain is the root — so /feed.json and /llms.txt must resolve there, or the page
+    links a 404 at exactly the crawlers and agents most likely to follow it."""
+    acct = Account.create()
+    _seed_store(acct, "s1", make_store, content=_content())
+    _claim(acct, "s1")
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        token = s.scalar(select(Store).where(Store.slug == "s1")).custom_domain_token
+    monkeypatch.setattr(
+        domains, "_lookup_txt", lambda name: [domains.txt_record_value(token)]
+    )
+    client.post("/api/merchant/stores/s1/custom-domain/verify", headers=_auth(tok))
+
+    page = client.get("/", headers={"host": DOMAIN}).text
+    assert f'href="https://{DOMAIN}/feed.json"' in page  # what the page advertises
+
+    feed = client.get("/feed.json", headers={"host": DOMAIN})
+    assert feed.status_code == 200
+    assert feed.json()["products"]
+
+    llms = client.get("/llms.txt", headers={"host": DOMAIN})
+    assert llms.status_code == 200
+    assert "s1" in llms.text or "Single-origin" in llms.text
+
+
 def test_unknown_host_root_is_404():
     # no verified custom domain matches an arbitrary host -> fail-closed
     assert client.get("/", headers={"host": "random.example.org"}).status_code == 404
+    # and the root feed surfaces are fail-closed on the same host check
+    assert (
+        client.get("/feed.json", headers={"host": "random.example.org"}).status_code
+        == 404
+    )
+    assert (
+        client.get("/llms.txt", headers={"host": "random.example.org"}).status_code
+        == 404
+    )
