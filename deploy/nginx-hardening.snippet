@@ -1,0 +1,94 @@
+# Edge hardening + merchant-profile routing — 2026-07-26
+#
+# APPLIED LIVE on the VPS 2026-07-26 (unlike the PREPARE-ONLY snippets beside it).
+# Backups taken before the change:
+#   /root/nginx-backups-20260726/tilla.gudman.xyz.conf.PRE-FIX
+#   /root/nginx-backups-20260726/nginx.conf.PRE-FIX
+# `nginx -t` was run before every reload; all sibling sites on the shared box
+# (warden / verdikt / bequest / gapguard / reef / shop) re-verified 200 after.
+#
+# ---------------------------------------------------------------------------
+# 1. FIX: /m/{address} merchant profiles were 404 in public
+#
+# `sitemap.xml` emits one `/m/{address}` link per merchant with a public live
+# store (app/main.py, the `merchant_profile` handler answers them), but the vhost
+# had no `location /m/`, so every one of those URLs fell through to
+# `location / { root /opt/tilla/www; }` and returned the static 404. The app was
+# serving them correctly on 127.0.0.1:8040 the whole time — this was purely an
+# edge-routing gap, and it meant the sitemap advertised four dead URLs to
+# crawlers. Added immediately above the static `location /`:
+#
+#     location /m/ { proxy_pass http://127.0.0.1:8040; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto https; }
+#
+# Prefix (not exact) match, because the address is part of the path. It sits
+# above `location /` but cannot shadow `location /s/` — different prefix.
+#
+# ---------------------------------------------------------------------------
+# 2. Security headers at server level
+#
+# The vhost previously sent only X-Content-Type-Options and Referrer-Policy, and
+# sent them WITHOUT `always`, so they were dropped on error responses. There was
+# no HSTS anywhere and no X-Frame-Options outside `location /s/` — meaning the
+# dashboard, the page that drives wallet `personal_sign` sign-in and refund
+# actions, was framable by any origin. Server block now sends:
+#
+#     add_header X-Content-Type-Options nosniff always;
+#     add_header Referrer-Policy strict-origin-when-cross-origin always;
+#     add_header X-Frame-Options SAMEORIGIN always;
+#     add_header Strict-Transport-Security "max-age=300" always;
+#     add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+#
+# HSTS max-age is deliberately SHORT (300s). HSTS is a durable browser-side
+# commitment: a long max-age means a client refuses plain HTTP to this host for
+# that whole period, so a lapsed certificate becomes an outage rather than a
+# warning. 300s was chosen so the header is present and correct for review
+# without betting the site on cert renewal. RAISE IT to 31536000 (plus
+# `includeSubDomains; preload` if every subdomain is HTTPS) once the renewal
+# cron has been observed succeeding at least once unattended.
+#
+# ---------------------------------------------------------------------------
+# 3. Header inheritance inside `location /s/`
+#
+# GOTCHA worth remembering: nginx `add_header` does NOT merge across levels — a
+# single `add_header` inside a location cancels ALL server-level ones. Because
+# `location /s/` declared its own two, store pages were silently missing
+# Referrer-Policy. Every header is now restated inside that block. Any future
+# location that adds a header must restate the full set too.
+#
+# ---------------------------------------------------------------------------
+# 4. gzip for JSON/JS (/etc/nginx/nginx.conf, not the vhost)
+#
+# `gzip on;` was set but `gzip_types` stayed commented out, and nginx's default
+# is `text/html` ONLY — so every JSON feed, the discovery API, and embed.js
+# shipped uncompressed. Uncommented and widened:
+#
+#     gzip_types text/plain text/css application/json application/javascript text/javascript application/xml text/xml image/svg+xml;
+#
+# Measured effect: GET /discovery/resources 16782 -> 2877 bytes on the wire.
+#
+# ---------------------------------------------------------------------------
+# 5. Removed 9 stale vhost copies from sites-enabled
+#
+# `nginx.conf` does `include /etc/nginx/sites-enabled/*` — an unfiltered glob, so
+# it was loading 9 `tilla.gudman.xyz.conf.bak-*` / `.bak.preproduct` files as real
+# server blocks. `nginx -t` printed a `conflicting server name` warning for each,
+# and the live config won only because `.conf` sorts before `.bak-*`. A rename or
+# a differently-sorting filename could silently have served `bak-m4`, which
+# predates /dashboard, /api/merchant and the rate limits. All nine moved to
+# /root/nginx-backups-20260726/; `nginx -t` is now free of conflicting-name
+# warnings. Keep vhost backups OUTSIDE sites-enabled.
+#
+# ---------------------------------------------------------------------------
+# NOT DONE — deliberately left for after the hackathon
+#
+# * CSP: the pages use inline <style>/<script> throughout, so a meaningful CSP
+#   needs nonces or hashes threaded through the generator. Not a same-day change.
+# * limit_req on /create-store, /add-product, /upgrade-store, /mcp, /feeds/ and
+#   the store-action regex. The `tilla_create` zone (12r/m) is DEFINED in
+#   /etc/nginx/conf.d/tilla-limit-req.conf but referenced NOWHERE — it was
+#   clearly meant for the three write endpoints, and store creation writes to
+#   disk while unthrottled. Add `limit_req zone=tilla_create burst=5 nodelay;`
+#   there, and `tilla_api` on /mcp and the store-action block.
+# * Cache-Control on static HTML and og.png (ETag/Last-Modified only today).
+# * A real /favicon.ico (pages use an inline SVG icon, so tabs render; only
+#   direct /favicon.ico fetches by old crawlers 404).

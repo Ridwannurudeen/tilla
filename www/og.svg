@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Tilla — describe it once, sell it to anyone, human or machine">
+  <!-- Landing-page Open Graph card. Same discipline as the per-store cards in
+       app/engine.py: no external resources, no scripts, no <image> refs, generic
+       font stacks only — social scrapers rasterize this with nothing available.
+       Palette is the site's own dark theme (www/index.html custom properties):
+       ground #0B0B12, ink #F5F5FA, primary #6C5CE7, accent #00D1B2, and the
+       X Layer lime #BCFF2F reserved for the chain chip, exactly as the site
+       reserves it. Rasterized to og.png at 1200x630 by rsvg-convert. -->
+
+  <!-- ground -->
+  <rect width="1200" height="630" fill="#0B0B12"/>
+
+  <!-- ink frame, matching the store cards' 30px inset -->
+  <rect x="30" y="30" width="1140" height="570" fill="none" stroke="#F5F5FA" stroke-opacity="0.14" stroke-width="2"/>
+
+  <!-- block-print mark: the favicon motif at card scale. Lime / ink / primary
+       tiles on a 3x3 lattice, one tile deliberately left open so the mark reads
+       as a storefront grid rather than a filled square. -->
+  <g transform="translate(80 74)">
+    <rect x="0"  y="0"  width="26" height="26" fill="#BCFF2F"/>
+    <rect x="30" y="0"  width="26" height="26" fill="#F5F5FA"/>
+    <rect x="60" y="30" width="26" height="26" fill="#BCFF2F"/>
+    <rect x="0"  y="60" width="26" height="26" fill="#F5F5FA"/>
+    <rect x="30" y="30" width="26" height="26" fill="#6C5CE7"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="196" y="118" font-family="'Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif"
+        font-size="44" font-weight="700" letter-spacing="-0.5" fill="#F5F5FA">Tilla</text>
+  <text x="196" y="148" font-family="ui-monospace,'Cascadia Code',Consolas,monospace"
+        font-size="15" font-weight="600" letter-spacing="2.4" fill="#F5F5FA" fill-opacity="0.52">STOREFRONT STUDIO</text>
+
+  <!-- headline -->
+  <g font-family="'Space Grotesk',-apple-system,'Segoe UI',Roboto,sans-serif" font-size="68" font-weight="700" letter-spacing="-1.6" fill="#F5F5FA">
+    <text x="80" y="300">Describe it once.</text>
+    <text x="80" y="378">Sell it to anyone —</text>
+    <text x="80" y="456"><tspan fill="#00D1B2">human</tspan> or <tspan fill="#6C5CE7">machine</tspan>.</text>
+  </g>
+
+  <!-- baseline rule -->
+  <rect x="80" y="512" width="1040" height="1" fill="#F5F5FA" fill-opacity="0.14"/>
+
+  <!-- chain chip: lime is reserved for this, per the site's own rail discipline -->
+  <g transform="translate(80 540)">
+    <rect x="0" y="0" width="212" height="34" rx="4" fill="#BCFF2F"/>
+    <text x="14" y="23" font-family="ui-monospace,'Cascadia Code',Consolas,monospace"
+          font-size="14" font-weight="700" letter-spacing="1.1" fill="#000">X LAYER · USDT0</text>
+  </g>
+
+  <text x="308" y="563" font-family="ui-monospace,'Cascadia Code',Consolas,monospace"
+        font-size="15" font-weight="500" letter-spacing="0.4" fill="#F5F5FA" fill-opacity="0.60">non-custodial · paid straight to your wallet</text>
+
+  <text x="1120" y="563" text-anchor="end" font-family="ui-monospace,'Cascadia Code',Consolas,monospace"
+        font-size="15" font-weight="600" letter-spacing="0.4" fill="#F5F5FA" fill-opacity="0.82">tilla.gudman.xyz</text>
+</svg>
