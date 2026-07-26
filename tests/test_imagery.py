@@ -107,7 +107,9 @@ def keyed(monkeypatch):
     here keeps every other test about the selection logic it feeds, instead of
     every one of them needing to mock an image API."""
     monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
-    monkeypatch.setattr(imagery, "_verify", lambda blob, description: True)
+    monkeypatch.setattr(
+        imagery, "_verify", lambda blob, description, require_depicts=True: True
+    )
 
 
 def install(monkeypatch, session):
@@ -1190,7 +1192,7 @@ class TestVerification:
         )
         seen = []
 
-        def fake_verify(blob, description):
+        def fake_verify(blob, description, require_depicts=True):
             seen.append(blob)
             return len(seen) > 1  # reject the first candidate, accept the second
 
@@ -1209,7 +1211,9 @@ class TestVerification:
         refused photograph cannot litter the store directory."""
         monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
         install(monkeypatch, FakeSession({"q": [photo(1, "a dumbbell in a gym")]}))
-        monkeypatch.setattr(imagery, "_verify", lambda blob, description: False)
+        monkeypatch.setattr(
+            imagery, "_verify", lambda blob, description, require_depicts=True: False
+        )
         result = imagery.resolve(
             {"products": [{"image_query": "q", "image_subject": "dumbbell gym"}]},
             tmp_path,
@@ -1233,7 +1237,9 @@ class TestVerification:
         )
         calls = []
         monkeypatch.setattr(
-            imagery, "_verify", lambda blob, description: calls.append(1) and False
+            imagery,
+            "_verify",
+            lambda blob, description, require_depicts=True: calls.append(1) and False,
         )
         imagery.resolve(
             {"products": [{"image_query": "q", "image_subject": "sauce bottle"}]},
@@ -1241,3 +1247,76 @@ class TestVerification:
             seeded(),
         )
         assert len(calls) == imagery.MAX_VERIFY_PER_SLOT
+
+
+class TestSlotSpecificStrictness:
+    """A product card claims "this is what you are buying"; a hero or lifestyle band
+    claims nothing about the goods. Holding a hero to "the product must be the main
+    subject" threw away six stores' heroes for no gain — the branding rule is what
+    matters everywhere, the subject rule only on a card."""
+
+    @staticmethod
+    def _answer(monkeypatch, answer):
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"content": [{"text": json.dumps(answer)}]}
+
+        monkeypatch.setattr(imagery.requests, "post", lambda *a, **k: R())
+
+    def test_a_hero_need_not_have_the_product_as_its_subject(self, monkeypatch):
+        """A gym floor is a fine hero for a gym-wear store."""
+        monkeypatch.setenv(imagery.VERIFY_KEY_ENV, "k")
+        self._answer(monkeypatch, {"depicts": False, "branded": False})
+        assert imagery._verify(JPEG, "gym", require_depicts=False) is True
+        # the same photo is NOT acceptable on a product card
+        assert imagery._verify(JPEG, "leggings", require_depicts=True) is False
+
+    def test_branding_is_refused_in_every_slot(self, monkeypatch):
+        """Relaxing the subject rule must not relax the trademark rule — a hero
+        showing a competitor's logo is still a competitor's logo."""
+        monkeypatch.setenv(imagery.VERIFY_KEY_ENV, "k")
+        self._answer(monkeypatch, {"depicts": True, "branded": True})
+        assert imagery._verify(JPEG, "gym", require_depicts=False) is False
+        assert imagery._verify(JPEG, "leggings", require_depicts=True) is False
+
+    def test_product_slots_ask_for_depiction_and_others_do_not(
+        self, monkeypatch, tmp_path
+    ):
+        """The wiring, not just the predicate: resolve() must pass require_depicts
+        True for a product and False for the hero and lifestyle band."""
+        monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
+        install(
+            monkeypatch,
+            FakeSession(
+                {
+                    "pq": [photo(1, "black leggings on a model")],
+                    "hq": [photo(2, "a gym floor at dawn")],
+                    "dumbbell rack": [photo(3, "a rack of dumbbells")],
+                }
+            ),
+        )
+        seen = []
+        monkeypatch.setattr(
+            imagery,
+            "_verify",
+            lambda blob, description, require_depicts=True: (
+                seen.append((description, require_depicts)) or True
+            ),
+        )
+        imagery.resolve(
+            {
+                "products": [{"image_query": "pq", "image_subject": "leggings"}],
+                "hero_image_query": "hq",
+                "hero_image_subject": "gym floor",
+                "lifestyle_queries": ["dumbbell rack"],
+            },
+            tmp_path,
+            seeded(),
+        )
+        flags = dict(seen)
+        assert flags["leggings"] is True, "a product card must require depiction"
+        assert flags["gym floor"] is False, "a hero must not"
+        assert flags["dumbbell rack"] is False, "a lifestyle frame must not"

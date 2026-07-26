@@ -364,9 +364,16 @@ def _primacy(photo: dict, subject_terms: Sequence[str]) -> int:
     return -min(offsets) if offsets else -9999
 
 
-def _verify(blob: bytes, description: str) -> bool:
-    """Whether this photograph may be used for `description`: it must depict that
-    product and show no third-party branding.
+def _verify(blob: bytes, description: str, require_depicts: bool = True) -> bool:
+    """Whether this photograph may be used for `description`.
+
+    Two different questions, because the slots make two different claims. A product
+    CARD asserts "this is the thing you are buying", so the photograph must actually
+    depict it AND carry no third-party branding. A hero or lifestyle band asserts
+    nothing about the goods — it is the world around them, a gym floor or a lit
+    workshop — so demanding the product be its main subject is the wrong test and
+    merely throws away good photographs. `require_depicts=False` keeps the branding
+    rule, which applies everywhere, and drops the subject rule, which does not.
 
     FAIL-CLOSED on every uncertainty — an API error, a timeout, a malformed answer
     or a missing key all return False, so the photograph is dropped and the store
@@ -423,12 +430,15 @@ def _verify(blob: bytes, description: str) -> bool:
     except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
         logger.warning("imagery: verification failed, refusing photo: %s", exc)
         return False
-    ok = answer.get("depicts") is True and answer.get("branded") is False
+    ok = answer.get("branded") is False and (
+        answer.get("depicts") is True or not require_depicts
+    )
     if not ok:
         logger.info(
-            "imagery: rejected on sight (depicts=%s branded=%s) for %r",
+            "imagery: rejected on sight (depicts=%s branded=%s require_depicts=%s) %r",
             answer.get("depicts"),
             answer.get("branded"),
+            require_depicts,
             description[:60],
         )
     return ok
@@ -621,7 +631,10 @@ def _slot(
         blob = provider.fetch_bytes(photo, _VARIANT[kind])
         if blob is None:
             continue
-        if not _verify(blob, subject or query):
+        # Only a product card claims "this is what you are buying"; the hero and the
+        # lifestyle band are the world around the goods, so they are held to the
+        # branding rule alone.
+        if not _verify(blob, subject or query, require_depicts=kind == "product"):
             continue
         image = provider.store(blob, photo, _VARIANT[kind])
         if image is None:
