@@ -1320,3 +1320,143 @@ class TestSlotSpecificStrictness:
         assert flags["leggings"] is True, "a product card must require depiction"
         assert flags["gym floor"] is False, "a hero must not"
         assert flags["dumbbell rack"] is False, "a lifestyle frame must not"
+
+
+# ============================== generated art, only where it claims nothing
+class TestGeneratedImagery:
+    """Stock photography has a hard ceiling on branded goods: most photographs of a
+    hot sauce or a wristwatch ARE somebody's branded product, so the branding check
+    correctly refuses them and those stores go without a hero. Generation fills that
+    hole -- and only that hole."""
+
+    @staticmethod
+    def _gen(monkeypatch, blob=JPEG, calls=None):
+        def fake_get(url, params=None, timeout=None):
+            if calls is not None:
+                calls.append({"url": url, "params": params})
+
+            class R:
+                content = blob
+
+                def raise_for_status(self):
+                    pass
+
+            return R()
+
+        monkeypatch.setattr(imagery.requests, "get", fake_get)
+
+    def test_generation_is_off_unless_switched_on(self, monkeypatch):
+        monkeypatch.delenv(imagery.GENERATE_ENV, raising=False)
+        assert imagery.generation_enabled() is False
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        assert imagery.generation_enabled() is True
+
+    def test_a_product_card_is_never_generated(self, monkeypatch, keyed, tmp_path):
+        """The load-bearing restriction. A card sits above a Buy button and asserts
+        'this is the item you will receive'; a generated photorealistic product shot
+        would be a fabricated product image -- a worse failure than the branded stock
+        photo this module was built to refuse."""
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(monkeypatch, FakeSession({}))  # stock finds nothing
+        called = []
+        monkeypatch.setattr(
+            imagery, "_generate", lambda *a, **k: called.append(1) or JPEG
+        )
+        result = imagery.resolve(
+            {
+                "products": [
+                    {"image_query": "hot sauce", "image_subject": "sauce bottle"}
+                ]
+            },
+            tmp_path,
+            seeded(),
+        )
+        assert result.products == [None]
+        assert called == [], "a product card must never be filled with generated art"
+
+    def test_a_hero_falls_back_to_generation_when_stock_fails(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(monkeypatch, FakeSession({}))
+        monkeypatch.setattr(imagery, "_generate", lambda *a, **k: JPEG)
+        result = imagery.resolve(
+            {
+                "hero_image_query": "gym floor at dawn",
+                "hero_image_subject": "gym floor",
+            },
+            tmp_path,
+            seeded(),
+        )
+        assert result.hero is not None
+        assert result.hero.generated is True
+        assert result.hero.credit == "", "generated art has no photographer to credit"
+        assert (tmp_path / result.hero.path).read_bytes() == JPEG
+
+    def test_stock_is_always_preferred_over_generation(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(
+            monkeypatch,
+            FakeSession({"gym floor at dawn": [photo(1, "A gym floor at dawn")]}),
+        )
+        called = []
+        monkeypatch.setattr(
+            imagery, "_generate", lambda *a, **k: called.append(1) or JPEG
+        )
+        result = imagery.resolve(
+            {
+                "hero_image_query": "gym floor at dawn",
+                "hero_image_subject": "gym floor",
+            },
+            tmp_path,
+            seeded(),
+        )
+        assert result.hero is not None and result.hero.generated is False
+        assert called == [], "generation must not run when a real photo was found"
+
+    def test_generated_art_is_still_branding_checked(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        """A generator will happily paint a logo onto a bottle."""
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(monkeypatch, FakeSession({}))
+        monkeypatch.setattr(imagery, "_generate", lambda *a, **k: JPEG)
+        monkeypatch.setattr(
+            imagery, "_verify", lambda blob, description, require_depicts=True: False
+        )
+        result = imagery.resolve(
+            {
+                "hero_image_query": "gym floor at dawn",
+                "hero_image_subject": "gym floor",
+            },
+            tmp_path,
+            seeded(),
+        )
+        assert result.hero is None
+        assert not list(tmp_path.glob("img/*"))
+
+    def test_generation_is_seeded_and_asks_for_no_text(self, monkeypatch):
+        calls = []
+        self._gen(monkeypatch, calls=calls)
+        blob = imagery._generate("a lit workshop", 4242, 1200, 627)
+        assert blob == JPEG
+        assert calls[0]["params"]["seed"] == 4242
+        assert calls[0]["params"]["width"] == 1200
+        # invented signage is the classic generator failure on a storefront
+        assert "no%20text" in calls[0]["url"] or "no+text" in calls[0]["url"]
+
+    @pytest.mark.parametrize(
+        "blob", [b"<html>nope</html>", b"\x89PNG\r\n\x1a\n" + b"\x00" * 32, b""]
+    )
+    def test_a_generated_body_that_is_not_a_jpeg_is_refused(self, monkeypatch, blob):
+        self._gen(monkeypatch, blob=blob)
+        assert imagery._generate("x", 1, 100, 100) is None
+
+    def test_a_generation_outage_leaves_the_slot_empty(self, monkeypatch):
+        def boom(*a, **k):
+            raise requests.Timeout("slow")
+
+        monkeypatch.setattr(imagery.requests, "get", boom)
+        assert imagery._generate("x", 1, 100, 100) is None

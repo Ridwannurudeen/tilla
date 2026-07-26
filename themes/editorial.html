@@ -526,12 +526,13 @@
         <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
       </nav>
       <span>Settled on X Layer · chainId 196</span>
-      {% if PHOTO_CREDITS %}
+      {% if PHOTO_CREDITS or HAS_GENERATED %}
       <div class="credits">
-        <span><a href="https://www.pexels.com" rel="nofollow noopener" target="_blank">Photos provided by Pexels</a></span>
+        {% if PHOTO_CREDITS %}<span><a href="https://www.pexels.com" rel="nofollow noopener" target="_blank">Photos provided by Pexels</a></span>{% endif %}
         {% for c in PHOTO_CREDITS %}
         <span>{% if c.credit_url %}<a href="{{ c.credit_url }}" rel="nofollow noopener" target="_blank">{{ c.credit }}</a>{% else %}{{ c.credit }}{% endif %}{% if c.source_url %} · <a href="{{ c.source_url }}" rel="nofollow noopener" target="_blank">Pexels</a>{% endif %}</span>
         {% endfor %}
+      {% if HAS_GENERATED %}<span>Some imagery is generated illustration</span>{% endif %}
       </div>
       {% endif %}
     </div>

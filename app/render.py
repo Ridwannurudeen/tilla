@@ -156,6 +156,7 @@ def _safe_image(raw: object) -> dict | None:
         "credit": str(raw.get("credit") or "")[:120],
         "credit_url": _safe_url(raw.get("credit_url")),
         "source_url": _safe_url(raw.get("source_url")),
+        "generated": raw.get("generated") is True,
     }
 
 
@@ -185,10 +186,26 @@ def _imagery_ctx(content: Mapping) -> dict:
         for item in imagery.credits(content)
         if item.get("credit")
     ]
+    hero = _safe_image(raw.get("hero"))
+    # Whether ANY image on the page is generated art rather than a photograph. The
+    # themes disclose it: unlabelled synthetic imagery on a page that asks for money
+    # is precisely what the rest of this pipeline refuses to produce.
+    products = content.get("products")
+    product_images = (
+        [_safe_image(p.get("image")) for p in products if isinstance(p, Mapping)]
+        if isinstance(products, list)
+        else []
+    )
+    has_generated = any(
+        image["generated"]
+        for image in [hero, *lifestyle, *product_images]
+        if image is not None
+    )
     return {
-        "HERO_IMAGE": _safe_image(raw.get("hero")),
+        "HERO_IMAGE": hero,
         "LIFESTYLE": lifestyle,
         "PHOTO_CREDITS": credits,
+        "HAS_GENERATED": has_generated,
     }
 
 

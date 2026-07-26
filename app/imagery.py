@@ -65,6 +65,7 @@ import os
 import pathlib
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from urllib.parse import quote
 
 import requests
 from pydantic import BaseModel, Field
@@ -120,6 +121,73 @@ VERIFY_TIMEOUT = (5, 30)
 # rich while still refusing the bad photograph. Each step costs one vision call
 # (~815 tokens for a 940x650 image, so a fraction of a cent).
 MAX_VERIFY_PER_SLOT = 3
+
+# ---------------------------------------------------------------- generated art
+# Stock photography has a hard ceiling on branded goods: most photographs of a hot
+# sauce or a wristwatch ARE somebody's branded product, so the branding check
+# correctly refuses them and those stores go without a hero. Generation fills that
+# specific hole — and ONLY that hole.
+#
+# Deliberately restricted to the hero and the lifestyle band. A product CARD sits
+# above a Buy button and asserts "this is the item you will receive"; a generated
+# photorealistic bottle with an invented label would be a fabricated product image,
+# which is a worse failure than the one this module spent its existence removing. A
+# hero asserts nothing about the goods, so a generated one is atmosphere, not a claim.
+#
+# Keyless by design: no account, no card, no key to rotate, and no signup that a
+# challenged carrier IP can block. Seeded from the store's own PRNG so a slug always
+# yields the same image, exactly like its palette and layout.
+GENERATE_URL = "https://image.pollinations.ai/prompt/"
+GENERATE_ENV = "TILLA_IMAGE_GEN"  # unset/0 => generation off, stock only
+GENERATE_TIMEOUT = (5, 90)  # generation is slow; the caller is already fail-open
+# Appended to every prompt. "no text" matters: generators love to invent signage and
+# labels, and invented label text on a storefront is exactly what we are avoiding.
+_GENERATE_STYLE = (
+    ", photographic, natural light, no text, no words, no logos, no watermark"
+)
+
+
+def generation_enabled() -> bool:
+    """Whether generated imagery may fill an empty hero or lifestyle slot. Read at
+    call time so it can be switched on the VPS without a code change; default OFF so
+    the paid create path gains no external dependency unless it is asked for."""
+    return os.environ.get(GENERATE_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _generate(prompt: str, seed: int, width: int, height: int) -> bytes | None:
+    """One generated image, or None. Fail-open: any failure simply leaves the slot
+    empty and the store renders on its generative texture, as it did before."""
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return None
+    try:
+        r = requests.get(
+            GENERATE_URL + quote(prompt + _GENERATE_STYLE, safe=""),
+            params={
+                "width": width,
+                "height": height,
+                "nologo": "true",
+                "seed": seed,
+            },
+            timeout=GENERATE_TIMEOUT,
+        )
+        r.raise_for_status()
+        blob = r.content
+    except requests.RequestException as exc:
+        logger.warning("imagery: generation failed for %r: %s", prompt[:60], exc)
+        return None
+    if len(blob) > MAX_IMAGE_BYTES or not blob.startswith(b"\xff\xd8\xff"):
+        logger.warning(
+            "imagery: generated body was not a usable JPEG (%d bytes)", len(blob)
+        )
+        return None
+    return blob
+
 
 _VERIFY_PROMPT = (
     "This photograph is a candidate for the product card of an online store "
@@ -198,6 +266,10 @@ class StoreImage(BaseModel):
     credit: str = ""  # photographer name — licence requires the credit
     credit_url: str = ""  # photographer's page
     source_url: str = ""  # the photo's own page
+    # True when this is generated art rather than a photograph. Persisted so the
+    # themes can label it: unlabelled synthetic imagery on a commerce page is the
+    # thing this module exists to avoid, whatever it cost to make.
+    generated: bool = False
     subject_hits: int = 0  # how many declared subject terms the photo matched
 
 
@@ -625,8 +697,10 @@ def _slot(
     # so the head-noun requirement does not apply to it.
     ranked = _rank(photos, subject_terms, used, rand, require_head=kind != "lifestyle")
     if not ranked:
+        # No early return: an empty ranking is the MAIN case generation exists for —
+        # stock having nothing usable is exactly when a hero needs filling. Falling
+        # through to the generation block below is the point.
         logger.info("imagery: nothing relevant for %r (subject=%r)", query, subject)
-        return None
     for photo, hits in ranked[:MAX_VERIFY_PER_SLOT]:
         blob = provider.fetch_bytes(photo, _VARIANT[kind])
         if blob is None:
@@ -647,6 +721,17 @@ def _slot(
             # content image is an accessibility defect.
             image.alt = subject[:MAX_ALT_LEN]
         return image
+    # Stock had nothing usable. For a hero or a lifestyle frame — never a product
+    # card — fall back to generated atmosphere, held to the same branding check.
+    if kind != "product" and generation_enabled() and provider.bytes_left > 0:
+        width, height = _GEOMETRY.get(_VARIANT[kind], (1200, 627))
+        blob = _generate(query or subject, int(rand() * 2**31), width, height)
+        if blob is not None and _verify(blob, subject or query, require_depicts=False):
+            image = provider.store(blob, {"alt": subject or query}, _VARIANT[kind])
+            if image is not None:
+                image.generated = True
+                logger.info("imagery: generated a %s for %r", kind, query)
+                return image
     logger.info("imagery: no candidate survived inspection for %r", query)
     return None
 
