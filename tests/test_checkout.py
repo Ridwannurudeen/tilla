@@ -924,3 +924,39 @@ def test_deliverable_product_id_rejects_foreign_product(make_store):
         with pytest.raises(HTTPException) as e:
             main._deliverable_product_id(s, store, str(other_pid))
         assert e.value.status_code == 422
+
+
+def test_norm_addr_lowercases_or_passes_none():
+    """An EVM address is case-insensitive, so exactly one shape may be stored."""
+    assert checkout.norm_addr("0x" + "A" * 40) == "0x" + "a" * 40
+    assert checkout.norm_addr("0x" + "a" * 40) == "0x" + "a" * 40
+    assert checkout.norm_addr(None) is None
+    assert checkout.norm_addr("") is None
+
+
+def test_payer_address_is_stored_lowercased(make_store):
+    """The sweeper reads a payer off a log while the x402 paths recover it from a
+    signature and get checksum casing. Both must land lowercased, or the same
+    wallet exists twice and per-buyer grouping (the customer export) splits it."""
+    make_store(slug="normaddr", price_micro=9_000_000)
+    cid = client.post("/api/checkout/normaddr").json()["id"]
+    with SessionLocal() as s:
+        order = s.get(Order, cid)
+        exp = order.expected_micro
+        checkout.apply_transfer(
+            s,
+            order,
+            exp,
+            tx_hash="0x" + "e" * 64,
+            log_index=0,
+            block_number=100,
+            from_addr="0x" + "A" * 40,  # checksum-cased on the way in
+            head=200,
+        )
+        s.commit()
+    with SessionLocal() as s:
+        assert s.get(Order, cid).from_addr == "0x" + "a" * 40
+        stored = s.scalar(
+            select(ProcessedTransfer.from_addr).where(ProcessedTransfer.order_id == cid)
+        )
+        assert stored == "0x" + "a" * 40

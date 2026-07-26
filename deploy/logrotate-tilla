@@ -5,7 +5,14 @@
 # copytruncate: cron appends with >>, so truncating in place avoids any signal/reopen
 # dance. Validate before relying on it:  logrotate -d /etc/logrotate.d/tilla
 # Rollback: rm /etc/logrotate.d/tilla
-/var/log/tilla-backup.log /var/log/tilla-offsite.log {
+#
+# PATH CORRECTED 2026-07-26. This listed /var/log/tilla-backup.log, which has never
+# existed: scripts/backup_db.sh is invoked by cron as
+#   15 4 * * * cd /opt/tilla && /bin/bash scripts/backup_db.sh >> /opt/tilla/backups/backup.log
+# so the real log lives beside the backups. `missingok` meant the mismatch failed
+# silently — logrotate happily rotated nothing while the actual log grew forever.
+# The offsite path below was always correct.
+/opt/tilla/backups/backup.log /var/log/tilla-offsite.log {
     su root root
     weekly
     rotate 8

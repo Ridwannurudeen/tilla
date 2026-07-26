@@ -38,13 +38,20 @@
 #     add_header Strict-Transport-Security "max-age=300" always;
 #     add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
 #
-# HSTS max-age is deliberately SHORT (300s). HSTS is a durable browser-side
-# commitment: a long max-age means a client refuses plain HTTP to this host for
-# that whole period, so a lapsed certificate becomes an outage rather than a
-# warning. 300s was chosen so the header is present and correct for review
-# without betting the site on cert renewal. RAISE IT to 31536000 (plus
-# `includeSubDomains; preload` if every subdomain is HTTPS) once the renewal
-# cron has been observed succeeding at least once unattended.
+# HSTS started at a deliberately short max-age=300 and was RAISED to 31536000
+# (one year) later the same day, once renewal was actually proven rather than
+# assumed. The evidence, since "the cert is valid until October" is not evidence:
+#   * `snap.certbot.renew.timer` is active and had fired unattended that morning
+#     (04:25 CEST) — but the cert was not due, so that run was a no-op.
+#   * `certbot renew --cert-name tilla.gudman.xyz --dry-run` → "all simulated
+#     renewals succeeded". Same for shop.gudman.xyz. That exercises the real
+#     webroot challenge end-to-end, which the no-op timer run does not.
+# Both renewals use `authenticator = webroot` with NO installer, so a dry run
+# never touches nginx — safe to run against a live site.
+# Deliberately NOT added: `preload` (a submission to a public browser list,
+# effectively irreversible) and `includeSubDomains` (nothing is hosted under
+# tilla.gudman.xyz, so it would buy nothing and would trap a future http
+# sub-subdomain).
 #
 # ---------------------------------------------------------------------------
 # 3. Header inheritance inside `location /s/`
@@ -95,10 +102,33 @@
 # Backup before this step: tilla.gudman.xyz.conf.PRE-RATELIMIT.
 #
 # ---------------------------------------------------------------------------
+# 7. CSP — the half that needs nothing threaded through — APPLIED
+#
+#     add_header Content-Security-Policy "frame-ancestors 'self'; base-uri 'self'; object-src 'none'; form-action 'self'" always;
+#
+# `script-src`/`style-src` are NOT here and are NOT a same-day change: the pages
+# inline all their CSS and JS, so restricting those needs a nonce or hash threaded
+# through the store generator and every static page. These four directives need
+# none of that and cannot break inline code. Verified safe before applying —
+# grepped www/ and themes/ for `<form>`, `<base>`, `<object>/<embed>/<applet>`:
+# the site uses NONE of them, so nothing can regress. What they buy:
+#   frame-ancestors  clickjacking cover that also applies where XFO is ignored
+#   base-uri         a `<base>` injection can't repoint every relative URL
+#   object-src       no plugin content, ever
+#   form-action      injected markup can't POST a form to another origin
+#
+# ---------------------------------------------------------------------------
+# 8. shop.gudman.xyz got the same treatment
+#
+# The custom-domain vhost (/etc/nginx/sites-available/shop.gudman.xyz.conf, which
+# sites-enabled symlinks) previously sent only nosniff + Referrer-Policy, without
+# `always`. It now carries the identical six headers. Its cert renewal was
+# dry-run-proven first, same as tilla's. Backup: shop.gudman.xyz.conf.PRE-HEADERS.
+#
+# ---------------------------------------------------------------------------
 # NOT DONE — deliberately left for after the hackathon
 #
-# * CSP: the pages use inline <style>/<script> throughout, so a meaningful CSP
-#   needs nonces or hashes threaded through the generator. Not a same-day change.
+# * CSP `script-src`/`style-src` — see item 7; needs nonces threaded through.
 # * limit_req on /feeds/ and the store-action regex (buy|mcp|reviews|quote|…).
 #   Read-only or already-priced paths, so lower urgency than the writes above.
 # * Cache-Control on static HTML and og.png (ETag/Last-Modified only today).

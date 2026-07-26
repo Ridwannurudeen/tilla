@@ -570,7 +570,7 @@ def fulfill_agent_order(
         status="confirmed",
         channel="agent",
         x402_nonce=nonce,
-        from_addr=payer or None,
+        from_addr=checkout.norm_addr(payer),
         referrer_addr=referrer_addr,
         created_block=checkout._current_head(),
         paid_at=checkout._now(),

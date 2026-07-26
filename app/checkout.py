@@ -82,6 +82,18 @@ def _naive(dt: datetime | None) -> datetime | None:
     return dt
 
 
+def norm_addr(addr: str | None) -> str | None:
+    """Lowercase a payer address before it is stored, or None.
+
+    An EVM address is case-insensitive, but the two paths that record one hand it
+    over in different shapes: the on-chain sweeper reads it off a log, while the
+    x402/subscription paths recover it from a signature and get EIP-55 checksum
+    casing. Storing both meant the same wallet existed twice — the merchant
+    customer export split one buyer into two rows before this was normalised.
+    Lowercase is the shape the rest of the app already stores (see `pay_to`)."""
+    return addr.lower() if addr else None
+
+
 # ---------------------------------------------------------------- transitions
 def transition(
     session: Session, order_id: str, from_states, to_state, **fields
@@ -359,7 +371,7 @@ def _record_transfer(
             log_index=log_index,
             order_id=order.id,
             pay_to=order.pay_to,
-            from_addr=(from_addr or ""),
+            from_addr=(norm_addr(from_addr) or ""),
             amount_micro=value,
             block_number=block_number,
             seen_at=_now(),
@@ -375,7 +387,7 @@ def _drive_state(session, order, added, block_number, from_addr, tx_hash, head):
     fields = dict(
         paid_micro=cumulative,
         block_number=block_number,
-        from_addr=(from_addr or None),
+        from_addr=norm_addr(from_addr),
         tx_hash=tx_hash,
     )
 

@@ -364,7 +364,7 @@ def _fulfill_subscription(
             status="confirmed",
             channel="agent",
             x402_nonce=idem_key,
-            from_addr=payer,
+            from_addr=checkout.norm_addr(payer),
             paid_at=checkout._now(),
             # paid_micro is what refunds._amount_due subtracts from. Only the checkout
             # sweeper used to write it, so an agent/subscription order — delivered and
