@@ -142,8 +142,16 @@ GENERATE_ENV = "TILLA_IMAGE_GEN"  # unset/0 => generation off, stock only
 GENERATE_TIMEOUT = (5, 90)  # generation is slow; the caller is already fail-open
 # Appended to every prompt. "no text" matters: generators love to invent signage and
 # labels, and invented label text on a storefront is exactly what we are avoiding.
+#
+# The anti-branding half was widened after measuring it. Asked for a wooden watch on a
+# workbench, the short prompt produced something the branding check REFUSED; the same
+# scene with "plain unbranded / no emblem / no crest" passed. That single change is the
+# difference between a store having a hero and not having one. It does NOT rescue
+# everything: a football-kit store fails on both prompts, because a jersey without a
+# crest stops reading as a jersey — that category is a genuine ceiling, not a bug.
 _GENERATE_STYLE = (
-    ", photographic, natural light, no text, no words, no logos, no watermark"
+    ", photographic, natural light, plain unbranded subject, no text, no words, "
+    "no logos, no brand marks, no emblem, no crest, no sponsor, no watermark"
 )
 
 
