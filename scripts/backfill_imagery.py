@@ -161,6 +161,12 @@ def backfill(slug: str, dry_run: bool) -> str:
         )
         if outcome.status != "allow":
             return "skipped (screening unavailable)"
+        # The receipt MUST be persisted, not just read for its verdict. With
+        # TILLA_WARDEN_PAID=1 a screen settles a real x402 hire on-chain, and the
+        # first version of this script dropped the receipt — 0.1 USDT0 moved
+        # (0x8a6235b3…) with no row to account for it. Every other screening call
+        # site records one; this one does too.
+        engine._persist_receipt(session, store.id, outcome.receipt)
 
         store_dir = engine.STORES_DIR / slug
         store_dir.mkdir(parents=True, exist_ok=True)
