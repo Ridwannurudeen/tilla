@@ -121,6 +121,9 @@ VERIFY_TIMEOUT = (5, 30)
 # rich while still refusing the bad photograph. Each step costs one vision call
 # (~815 tokens for a 940x650 image, so a fraction of a cent).
 MAX_VERIFY_PER_SLOT = 3
+# How many deterministic seeds the generation fallback may try when a rendered image
+# fails the branding check. One seed proved brittle in production (see _slot).
+MAX_GENERATE_ATTEMPTS = 3
 
 # ---------------------------------------------------------------- generated art
 # Stock photography has a hard ceiling on branded goods: most photographs of a hot
@@ -731,10 +734,22 @@ def _slot(
         return image
     # Stock had nothing usable. For a hero or a lifestyle frame — never a product
     # card — fall back to generated atmosphere, held to the same branding check.
+    #
+    # SEVERAL seeds, not one, and the reason is a real store: iron-built's gym hero
+    # verified fine at an arbitrary seed, yet the backfill failed it — the ONE seed
+    # its PRNG produced happened to render branded apparel, the check refused it,
+    # and because the seed is deterministic the store could never recover on any
+    # re-run. Walking a few successive draws keeps determinism (same slug, same
+    # sequence, same final image) while removing the single-unlucky-seed failure —
+    # the exact courtesy the stock path already extends to its runner-up candidates.
     if kind != "product" and generation_enabled() and provider.bytes_left > 0:
         width, height = _GEOMETRY.get(_VARIANT[kind], (1200, 627))
-        blob = _generate(query or subject, int(rand() * 2**31), width, height)
-        if blob is not None and _verify(blob, subject or query, require_depicts=False):
+        for _ in range(MAX_GENERATE_ATTEMPTS):
+            blob = _generate(query or subject, int(rand() * 2**31), width, height)
+            if blob is None:
+                continue
+            if not _verify(blob, subject or query, require_depicts=False):
+                continue
             image = provider.store(blob, {"alt": subject or query}, _VARIANT[kind])
             if image is not None:
                 image.generated = True

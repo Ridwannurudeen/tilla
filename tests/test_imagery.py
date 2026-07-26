@@ -1460,3 +1460,35 @@ class TestGeneratedImagery:
 
         monkeypatch.setattr(imagery.requests, "get", boom)
         assert imagery._generate("x", 1, 100, 100) is None
+
+
+def test_a_rejected_seed_walks_to_the_next_deterministic_seed(monkeypatch, tmp_path):
+    """Regression, from a real store. iron-built's gym hero verified fine at an
+    arbitrary seed, yet the backfill failed it: the ONE seed its PRNG produced
+    rendered branded apparel, the check refused it, and — the seed being
+    deterministic — no re-run could ever recover. Generation now walks a few
+    successive draws, the same courtesy the stock path extends to its runner-up
+    candidates."""
+    monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
+    monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+    install(monkeypatch, FakeSession({}))  # stock finds nothing
+    seeds, blobs = [], iter([JPEG + b"a", JPEG + b"b"])
+    monkeypatch.setattr(
+        imagery,
+        "_generate",
+        lambda prompt, seed, w, h: seeds.append(seed) or next(blobs),
+    )
+    verdicts = iter([False, True])  # first seed branded, second clean
+    monkeypatch.setattr(
+        imagery,
+        "_verify",
+        lambda blob, description, require_depicts=True: next(verdicts),
+    )
+    result = imagery.resolve(
+        {"hero_image_query": "gym floor at dawn", "hero_image_subject": "gym floor"},
+        tmp_path,
+        seeded(),
+    )
+    assert result.hero is not None and result.hero.generated is True
+    assert len(seeds) == 2, "the second seed must actually be tried"
+    assert (tmp_path / result.hero.path).read_bytes() == JPEG + b"b"
