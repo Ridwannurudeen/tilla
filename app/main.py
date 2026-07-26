@@ -1567,6 +1567,32 @@ async def set_pricing(
         raise HTTPException(
             422, "a product cannot set both membership tiers and pay-what-you-want"
         )
+    # The aggr_deferred rail delivers on a facilitator-VERIFIED authorization and
+    # settles on-chain later — that is its documented contract. Every claimable good
+    # (file download, license activation) is gated on TERMINAL_DELIVERED, so a
+    # deferred settlement holds them locked and the void path revokes them. A TEXT
+    # deliverable is the one shape that defeats the gate: its whole value rides in
+    # the immediate response body, and knowledge cannot be revoked. So the deferred
+    # rail is only enableable on a product whose deliverable is a server-gated file
+    # — a store with no deliverable row falls back to store.delivery text and is
+    # refused for the same reason. Production taught this the hard way: OKX's
+    # listing validators have twice driven served-200s whose settles never landed
+    # on-chain (three orders on 2026-07-23, six on 2026-07-26); files stayed locked
+    # both times, text went out with the response.
+    if parsed.pricing_model == "batch":
+        active_deliverable = session.scalar(
+            select(Deliverable)
+            .where(Deliverable.store_id == store.id, Deliverable.active.is_(True))
+            .order_by(Deliverable.id.desc())
+        )
+        if active_deliverable is None or active_deliverable.kind != "file":
+            raise HTTPException(
+                422,
+                "deferred settlement (batch) requires a file deliverable: text and "
+                "license deliverables are released in the response body, before a "
+                "deferred settle confirms on-chain — upload a file deliverable "
+                "first, or keep this product on one_time (settle-first) pricing",
+            )
     # Tiers/membership/pwyw all ride the SAME JSON column under their own keys alongside
     # any model params. Absent keys clear prior values (whole-rewrite semantics).
     merged = dict(params) if params else {}

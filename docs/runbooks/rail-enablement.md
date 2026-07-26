@@ -99,3 +99,33 @@ create-store service — do NOT port the merchant-sales core, which would trade 
 X-Layer / direct-to-merchant differentiators. Needs a Base wallet + whitelisted signer + registration at
 `app.virtuals.io/acp/new` + a small `acp-node` sidecar → `engine.create_store`. Re-verify fees/graduation
 against Virtuals' live docs (mid-restructure). **Skip unless you specifically want cross-ecosystem reach.**
+
+---
+
+## Deferred settlement and self-contained deliverables (guard added 2026-07-26)
+
+The aggr_deferred rail delivers on a facilitator-VERIFIED signed authorization and
+settles on-chain later — that is its contract, chosen by the buyer. Tilla's protection
+is the TERMINAL_DELIVERED gate: a provisional `settling` order keeps every claimable
+good (file download, license activation) locked, and the void path revokes entitlements
+if a clean chain scan proves the settle never landed.
+
+A TEXT deliverable defeats that gate: its whole value rides in the immediate response
+body, and knowledge cannot be revoked. A LICENSE deliverable half-defeats it: the key
+VALUE is in the body (activations stay revocable). So `POST /api/stores/{slug}/pricing`
+now refuses `pricing_model: "batch"` unless the store's active deliverable is a FILE —
+a store with no deliverable row falls back to `store.delivery` text and is refused for
+the same reason.
+
+This is not hypothetical. OKX's listing validators have twice driven served-200
+purchases whose settles never landed on-chain (3 orders on 2026-07-23; 6 orders /
+124 USDT0 nominal on 2026-07-26, verified by an anchored `eth_getLogs` scan of both
+merchant wallets). Files stayed locked both times; the demo text went out with the
+response. The residual exposure — a tx-less settle on the settle-first `exact` rail —
+is bounded to the in-band body of products a merchant chose to sell as text, is worth
+at most one payload per unique signed authorization, and books no revenue either way.
+
+Grandfathered: `sync`'s product was set to `batch` before this guard existed (text
+fallback, demo payload). Left as-is deliberately — rewriting a listed product's rails
+during a marketplace review cycle is a worse trade than the demo-text exposure. Flip it
+to `one_time` or upload a file deliverable at the next natural touch.

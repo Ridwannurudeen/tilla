@@ -24,7 +24,7 @@ import app.main as main
 from app import checkout, self_serve
 from app.config import WARDEN_SCREEN_URL
 from app.db import SessionLocal
-from app.models import Merchant, Order, Product, Store
+from app.models import Deliverable, Merchant, Order, Product, Store
 
 client = TestClient(main.app)
 
@@ -696,6 +696,20 @@ def test_merchant_products_expose_pricing_for_prefill(
     ]
     assert rows[0]["pricing_model"] == "one_time"
     assert rows[0]["pricing_params"] == {}
+    # batch (deferred settle) now requires a server-gated file deliverable — the
+    # guard added after OKX's validators twice bought without settling on-chain.
+    with SessionLocal() as s:
+        store_row = s.scalar(select(Store).where(Store.slug == "prc"))
+        s.add(
+            Deliverable(
+                store_id=store_row.id,
+                kind="file",
+                file_sha256="b" * 64,
+                file_name="kit.zip",
+                active=True,
+            )
+        )
+        s.commit()
     # A merchant session token authorizes /pricing (the M9 additive clause), so the
     # panel can write with the same bearer it already holds.
     r = client.post(

@@ -11,7 +11,7 @@ from sqlalchemy import select
 import app.main as main
 from app import agentic, config, delivery
 from app.db import SessionLocal
-from app.models import EventLog, Product, Store
+from app.models import Deliverable, EventLog, Product, Store
 from fastapi.testclient import TestClient
 
 client = TestClient(main.app)
@@ -87,9 +87,28 @@ def test_default_pricing_model_is_one_time(make_store):
 
 
 # --------------------------------------------------------------- happy paths
+def _give_file_deliverable(slug: str) -> None:
+    """The deferred rail requires a server-gated file deliverable (see the guard in
+    main.set_pricing): claims gate on TERMINAL_DELIVERED, so a deferred settle holds
+    them locked, which text/license payloads — released in the response body — defeat."""
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        s.add(
+            Deliverable(
+                store_id=store.id,
+                kind="file",
+                file_sha256="a" * 64,
+                file_name="kit.zip",
+                active=True,
+            )
+        )
+        s.commit()
+
+
 def test_declare_batch(make_store):
     make_store(slug="pb")
     key = _give_key("pb")
+    _give_file_deliverable("pb")
     r = client.post(
         "/api/stores/pb/pricing",
         json={"pricing_model": "batch"},
@@ -100,6 +119,61 @@ def test_declare_batch(make_store):
     p = _product("pb")
     assert p.pricing_model == "batch"
     assert p.pricing_params is None
+
+
+# ----------------------------------------- deferred settle needs a gated deliverable
+def test_batch_refused_without_a_deliverable(make_store):
+    """No deliverable row falls back to store.delivery TEXT, whose whole value rides
+    in the immediate response body — before a deferred settle confirms on-chain.
+    Production met this twice: OKX's listing validators drove served-200s whose
+    settles never landed (3 orders 2026-07-23, 6 orders 2026-07-26). Files stayed
+    locked behind TERMINAL_DELIVERED both times; text went out with the response."""
+    make_store(slug="pb-none")
+    key = _give_key("pb-none")
+    r = client.post(
+        "/api/stores/pb-none/pricing",
+        json={"pricing_model": "batch"},
+        headers=_auth(key),
+    )
+    assert r.status_code == 422
+    assert "file deliverable" in r.json()["detail"]
+    assert _product("pb-none").pricing_model == "one_time"  # untouched
+
+
+def test_batch_refused_on_text_and_license_deliverables(make_store):
+    for kind, slug in (("text", "pb-text"), ("license", "pb-lic")):
+        make_store(slug=slug)
+        key = _give_key(slug)
+        with SessionLocal() as s:
+            store = s.scalar(select(Store).where(Store.slug == slug))
+            s.add(
+                Deliverable(
+                    store_id=store.id,
+                    kind=kind,
+                    payload="the-secret" if kind == "text" else None,
+                    active=True,
+                )
+            )
+            s.commit()
+        r = client.post(
+            f"/api/stores/{slug}/pricing",
+            json={"pricing_model": "batch"},
+            headers=_auth(key),
+        )
+        assert r.status_code == 422, (kind, r.text)
+        assert _product(slug).pricing_model == "one_time"
+
+
+def test_settle_first_models_never_need_the_guard(make_store):
+    """one_time settles before delivery; the guard must not touch it."""
+    make_store(slug="pb-exact")
+    key = _give_key("pb-exact")
+    r = client.post(
+        "/api/stores/pb-exact/pricing",
+        json={"pricing_model": "one_time"},
+        headers=_auth(key),
+    )
+    assert r.status_code == 200
 
 
 def test_declare_metered_round_trips(make_store):
@@ -152,6 +226,7 @@ def test_declare_back_to_one_time_clears_params(make_store):
 def test_pricing_writes_event_log(make_store):
     make_store(slug="pe")
     key = _give_key("pe")
+    _give_file_deliverable("pe")
     client.post(
         "/api/stores/pe/pricing",
         json={"pricing_model": "batch"},
@@ -240,6 +315,7 @@ def test_batch_rejects_params_422(make_store):
 def test_feed_surfaces_pricing_and_exact_only_by_default(make_store):
     make_store(slug="pf1")
     key = _give_key("pf1")
+    _give_file_deliverable("pf1")
     client.post(
         "/api/stores/pf1/pricing",
         json={"pricing_model": "batch"},
@@ -257,6 +333,7 @@ def test_feed_advertises_aggr_deferred_only_for_batch_when_flag_on(
 ):
     make_store(slug="pf2")
     key = _give_key("pf2")
+    _give_file_deliverable("pf2")
     client.post(
         "/api/stores/pf2/pricing",
         json={"pricing_model": "batch"},
