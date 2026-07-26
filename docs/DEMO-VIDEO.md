@@ -4,8 +4,17 @@
 > Every URL, button label and status code below was probed against production on 2026-07-26.
 > Two shots spend real USDT0 — they are marked. Read "Before you hit record" first.
 
-Target length **90 seconds**. Six beats. Shots 5 and 6 are the ones judges have not seen
-from anyone else, so if you run long, cut from shots 2–4, never from 5–6.
+Target length **90 seconds**. Shots 5, 6 and 3b are the ones judges have not seen from anyone
+else, so if you run long, cut from shots 2 and 4, never from those three.
+
+> **Updated 2026-07-26 (later).** Two things landed after the first draft and both are worth
+> screen time, so shot 3b is new and the store URLs changed:
+> * **Stores now serve at their own subdomain** — `highland-roast.tilla.gudman.xyz`, valid TLS.
+>   Use that on camera rather than `/s/highland-roast/`. It reads as the merchant's shop instead
+>   of an entry in someone else's directory, which is the whole point of the product.
+> * **Two stores from the same sentence now come out visibly different** — different layout,
+>   typography and palette, from a slug-seeded design system rather than a template. That is the
+>   anti-template proof no free-CSS builder can make safely, and it is shot 3b.
 
 ---
 
@@ -15,7 +24,9 @@ from anyone else, so if you run long, cut from shots 2–4, never from 5–6.
 
 1. `https://tilla.gudman.xyz/`
 2. `https://tilla.gudman.xyz/dashboard`
-3. `https://tilla.gudman.xyz/s/highland-roast/`
+3. `https://highland-roast.tilla.gudman.xyz/` — the store on its OWN subdomain (new; verified
+   200 with valid TLS against `CN=*.tilla.gudman.xyz`)
+3b. `https://lumiere-studio.tilla.gudman.xyz/` — a second store, for the side-by-side in shot 3b
 4. A terminal, already `cd`'d somewhere neutral, font size bumped
 5. The OKX marketplace page for agent **#6961**
 6. `https://www.oklink.com/x-layer/evm/tx/<hash>` — build the hash by joining the two halves
@@ -28,6 +39,10 @@ plus a little OKB for gas — that is the real create-store fee, charged on-chai
 **Do not let these on screen:** any terminal showing `/opt/tilla/.env`, `/root/*.env`,
 `~/.okx-agent-task`, private keys, or the Anthropic key. Clear scrollback before you record the
 terminal shot. Blur or crop your wallet balance if you'd rather not show it.
+
+**The 90 seconds are now fully committed** (8 / 24 / 10 / 10 / 10 / 10 / 13 / 5). Shot 2 is the
+only loose one: taking its no-spend fallback saves about six seconds, which is your whole margin if
+a take runs long. Do not sacrifice 3b, 5 or 6 to keep shot 2 whole.
 
 **Recording:** 1080p, browser at ~110% zoom so text reads on a phone. No system audio needed —
 voice-over or on-screen captions both work. Captions are safer if you'd rather not narrate live.
@@ -62,27 +77,55 @@ voice-over or on-screen captions both work. Captions are safer if you'd rather n
 > store, and deploys it to a live URL. That's the whole setup."
 
 **If you'd rather not spend the fee on camera:** skip the click on **Create my store**, and cut
-straight to `https://tilla.gudman.xyz/s/highland-roast/` (tab 3) — a store Tilla actually built.
+straight to `https://highland-roast.tilla.gudman.xyz/` (tab 3) — a store Tilla actually built.
 Say "here's one it built earlier." Honest, and it saves ~6 seconds.
 
 ---
 
-### Shot 3 — A human buys (0:32 → 0:45)
+### Shot 3 — A human buys (0:32 → 0:42)
 
 | | |
 |---|---|
-| **Screen** | The storefront from shot 2, or `/s/highland-roast/` |
-| **Action** | Scroll the product, hit the buy control, show the USDT0 amount and the pay-to address. |
+| **Screen** | The storefront from shot 2, or `https://highland-roast.tilla.gudman.xyz/` |
+| **Action** | Let the URL bar read for a beat — it is the merchant's own subdomain, not a path under ours. Then scroll the product, hit the buy control, show the USDT0 amount and the pay-to address. |
 
-> **Say:** "The customer pays USDT0 on X Layer, straight to the merchant's own wallet. Tilla
-> verifies the payment on-chain and delivers the product automatically. Tilla never holds the money."
+> **Say:** "Every store gets its own address. The customer pays USDT0 on X Layer, straight to the
+> merchant's own wallet — Tilla verifies the payment on-chain, delivers automatically, and never
+> holds the money."
 
 Don't complete a purchase here unless you want a second on-chain spend — showing the checkout
 and the amount is enough, and the settled receipts come in shot 6.
 
 ---
 
-### Shot 4 — The same store, for machines (0:45 → 0:58)
+### Shot 3b — Same sentence, different store (0:42 → 0:52) · **the anti-template proof**
+
+This is the beat that answers the obvious objection: *isn't this just three templates with the
+words swapped?* Do not cut it.
+
+| | |
+|---|---|
+| **Screen** | Two browser windows side by side, or a quick cut between tabs 3 and 3b |
+| **Action** | Show `highland-roast.tilla.gudman.xyz` next to `lumiere-studio.tilla.gudman.xyz`. Let the difference land — different layout, different typography, different colour. |
+
+> **Say:** "And two merchants describing the same thing don't get the same shop. Layout,
+> typography and colour are all derived per store — so nobody gets a template with their name
+> dropped into it."
+
+**Why this is true, if a judge asks:** each store's design is seeded from its own slug across ten
+curated design personas, four typography pairings and a palette derived from a single hue — 81
+distinct structural looks measured across 4000 slugs, with the most common holding 2.5%. Colour is
+computed rather than picked, with enforced contrast floors: body text at 7:1, brand colours at 3:1,
+and the accent kept perceptibly distinct from both the primary and the text. It is all
+server-validated enums — a merchant never gets to inject CSS. See `docs/DESIGN-DNA.md`.
+
+*Honest framing:* say **derived per store**, not "AI designs it." The colour hue is the model's
+only aesthetic input; the structure is seeded, precisely because the model kept returning the same
+three answers when it was asked to choose freely.
+
+---
+
+### Shot 4 — The same store, for machines (0:52 → 1:02)
 
 | | |
 |---|---|
@@ -98,7 +141,7 @@ Verified live 2026-07-26: `/create-store` returns 402.
 
 ---
 
-### Shot 5 — It's listed on OKX (0:58 → 1:10)
+### Shot 5 — It's listed on OKX (1:02 → 1:12)
 
 | | |
 |---|---|
@@ -111,7 +154,7 @@ Verified live 2026-07-26: `/create-store` returns 402.
 
 ---
 
-### Shot 6 — Tilla *buys* (1:10 → 1:25)
+### Shot 6 — Tilla *buys* (1:12 → 1:25)
 
 This is the beat almost nobody else has. Give it room.
 
