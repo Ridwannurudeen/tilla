@@ -93,6 +93,19 @@ def describe(slug: str) -> dict:
         stats = _stats_sentence(row)
         if stats:
             description = f"{description} {stats}"
+        # Rule D1 (blocking, checked by the CLI's `validate-listing`): a service
+        # description must carry TWO parts on SEPARATE lines — what the service does,
+        # then what the buyer supplies. The platform listings already had this shape;
+        # the storefront listings did not, so every one of them fails validation as
+        # written and would be blocked on the next review. The inputs named here are
+        # exactly the ones the feed's per-product `input_schema` advertises, so a
+        # buying agent reads the same contract in both places.
+        description = (
+            f"{description}\n"
+            f"Provide: payment of {fee} USDT from your wallet. Optionally an agent "
+            "id to be priced at a wholesale tier, and a referral wallet to credit "
+            "the sale."
+        )
         # The registry rejects serviceName over 30 chars (Wallet API code 81001,
         # hit on the first live B1.3 submit). Prefer "Buy <product> from <store>",
         # fall back to "Buy <product>", then truncate the product name — the store

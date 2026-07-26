@@ -570,7 +570,9 @@ def test_describe_quotes_the_live_reputation_numbers(make_store):
         "Freelancer Command Center from Invoice Flow, delivered as soon as the "
         "payment clears. Price 9 USDT. Sold 4 times, 100% of sales delivered with "
         "no dispute or refund, buyer rating 4.5 out of 5, seller trust tier "
-        "established."
+        "established.\n"
+        "Provide: payment of 9 USDT from your wallet. Optionally an agent id to be "
+        "priced at a wholesale tier, and a referral wallet to credit the sale."
     )
     assert service["fee"] == "9"
     assert service["endpoint"].endswith("/s/desc-rep/buy")
@@ -598,7 +600,9 @@ def test_describe_omits_stats_for_a_store_with_no_sales(make_store):
     text = describe("desc-new")["service"]["serviceDescription"]
     assert text == (
         "Freelancer Command Center from Invoice Flow, delivered as soon as the "
-        "payment clears. Price 9 USDT."
+        "payment clears. Price 9 USDT.\n"
+        "Provide: payment of 9 USDT from your wallet. Optionally an agent id to be "
+        "priced at a wholesale tier, and a referral wallet to credit the sale."
     )
     assert "None" not in text
     assert "trust tier" not in text  # a new store reads as new, not as 'tier new'
@@ -731,3 +735,23 @@ def test_upgrade_keeps_the_catalog_in_sync_with_checkout(make_store, monkeypatch
             r.price_micro / 1_000_000 for r in rows
         ], "listed prices must be the prices checkout charges"
         assert all(p.get("id") for p in listed), "every listed item needs a real id"
+
+
+def test_describe_emits_the_two_part_description_the_registry_requires(make_store):
+    """Rule D1 is a BLOCKING marketplace check: a service description must carry a
+    core-capability summary and what the buyer supplies, on separate lines.
+
+    The three storefront services listed before this rule existed all fail it as
+    written -- verified with the CLI's own `validate-listing` -- so a generator that
+    kept emitting the one-part form would keep drafting listings that cannot pass
+    review. The platform services (create/upgrade/add) already had the two-part shape.
+    """
+    _listable(make_store, "desc-d1")
+    text = describe("desc-d1")["service"]["serviceDescription"]
+    lines = text.split("\n")
+    assert len(lines) == 2, text
+    assert lines[0].strip(), "the first line must summarise the capability"
+    assert lines[1].startswith("Provide:"), lines[1]
+    # The inputs named must be the ones the feed's per-product input_schema already
+    # advertises, so an agent reads one contract in both places.
+    assert "agent id" in lines[1] and "referral wallet" in lines[1]

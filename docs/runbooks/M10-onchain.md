@@ -287,3 +287,47 @@ Submitting a rating to an external reputation graph is likewise out of claims: t
 `hire.rating` rows are LOCAL evidence, and `TILLA_RATE_HIRES=1` is a dry run. No
 rating has ever left this machine, and none can until a real submission surface is
 verified.
+
+---
+
+## STEP F (USER-GATED, PREPARED 2026-07-26) — fix rule D1 and list three photographed stores
+
+**Why this exists.** The CLI's `validate-listing` is a BLOCKING gate, and rule **D1**
+requires every service description to carry two parts on separate lines: what the
+service does, then what the buyer supplies. The three platform services already had
+that shape. **All three live storefront services FAIL D1 as written** — verified with
+`onchainos agent validate-listing --role asp` against their own live text. They stay
+live because they were approved before the rule, but `--service` triggers a review, so
+the next update would have been blocked. `app/mark_listed.py` now emits the two-part
+form, and the batch below repairs the three in place while adding three more.
+
+**Why one call.** Any `--service` update reshuffles service ids and starts one review
+cycle. Doing the repairs and the additions together costs one cycle instead of two.
+
+**Which stores, and why.** `leaf-ember` (tea, 14), `iron` (gym wear, 48) and
+`ember-and-oak` (candles, 34) — each fully photographed since the imagery work, each a
+different category from what is already listed, each priced where an agent might
+actually transact. `timber-form` was skipped at 580 USDT and `ember-bean` as a second
+coffee store behind `highland-roast`.
+
+**Pre-flight, already done and passing:**
+- `x402-check` reports `valid=true` on all six endpoints, new ones included.
+- `validate-listing --role asp` on this exact batch: `{"pass": true, "findings": []}`.
+
+**⚠️ Do NOT run this while a submission is being judged.** Agent 6961 is currently
+`approvalStatus 4` / `onlineStatus 1` with 9 recorded sales; this call puts the
+listing back into review. Run it after.
+
+```sh
+export XDG_RUNTIME_DIR=/run/user/0 HOME=/root/warden-agent   PATH=/root/.okxbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin
+onchainos agent service-list --agent-id 6961 > /root/tilla-services-before-F.json
+
+onchainos agent update --agent-id 6961 --service '[{"operation":"update","serviceName":"Buy Freelancer Command Center","serviceDescription":"Freelancer Command Center from Invoice Flow, delivered as soon as the payment clears. Price 9 USDT. Sold 4 times, 100% of sales delivered with no dispute or refund, buyer rating 5.0 out of 5, seller trust tier established.\nProvide: payment of 9 USDT from your wallet. Optionally an agent id to be priced at a wholesale tier, and a referral wallet to credit the sale.","serviceType":"A2MCP","fee":"9","endpoint":"https://tilla.gudman.xyz/s/invoice-flow/buy","id":"db6b756c-d383-4eeb-9588-0fb825b76e57"},{"operation":"update","serviceName":"Buy Team Habit Tracker","serviceDescription":"Team Habit Tracker from Sync, delivered as soon as the payment clears. Price 4 USDT.\nProvide: payment of 4 USDT from your wallet. Optionally an agent id to be priced at a wholesale tier, and a referral wallet to credit the sale.","serviceType":"A2MCP","fee":"4","endpoint":"https://tilla.gudman.xyz/s/sync/buy","id":"2e79323e-3438-421a-8229-ea5ec6b44583"},{"operation":"update","serviceName":"Buy Ethiopian Single-Origin 25","serviceDescription":"Ethiopian Single-Origin 250g from Highland Roast, delivered as soon as the payment clears. Price 15 USDT.\nProvide: payment of 15 USDT from your wallet. Optionally an agent id to be priced at a wholesale tier, and a referral wallet to credit the sale.","serviceType":"A2MCP","fee":"15","endpoint":"https://tilla.gudman.xyz/s/highland-roast/buy","id":"cf3cb433-7d57-468e-8d11-86179b88ae47"},{"operation":"create","serviceName":"Buy Morning Breakfast Blend","serviceDescription":"Morning Breakfast Blend from Leaf & Ember, delivered as soon as the payment clears. Price 14 USDT.\nProvide: payment of 14 USDT from your wallet. Optionally an agent id to be priced at a wholesale tier, and a referral wallet to credit the sale.","serviceType":"A2MCP","fee":"14","endpoint":"https://tilla.gudman.xyz/s/leaf-ember/buy"},{"operation":"create","serviceName":"Buy Apex Performance Shorts","serviceDescription":"Apex Performance Shorts from IRON, delivered as soon as the payment clears. Price 48 USDT.\nProvide: payment of 48 USDT from your wallet. Optionally an agent id to be priced at a wholesale tier, and a referral wallet to credit the sale.","serviceType":"A2MCP","fee":"48","endpoint":"https://tilla.gudman.xyz/s/iron/buy"},{"operation":"create","serviceName":"Buy Signature Soy Candle","serviceDescription":"Signature Soy Candle from Ember and Oak, delivered as soon as the payment clears. Price 34 USDT.\nProvide: payment of 34 USDT from your wallet. Optionally an agent id to be priced at a wholesale tier, and a referral wallet to credit the sale.","serviceType":"A2MCP","fee":"34","endpoint":"https://tilla.gudman.xyz/s/ember-and-oak/buy"}]'
+```
+
+Afterwards record the state (this is the only writer of `stores.marketplace_status`):
+
+```sh
+cd /opt/tilla
+for s in leaf-ember iron ember-and-oak; do .venv/bin/python -m app.mark_listed $s listed; done
+```
