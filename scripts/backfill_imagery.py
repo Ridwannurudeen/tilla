@@ -129,7 +129,7 @@ def describe(slug: str, content: dict) -> None:
             )
 
 
-def backfill(slug: str, dry_run: bool) -> str:
+def backfill(slug: str, dry_run: bool, force: bool = False) -> str:
     """Add photography to one store. Returns a one-line outcome for the summary."""
     with SessionLocal() as session:
         store = session.scalar(select(Store).where(Store.slug == slug))
@@ -140,7 +140,7 @@ def backfill(slug: str, dry_run: bool) -> str:
         content = store.content if isinstance(store.content, dict) else None
         if content is None:
             return "skipped (no content)"
-        if (content.get("imagery") or {}).get("hero"):
+        if (content.get("imagery") or {}).get("hero") and not force:
             return "skipped (already photographed)"
 
         try:
@@ -203,6 +203,12 @@ def main() -> int:
     parser.add_argument("slugs", nargs="*", help="stores to backfill")
     parser.add_argument("--all", action="store_true", help="every live store")
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="re-resolve stores that already have photographs, so existing ones "
+        "are re-checked against the current selection rules",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the search text and stop, before anything is fetched or written",
@@ -226,7 +232,7 @@ def main() -> int:
     results = {}
     for slug in slugs:
         print(f"\n[{slug}]")
-        results[slug] = backfill(slug, args.dry_run)
+        results[slug] = backfill(slug, args.dry_run, args.force)
         print(f"  -> {results[slug]}")
     print("\n=== summary ===")
     for slug, outcome in results.items():

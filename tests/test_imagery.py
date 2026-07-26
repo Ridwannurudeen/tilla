@@ -11,10 +11,12 @@ store that renders on its generative texture and says nothing.
 (the suite's respx fixtures cover httpx, which chain.py uses).
 """
 
+import base64
 import json
 import pathlib
 
 import pytest
+import requests
 
 from app import imagery, render
 
@@ -99,7 +101,13 @@ class FakeSession:
 
 @pytest.fixture
 def keyed(monkeypatch):
+    """Photography enabled, with visual verification stubbed to accept.
+
+    The vision check is exercised on its own below (TestVerification). Stubbing it
+    here keeps every other test about the selection logic it feeds, instead of
+    every one of them needing to mock an image API."""
     monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
+    monkeypatch.setattr(imagery, "_verify", lambda blob, description: True)
 
 
 def install(monkeypatch, session):
@@ -1069,3 +1077,167 @@ class TestHeadRequests:
             ).status_code
             == 404
         )
+
+
+# ====================================== looking at the photograph before keeping it
+class TestVerification:
+    """Every check above this one reads the provider's CAPTION, and a caption cannot
+    report what it does not mention. A store selling handcrafted maple watches was
+    given a photograph of a Casio watch beside a Canon camera and AirPods — three
+    competitors' trademarks on a card offering the merchant's product — and none of
+    those brands appear in its caption. So the chosen photograph is looked at."""
+
+    @staticmethod
+    def _anthropic(monkeypatch, answer=None, *, exc=None, status=200, text=None):
+        """Stub the vision call. Records every request so the test can assert on it."""
+        calls = []
+
+        class R:
+            def raise_for_status(self):
+                if status >= 400:
+                    import requests as rq
+
+                    raise rq.HTTPError(str(status))
+
+            def json(self):
+                body = text if text is not None else json.dumps(answer)
+                return {"content": [{"text": body}]}
+
+        def post(url, headers=None, json=None, timeout=None):
+            calls.append({"url": url, "headers": headers, "body": json})
+            if exc is not None:
+                raise exc
+            return R()
+
+        monkeypatch.setattr(imagery.requests, "post", post)
+        return calls
+
+    def test_a_photograph_showing_the_product_and_no_branding_is_kept(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(imagery.VERIFY_KEY_ENV, "test-llm-key")
+        self._anthropic(monkeypatch, {"depicts": True, "branded": False})
+        assert imagery._verify(JPEG, "leggings") is True
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            {"depicts": True, "branded": True},  # the Tabasco / Casio case
+            {"depicts": False, "branded": False},  # product not the subject
+            {"depicts": False, "branded": True},
+            {"depicts": "yes", "branded": "no"},  # not real booleans
+            {},
+        ],
+    )
+    def test_anything_short_of_both_conditions_is_refused(self, monkeypatch, answer):
+        monkeypatch.setenv(imagery.VERIFY_KEY_ENV, "test-llm-key")
+        self._anthropic(monkeypatch, answer)
+        assert imagery._verify(JPEG, "hot sauce") is False
+
+    def test_the_image_is_actually_sent_for_inspection(self, monkeypatch):
+        """A verifier that never receives the bytes would rubber-stamp everything."""
+        monkeypatch.setenv(imagery.VERIFY_KEY_ENV, "test-llm-key")
+        calls = self._anthropic(monkeypatch, {"depicts": True, "branded": False})
+        imagery._verify(JPEG, "black compression leggings")
+        content = calls[0]["body"]["messages"][0]["content"]
+        image = next(b for b in content if b["type"] == "image")
+        assert image["source"]["media_type"] == "image/jpeg"
+        assert base64.standard_b64decode(image["source"]["data"]) == JPEG
+        prompt = next(b for b in content if b["type"] == "text")["text"]
+        assert "black compression leggings" in prompt
+        assert calls[0]["headers"]["x-api-key"] == "test-llm-key"
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"exc": requests.Timeout("slow")},
+            {"exc": requests.ConnectionError("down")},
+            {"status": 500},
+            {"text": "I am not JSON"},
+        ],
+    )
+    def test_an_unverifiable_photograph_is_refused_not_assumed_good(
+        self, monkeypatch, kwargs
+    ):
+        """Fail-closed. This costs no availability: store creation already depends on
+        this API for generation, so a store that cannot verify a photo is a store
+        that was never generated either."""
+        monkeypatch.setenv(imagery.VERIFY_KEY_ENV, "test-llm-key")
+        self._anthropic(monkeypatch, {"depicts": True, "branded": False}, **kwargs)
+        assert imagery._verify(JPEG, "candle") is False
+
+    def test_no_llm_key_means_no_photograph(self, monkeypatch):
+        monkeypatch.delenv(imagery.VERIFY_KEY_ENV, raising=False)
+        assert imagery._verify(JPEG, "candle") is False
+
+    def test_a_rejected_photograph_hands_the_card_to_the_runner_up(
+        self, monkeypatch, tmp_path
+    ):
+        """The whole reason candidates are ranked rather than picked: the
+        best-captioned photo is often the branded one, and rejecting it should not
+        empty the card."""
+        monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
+        install(
+            monkeypatch,
+            FakeSession(
+                {
+                    "q": [
+                        photo(1, "Tabasco hot sauce bottle on a wooden table"),
+                        photo(2, "Artisan hot sauce bottle with a plain label"),
+                    ]
+                }
+            ),
+        )
+        seen = []
+
+        def fake_verify(blob, description):
+            seen.append(blob)
+            return len(seen) > 1  # reject the first candidate, accept the second
+
+        monkeypatch.setattr(imagery, "_verify", fake_verify)
+        result = imagery.resolve(
+            {"products": [{"image_query": "q", "image_subject": "sauce bottle"}]},
+            tmp_path,
+            seeded(),
+        )
+        assert result.products[0] is not None
+        assert "Artisan" in result.products[0].alt
+        assert len(seen) == 2, "the runner-up must actually be inspected"
+
+    def test_a_rejected_photograph_leaves_no_file_behind(self, monkeypatch, tmp_path):
+        """Bytes are fetched before inspection but written only after it, so a
+        refused photograph cannot litter the store directory."""
+        monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
+        install(monkeypatch, FakeSession({"q": [photo(1, "a dumbbell in a gym")]}))
+        monkeypatch.setattr(imagery, "_verify", lambda blob, description: False)
+        result = imagery.resolve(
+            {"products": [{"image_query": "q", "image_subject": "dumbbell gym"}]},
+            tmp_path,
+            seeded(),
+        )
+        assert result.products == [None]
+        assert not list(tmp_path.glob("img/*")), "no file may survive a refusal"
+
+    def test_inspection_is_bounded_per_slot(self, monkeypatch, tmp_path):
+        """A slot cannot spend unlimited vision calls walking a long candidate list."""
+        monkeypatch.setenv(imagery.KEY_ENV, "test-image-key")
+        install(
+            monkeypatch,
+            FakeSession(
+                {
+                    "q": [
+                        photo(i, "hot sauce bottle number %d" % i) for i in range(1, 12)
+                    ]
+                }
+            ),
+        )
+        calls = []
+        monkeypatch.setattr(
+            imagery, "_verify", lambda blob, description: calls.append(1) and False
+        )
+        imagery.resolve(
+            {"products": [{"image_query": "q", "image_subject": "sauce bottle"}]},
+            tmp_path,
+            seeded(),
+        )
+        assert len(calls) == imagery.MAX_VERIFY_PER_SLOT

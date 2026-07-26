@@ -27,6 +27,10 @@ Three things make a match defensible:
    because containing the product and being a photograph OF it are not the same
    thing. Remaining ties break on the store's own seed, so one slug always resolves
    to one photo and a re-render never silently changes a live store's look.
+4. The chosen photograph is LOOKED AT before it is kept (:func:`_verify`), because
+   every check above reads the caption and a caption cannot report what it does not
+   mention. Candidates are walked in rank order until one survives inspection, so a
+   rejection hands the card to the runner-up instead of emptying it.
 
 Everything here fails OPEN with respect to store creation and CLOSED with respect
 to accuracy. ``create-store`` is x402-paid: an imagery failure (no key, provider
@@ -53,7 +57,9 @@ merchant's own description — not editorial review.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -92,6 +98,43 @@ MAX_TOTAL_BYTES = 8 * 1024 * 1024  # all photos for one store
 CANDIDATES_PER_SEARCH = 24  # how many to score before picking (max 80)
 MAX_LIFESTYLE = 3
 MAX_ALT_LEN = 200  # provider-supplied text, capped before it reaches a template
+
+# ------------------------------------------------------------- visual verification
+# Caption scoring answers "does the provider SAY this is the product". It cannot
+# answer "what is actually in the frame", and the gap between those is where the
+# damaging failures live: a store selling handcrafted maple watches was given a
+# photograph of a Casio watch beside a Canon camera and a pair of AirPods — three
+# competitors' trademarks on a card offering the merchant's own product for sale —
+# and not one of those brand names appears anywhere in the caption. No amount of
+# text matching can catch that, so the chosen photograph is LOOKED AT before it is
+# kept. This is also why a stronger text model would not have helped: the model
+# never sees the candidates, and the query that produced the Casio photo was
+# perfectly good.
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+VERIFY_KEY_ENV = "TILLA_LLM_KEY"  # the same key generation uses, read independently
+VERIFY_MODEL_ENV = "TILLA_LLM_MODEL"
+VERIFY_MODEL_DEFAULT = "claude-haiku-4-5"
+VERIFY_TIMEOUT = (5, 30)
+# How far down the ranked candidates to walk when one is rejected. Rejecting and
+# stopping would empty the card; rejecting and trying the runner-up keeps the page
+# rich while still refusing the bad photograph. Each step costs one vision call
+# (~815 tokens for a 940x650 image, so a fraction of a cent).
+MAX_VERIFY_PER_SLOT = 3
+
+_VERIFY_PROMPT = (
+    "This photograph is a candidate for the product card of an online store "
+    'selling: "{description}".\n\n'
+    'Answer ONLY with JSON: {{"depicts": true|false, "branded": true|false}}\n\n'
+    "depicts — true only if the MAIN SUBJECT of the photograph is that kind of "
+    "product. False if the product is incidental, in the background, or absent, or "
+    "if the frame is dominated by other objects.\n"
+    "branded — true if ANY third-party brand name, logo, trademark or recognisable "
+    "branded product is visible ANYWHERE in the image, including on labels, "
+    "packaging, clothing, devices or in the background.\n\n"
+    "A product card showing another company's product misrepresents what is for "
+    "sale. Be strict: if you are unsure whether something is branded, answer "
+    '"branded": true.'
+)
 
 # ------------------------------------------------------------------- relevance bar
 # A candidate must contain at least this many of the model's declared subject terms
@@ -321,6 +364,76 @@ def _primacy(photo: dict, subject_terms: Sequence[str]) -> int:
     return -min(offsets) if offsets else -9999
 
 
+def _verify(blob: bytes, description: str) -> bool:
+    """Whether this photograph may be used for `description`: it must depict that
+    product and show no third-party branding.
+
+    FAIL-CLOSED on every uncertainty — an API error, a timeout, a malformed answer
+    or a missing key all return False, so the photograph is dropped and the store
+    falls back to its generative plate. That is the same trade the rest of this
+    module makes, and it costs nothing extra in availability terms: store creation
+    already depends on this API for generation, so a store that could not verify a
+    photograph is a store that was never generated either.
+    """
+    key = os.environ.get(VERIFY_KEY_ENV, "").strip()
+    if not key or not blob:
+        logger.warning("imagery: cannot verify (no %s), refusing photo", VERIFY_KEY_ENV)
+        return False
+    payload = {
+        "model": os.environ.get(VERIFY_MODEL_ENV) or VERIFY_MODEL_DEFAULT,
+        "max_tokens": 100,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": base64.standard_b64encode(blob).decode(),
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": _VERIFY_PROMPT.format(description=description),
+                    },
+                ],
+            }
+        ],
+    }
+    try:
+        r = requests.post(
+            ANTHROPIC_URL,
+            headers={
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=VERIFY_TIMEOUT,
+        )
+        r.raise_for_status()
+        text = r.json()["content"][0]["text"]
+        match = re.search(r"\{.*\}", text, re.S)
+        if not match:
+            logger.warning("imagery: verifier returned no JSON: %s", text[:120])
+            return False
+        answer = json.loads(match.group(0))
+    except (requests.RequestException, ValueError, KeyError, IndexError) as exc:
+        logger.warning("imagery: verification failed, refusing photo: %s", exc)
+        return False
+    ok = answer.get("depicts") is True and answer.get("branded") is False
+    if not ok:
+        logger.info(
+            "imagery: rejected on sight (depicts=%s branded=%s) for %r",
+            answer.get("depicts"),
+            answer.get("branded"),
+            description[:60],
+        )
+    return ok
+
+
 class _Provider:
     """Thin Pexels client. One instance per store so the search budget, the byte
     budget and the HTTP connection are shared across every slot."""
@@ -369,9 +482,10 @@ class _Provider:
         self._cache[cache_key] = photos
         return photos
 
-    def fetch(self, photo: dict, variant: str) -> StoreImage | None:
-        """Download one rendition into the store directory and describe it. Returns
-        None on any failure, so a dead byte-fetch costs the slot and nothing else."""
+    def fetch_bytes(self, photo: dict, variant: str) -> bytes | None:
+        """Download one rendition WITHOUT writing it. Separated from :meth:`store` so
+        a candidate can be looked at before anything lands in the store directory —
+        a rejected photograph then leaves no orphan file behind."""
         url = (photo.get("src") or {}).get(variant)
         if not isinstance(url, str) or not url.startswith("https://"):
             return None
@@ -379,12 +493,13 @@ class _Provider:
             logger.info("imagery: byte budget spent, skipping %s", url)
             return None
         try:
-            blob = self._download(url)
+            return self._download(url)
         except (requests.RequestException, OSError) as exc:
             logger.warning("imagery: fetch failed for %s: %s", url, exc)
             return None
-        if blob is None:
-            return None
+
+    def store(self, blob: bytes, photo: dict, variant: str) -> StoreImage | None:
+        """Write a verified photograph into the store directory and describe it."""
         # Content-addressed name: identical photos reused across slots are stored
         # once, the name can never contain provider-controlled characters, and the
         # bytes on disk always match the name.
@@ -438,43 +553,42 @@ class _Provider:
         return blob
 
 
-def _pick(
+def _rank(
     photos: Iterable[dict],
     subject_terms: Sequence[str],
     used: set[int],
     rand: Callable[[], float],
     require_head: bool = True,
-) -> tuple[dict, int] | None:
-    """The best defensible candidate, or None when none clears the bar.
+) -> list[tuple[dict, int]]:
+    """Every defensible candidate, best first, as (photo, hits).
 
     Scored on provider-described subject coverage; anything below
     :data:`MIN_SUBJECT_HITS` is discarded rather than downgraded, which is what
     makes "no photo" the outcome for a store stock photography cannot honestly
-    illustrate. Among equal-scoring candidates the choice is drawn from the store's
-    own seed, so it is varied across stores and fixed for any one store.
+    illustrate. Ranking is coverage, then how early the product is named, then a
+    draw from the store's own seed — so the choice is varied across stores and
+    fixed for any one store.
+
+    A LIST rather than a single winner because the caller looks at each candidate
+    before keeping it: when the best one turns out to show a competitor's product,
+    the runner-up should get the card, not nothing.
 
     `used` holds already-taken photo ids so one store does not repeat a photograph
     across its hero, its cards and its lifestyle band.
     """
-    ranked: list[tuple[int, int, dict]] = []
+    scored: list[tuple[int, int, float, dict]] = []
     for photo in photos:
         pid = photo.get("id")
         if not isinstance(pid, int) or pid in used:
             continue
         hits = _score(photo, subject_terms, require_head)
         if hits >= MIN_SUBJECT_HITS:
-            ranked.append((hits, _primacy(photo, subject_terms), photo))
-    if not ranked:
-        return None
-    # Coverage first, then how early the product is named — so of two photos that
-    # both contain the product, the one the photo is actually ABOUT wins.
-    best = max((h, p) for h, p, _ in ranked)
-    tied = [photo for h, p, photo in ranked if (h, p) == best]
-    best = best[0]
-    # Deterministic index from the store seed; the provider's own ordering is not
-    # used, so two stores with the same query still differ.
-    chosen = tied[int(rand() * len(tied)) % len(tied)]
-    return chosen, best
+            # The seed draw is folded in as a per-candidate sort key so it breaks
+            # ties exactly as the single-winner version did, while still yielding a
+            # full ordering to walk.
+            scored.append((hits, _primacy(photo, subject_terms), rand(), photo))
+    scored.sort(key=lambda row: (-row[0], -row[1], row[2]))
+    return [(photo, hits) for hits, _, _, photo in scored]
 
 
 def _slot(
@@ -485,7 +599,13 @@ def _slot(
     used: set[int],
     rand: Callable[[], float],
 ) -> StoreImage | None:
-    """Resolve one image slot end to end: search, score, pick, download."""
+    """Resolve one image slot end to end: search, rank, then look at each candidate
+    in turn and keep the first that survives being looked at.
+
+    Walking the ranking rather than taking only the winner is what keeps the page
+    rich: the best-captioned candidate is often the one showing a competitor's
+    product, and rejecting it should hand the card to the runner-up, not empty it.
+    """
     subject_terms = _terms(subject) or _terms(query)
     if not subject_terms:
         return None
@@ -493,22 +613,29 @@ def _slot(
     photos = provider.search(query, orientation)
     # The lifestyle band has no curated subject list — its subject IS its query —
     # so the head-noun requirement does not apply to it.
-    picked = _pick(photos, subject_terms, used, rand, require_head=kind != "lifestyle")
-    if picked is None:
+    ranked = _rank(photos, subject_terms, used, rand, require_head=kind != "lifestyle")
+    if not ranked:
         logger.info("imagery: nothing relevant for %r (subject=%r)", query, subject)
         return None
-    photo, hits = picked
-    image = provider.fetch(photo, _VARIANT[kind])
-    if image is None:
-        return None
-    image.subject_hits = hits
-    used.add(photo["id"])
-    if not image.alt:
-        # Provider descriptions are occasionally empty. The declared subject is a
-        # truthful description of what was asked for, and an empty alt on a
-        # content image is an accessibility defect.
-        image.alt = subject[:MAX_ALT_LEN]
-    return image
+    for photo, hits in ranked[:MAX_VERIFY_PER_SLOT]:
+        blob = provider.fetch_bytes(photo, _VARIANT[kind])
+        if blob is None:
+            continue
+        if not _verify(blob, subject or query):
+            continue
+        image = provider.store(blob, photo, _VARIANT[kind])
+        if image is None:
+            continue
+        image.subject_hits = hits
+        used.add(photo["id"])
+        if not image.alt:
+            # Provider descriptions are occasionally empty. The declared subject is
+            # a truthful description of what was asked for, and an empty alt on a
+            # content image is an accessibility defect.
+            image.alt = subject[:MAX_ALT_LEN]
+        return image
+    logger.info("imagery: no candidate survived inspection for %r", query)
+    return None
 
 
 def resolve(
