@@ -9,7 +9,9 @@ is simultaneously a human web checkout and a machine-payable surface — feeds, 
 card, and x402 pay endpoints — so an autonomous agent can discover and buy from it the same way a
 person can.
 
-- **Live:** https://tilla.gudman.xyz — example store: https://tilla.gudman.xyz/s/invoice-flow/
+- **Live:** https://tilla.gudman.xyz — example store: https://highland-roast.tilla.gudman.xyz
+  (every store also answers at `tilla.gudman.xyz/s/<slug>/`, and a merchant can point their own
+  domain at it — see [`docs/runbooks/custom-domains.md`](docs/runbooks/custom-domains.md))
 - **OKX marketplace:** listed as ASP **#6961** with **six services** — three platform endpoints
   (x402-gated `create-store` 0.05, `upgrade-store` 0.03, `add-product` 0.01) plus three Tilla-built
   storefronts listed as their own buyable services, so every store Tilla makes becomes marketplace supply
@@ -31,6 +33,46 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
 - **Screened content.** Every LLM-generated store and marketing asset passes Warden content screening
   before it goes live, and themes render through an autoescaped loader (a third-party theme can never
   opt out of escaping).
+- **No two stores look alike.** Layout, typography and colour are derived per store, so two merchants
+  describing the same business do not get the same shop — see below.
+- **Every store gets its own address.** `<slug>.tilla.gudman.xyz`, on a wildcard certificate that
+  renews unattended, so a shop reads as the merchant's own rather than a row in someone else's
+  directory. A merchant who wants their real domain can claim one and keep everything else the same.
+
+## Every store is its own design
+
+The usual objection to a generated storefront is that it is one template with the words swapped. It
+was a fair objection here: asked to choose its own styling, the model returned essentially **three
+looks across the entire live catalogue** — `hero` was `stacked` on every editorial and original store
+and `offset` on every bold one, and four of five original stores carried no styling choice at all. A
+model offered a menu returns its modal answer.
+
+So styling is no longer asked for. It is **derived from the store's own slug**, using the same
+FNV-1a + mulberry32 construction the themes already run client-side for their generative texture —
+one slug, one coherent identity. Measured across 4000 slugs: **81 distinct structural looks**, each
+of the ten design personas landing within 9.5–10.6%, and the most common full combination holding
+just 2.5%.
+
+- **Ten curated personas, not five independent rolls.** Every axis value is individually safe, but
+  independence is not taste — `monumental` scale with `tight` rhythm and `dense` texture is valid CSS
+  and a cramped mess. Each persona is a coherent bundle, with two axes seed-jittered inside it so
+  stores sharing a persona still differ.
+- **Four typography pairings**, built from the two variable faces already inlined plus a system serif
+  stack: no new bytes, no extra requests, no licensing. Typography was the loudest remaining tell —
+  900+ layout combinations still read as one brand while they all wore one typeface.
+- **Colour is computed, not collected** ([`app/palette.py`](app/palette.py)). One hue plus a named
+  harmony and mood, with floors enforced before anything is emitted: body text **≥ 7:1**, brand
+  colours **≥ 3:1**, and the accent kept **≥ 22 ΔE** from both the primary and the text. That last one
+  needs a perceptual measure, not a contrast ratio — a red and a green of equal luminance score 1.0
+  and look nothing alike. Verified across **2880 hue/harmony/mood combinations with zero failures**.
+- **The model still contributes what it is good at:** the hue that suits the product (25 for roasted
+  coffee, 210 for a productivity tool, 45 for beeswax). That judgement is genuinely semantic; the
+  structural ones were measurably not.
+
+Nothing here is free CSS. Every value is a server-validated enum or a computed colour, so a merchant's
+copy can never reach a style context. Identity is resolved at **generation** time and persisted, never
+derived at render time — which is why re-rendering an existing store is stable: verified on all 18
+live stores, none drift. Design rationale in [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md).
 
 ## Payment rails (x402)
 
@@ -55,8 +97,9 @@ on-chain tx hash; during an RPC outage the reaper never voids a paid-but-slow or
 ```
 app/
   main.py         FastAPI assembly + middleware wiring
-  engine.py       LLM store generation (prompt → brand/copy/products)
+  engine.py       LLM store generation + slug-seeded design personas
   render.py       Jinja2 autoescaped theme rendering
+  palette.py      colour derived from one hue, with WCAG + perceptual floors
   checkout.py     order state machine + on-chain verification
   chain.py        X Layer RPC (balanceOf, receipts, getLogs)
   payment.py      x402 rail (per-store dynamic accepts)
@@ -101,7 +144,7 @@ Self-trades are labeled as self-trades everywhere; nothing here claims organic e
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 1017 tests
+pytest -q                # 1107 tests
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target
@@ -124,6 +167,7 @@ Migrations: `alembic upgrade head`. The local repo is the source of truth; the V
 | [`docs/PROOF-onchain.md`](docs/PROOF-onchain.md) | On-chain settlement proof log (real tx receipts) |
 | [`docs/specs/tilla-protocol-v1.md`](docs/specs/tilla-protocol-v1.md) | The open feed / agent-card / 402 conventions |
 | [`docs/runbooks/`](docs/runbooks/) | Rail enablement, custom domains, on-chain marketplace ops |
+| [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md) | Why no two stores look alike, and how it is enforced |
 | [`docs/VISION.md`](docs/VISION.md) | Forward "commerce OS" design + what's built (M15–M18) |
 
 ## Security & invariants
