@@ -592,6 +592,33 @@ def test_customers_csv_excludes_non_buyers(make_store):
     assert float(body[buyer][2]) > 0
 
 
+def test_customers_csv_groups_one_wallet_case_insensitively(make_store):
+    """from_addr is stored as it arrived, so the same wallet turns up both
+    checksummed and lowercased. It is one customer, not two — production had a
+    buyer split across two rows with their orders and revenue divided."""
+    acct = Account.create()
+    _owned_store(acct, "custcase", make_store)
+    lower = "0x" + "a" * 40
+    mixed = "0x" + "A" * 40  # same address, different case
+    _seed_sale("custcase", from_addr=lower)
+    _seed_sale("custcase", from_addr=mixed)
+    token = _merchant_token(acct)
+    rows = [
+        row
+        for row in csv.reader(
+            io.StringIO(
+                client.get(
+                    "/api/merchant/export/customers.csv", headers=_auth(token)
+                ).text
+            )
+        )
+        if row
+    ]
+    body = {row[0]: row for row in rows[1:]}
+    assert list(body) == [lower], f"expected one lowercased row, got {list(body)}"
+    assert body[lower][1] == "2"  # both orders attributed to the one buyer
+
+
 def test_export_store_param_must_be_owned(make_store):
     a, b = Account.create(), Account.create()
     _owned_store(a, "exp-a", make_store)

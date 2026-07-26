@@ -1212,9 +1212,16 @@ def _customers_csv_gen(store_ids):
         # paid for reported as their "purchase" date. Same TERMINAL_DELIVERED
         # gate `_store_stats` and `merchant_summary` already use.
         paid_ts = func.coalesce(Order.paid_at, Order.created_at)
+        # Group case-insensitively. from_addr is recorded as it arrived, so the
+        # same wallet appears both checksummed and lowercased across orders — in
+        # production one buyer was split into two "customers" with their order
+        # count and revenue divided between the rows. An EVM address is
+        # case-insensitive, so lowercase is the one true key here (it is also
+        # what the rest of the app stores, e.g. pay_to).
+        buyer = func.lower(Order.from_addr)
         rows = session.execute(
             select(
-                Order.from_addr,
+                buyer,
                 func.count(),
                 func.coalesce(func.sum(Order.paid_micro), 0),
                 func.min(paid_ts),
@@ -1225,7 +1232,7 @@ def _customers_csv_gen(store_ids):
                 Order.from_addr.isnot(None),
                 Order.status.in_(checkout.TERMINAL_DELIVERED),
             )
-            .group_by(Order.from_addr)
+            .group_by(buyer)
             .order_by(func.max(paid_ts).desc())
         ).all()
         for addr, count, paid, first, last in rows:
