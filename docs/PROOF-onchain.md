@@ -274,12 +274,27 @@ agent's service over x402 and uses the answer in its own pipeline.
   - **receipt status 1**, block **66208040**, 1 USDT0 Transfer log:
     **Tilla payer `0x03d1…4ebb` -> Warden `0xf4c9…fa51` = 0.100000**.
   - payer balance moved **16.198832 -> 16.098832 USDT0**, exactly -0.100000.
-- Receipt recorded `mode='paid'` (the prior 14 screenings all ran `mode='demo'`, no tx), verdict
-  **ALLOW**, and the verdict was honored by the caller — a paid answer that actually gated content.
+- **Correction (2026-07-26) — where the hire is recorded, and where it is not.** This entry
+  previously said "Receipt recorded `mode='paid'` (the prior 14 screenings all ran `mode='demo'`,
+  no tx)". That is **wrong**: `screening_receipts` holds **14 rows, all `mode='demo'`, none with a
+  `tx_hash`** — no paid receipt row was ever written. The hire is recorded in `event_log` instead,
+  as `hire.rating` from source `warden_hire` at 2026-07-25 10:57:58, carrying the settle
+  `tx_hash`, `amount_micro: 100000`, `network: eip155:196`, and `actionable_verdict: true`. The
+  0.100000 USDT0 arrival was separately logged by the sweeper as `transfer.unmatched`. The
+  settlement is real and on-chain either way; the storage location was misstated, and
+  `docs/runbooks/M10-onchain.md` step 4 describes a `mode='paid'` row production never produced.
 - The hire was rated locally (`hire.rating`: score **3/5**, latency 7217ms — an actionable verdict
   that took more than half the screen budget). The rating was **withheld from publication**
-  (`independent: false`): Warden #3808 and Tilla #6961 report the same ownerAddress, so publishing
-  a star rating would be one owner reviewing themselves. The guard refused on its first real hire.
+  (`independent: false`).
+- **Correction (2026-07-26) — why it was withheld.** This entry previously said the guard compared
+  the two ownerAddresses, found them equal, and declined. The recorded reason is different and
+  worth stating precisely: `withheld_reason: "cannot verify independent ownership (self=None,
+  target=None)"` — the guard could not resolve **either** owner address, and refused to publish
+  rather than assume independence. It **fails closed on unknown**, which is a stronger property
+  than catching a known match, but it is not what the doc claimed. Separately and independently
+  true: the marketplace does report the same `ownerAddress` (`0xf4c9…fa51`) for both agents, so a
+  published rating really would have been one owner rating themselves — the guard just did not
+  arrive at its refusal by that route.
 - **Same-operator disclosure:** Warden is also operator-owned, so this is a real x402 settlement
   between two agents under one owner — a proof of the *mechanism*, not of third-party demand.
   Recorded here exactly as loudly as the settlement itself.
@@ -306,11 +321,13 @@ disputed escrow job remains partially proven and is never cited otherwise. Every
 self-funded — Tilla's own wallets on both sides in most entries — and none of it is organic
 third-party demand.
 
-**Full re-verification 2026-07-26:** every transaction hash in this document was re-read from X
-Layer via `eth_getTransactionReceipt` — **15 of 15 returned `status 0x1`** at exactly the block
-recorded here (the 14 rail/attestation txs plus the #10 deposit). The four EAS attestation txs carry
-zero token transfers, as expected for attestations. Both test-wallet balances below were re-read the
-same day and still match.
+**Full re-verification 2026-07-26:** the fifteen transaction hashes that this document carried at the
+start of that day were each re-read from X Layer via `eth_getTransactionReceipt` — **15 of 15
+returned `status 0x1`** at exactly the block recorded here (the 14 rail/attestation txs plus the #10
+deposit). The four EAS attestation txs carry zero token transfers, as expected for attestations. The
+two #10 close txs added later the same day (§10) were verified the same way when they were found, so
+every hash in the document has now been receipt-checked. Both test-wallet balances below were re-read
+on 2026-07-25, at the chain head stated with them, and still match.
 
 **Entry #10 was reopened the same day and upgraded to proven.** Its two close transactions had never
 been recorded, and OKX's settlement-agent API — the only source both earlier versions of the entry

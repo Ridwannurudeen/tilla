@@ -1,5 +1,17 @@
 # Tilla — Full Building Plan & Roadmap
 
+> ## ⚠️ HISTORICAL — SUPERSEDED (banner added 2026-07-26)
+> Written 2026-07-22 and **not maintained since**. Almost every status marking in it is now wrong:
+> the create-store fee reads 1 USDT (it is **0.05**), subscriptions / MPP / `aggr_deferred` / EAS /
+> paid-Warden-hire / ACP are listed `[dormant]` (**all six are enabled and proven on-chain**), and
+> escrow, wholesale tiers, cross-chain, plugins, federation, the growth agent, reviews, the TS SDK
+> and custom domains are listed `[designed]` (**all built**). The migration head and test count are
+> stale too.
+>
+> **Current sources of truth:** `docs/ROADMAP.md` (the map), `docs/BUILD.md` (committed scope),
+> `docs/PROOF-onchain.md` (what actually settled), `docs/VISION.md` (M15–M18 built state).
+> Kept for history only.
+
 *The complete path from today's verified state to the vision: **a commerce operating system for the agent economy** — the one-sentence way to create a storefront that agents can find and pay automatically, spanning humans and agents, non-custodial, on-chain-provable.*
 
 *Anchored on the code-verified state as of 2026‑07‑22 (not the aspirational vision doc). Every phase marks status — **[live]** / **[dormant]** (built, flag-off) / **[designed]** (not built) / **[research]** (new, from the Virtuals/ACP teardown) — plus effort (S/M/L), primary files, and gating (buildable-now vs needs-funding/creds vs needs-hardening). Nothing here requires pivoting to or merging with Virtuals; the research is used only to make **our** stores easier for agents to find and pay.*

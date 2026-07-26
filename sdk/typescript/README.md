@@ -123,7 +123,8 @@ console.log(created.slug, created.url, created.manageKey, created.settleTx);
    `maxAmountMicro` — **before** the signer is ever called. Any mismatch throws
    `PaymentRefused` and no signature is produced.
    - `buy` cannot pin `payTo` statically (it is the per-store merchant wallet, and
-     feeds deliberately never leak it). The guards are the mandatory cap + the
+     the feed does publish it, so
+     pin it per-store from the feed if you want a static pin). The guards are the mandatory cap + the
      asset/network/scheme pins + surfacing the full challenge (incl. `payTo`) to your
      signer so your policy can veto.
 2. **Sign at most once.** Exactly one authorization is produced and sent.

@@ -2,7 +2,11 @@
 
 > **STATUS: DRAFT ONLY.** Nothing in this file has been posted or submitted anywhere.
 > The owner must review, edit as needed, and personally post the X thread and
-> submit the form before the deadline (**2026-07-27 23:59 UTC**).
+> submit the form before the deadline. **Treat the cutoff as 2026-07-27 22:59 UTC.** The HackQuest
+> page is self-contradictory — it displays "Jul 27th, 23:59 UTC" as the form closing time, but states
+> the submission period as "Jul 2,2026 11:00 - Jul 27,2026 22:59", and the page JSON's
+> `submissionClose` also reads 22:59 (re-checked 2026-07-26; see ROADMAP §1.1). Submit by 22:59 and
+> the ambiguity costs nothing; submit at 23:30 and it may cost everything.
 > All facts below are restricted to what is verified live/real as of 2026-07-25 — no invented features, no fabricated metrics.
 > Every URL, status code and price in this file was re-probed against production on 2026-07-25 06:2x UTC.
 
@@ -82,12 +86,26 @@
 **Post 5d (the boring part that matters)**
 > Tilla rates the agents it hires — and it refused to publish this one.
 >
-> The scan agent shares Tilla's owner wallet, so a 5-star review would be us rating
-> ourselves. The code checks the owner and declines. No override flag.
+> It couldn't confirm the two agents had independent owners, so it withheld the rating rather
+> than assume. Fails closed on unknown. No override flag.
+>
+> (It was right to: they do share an owner.)
 >
 > Reputation you can't verify is worth nothing. We'd rather ship the guard than the star.
 
+*Accuracy note for the owner — do not post this line.* An earlier draft said "the code checks the
+owner and declines," which is **not** what production recorded. The logged reason is `cannot verify
+independent ownership (self=None, target=None)` — the guard could not resolve **either** owner
+address and refused on that basis. That is a stronger property than catching a known match, so the
+post above claims the fail-closed behaviour, which is what actually happened. The shared-owner fact
+is separately true from the marketplace (both report `0xf4c9…fa51`) and is kept as a parenthetical.
+See `docs/PROOF-onchain.md` §11.
+
 **Post 6 (the vision)**
+*Source for the figures, if a judge asks — McKinsey projects agentic commerce at up to **$1T in
+orchestrated US retail revenue by 2030** (~30% of projected B2C revenue across all retail
+categories) and **$3–5T globally**. Re-checked 2026-07-26. The post's phrasing matches this; don't
+inflate it.*
 > Agentic commerce is projected at $1T in the US alone by 2030 (McKinsey estimates $3-5T global). Most of that value needs a storefront layer that speaks both human and agent.
 >
 > Tilla is that layer — the commerce OS for the one-person company, built on @OKX rails.

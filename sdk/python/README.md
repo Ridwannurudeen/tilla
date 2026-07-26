@@ -100,7 +100,8 @@ with TillaClient() as client:
    `max_amount_micro` — **before** the signer is ever called. Any mismatch raises
    `PaymentRefused` and no signature is produced.
    - `buy` cannot pin `pay_to` statically (it is the per-store merchant wallet, and
-     feeds deliberately never leak it). The guards are the mandatory cap + the
+     the feed does publish it, so
+     pin it per-store from the feed if you want a static pin). The guards are the mandatory cap + the
      asset/network/scheme pins + surfacing the full challenge (incl. `pay_to`) to
      your signer so your policy can veto.
 2. **Sign at most once.** Exactly one authorization is produced and sent.

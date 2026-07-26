@@ -1,5 +1,18 @@
 # Tilla — Demo Video Script (≤90s)
-OKX.AI Genesis Hackathon · deadline Jul 27, 2026
+
+> ## ⚠️ HISTORICAL — SUPERSEDED. Do not record from this file.
+> **Record from [`DEMO-VIDEO.md`](DEMO-VIDEO.md) instead** (retired 2026-07-26).
+>
+> This was the first pass at the submission video. It is stale in ways that would produce a weaker
+> video: it shows only the single "Create Storefront" service at #6961 rather than the six now
+> listed, and it has **neither** of the two beats that carry the submission — the six-services
+> marketplace shot and the "Tilla *buys*" shot, where Tilla hires and pays another agent. `DEMO-VIDEO.md`
+> names those two as the ones judges have not seen from anyone else, and says never to cut them.
+>
+> `DEMO-VIDEO.md` also has every surface re-probed against production on 2026-07-26, the correct
+> post-close MPP language, and the corrected 22:59 UTC deadline. Kept here for history only.
+
+OKX.AI Genesis Hackathon · deadline Jul 27, 2026 (see `DEMO-VIDEO.md` — treat the cutoff as **22:59 UTC**)
 
 **Video title:** Tilla — One Sentence Becomes a Live Crypto Store
 

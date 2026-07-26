@@ -57,7 +57,7 @@ Run `validate-listing` on every drafted service JSON until CLEAN.
 One review cycle, one ID reshuffle:
 
 ```
-onchainos agent update --agent-id 6961 --service '[{"operation":"create","serviceName":"Upgrade a storefront","serviceDescription":"Refresh an existing Tilla store: new copy and look for a store you own, applied only after a safety screen passes.","serviceType":"A2MCP","fee":"1","endpoint":"https://tilla.gudman.xyz/upgrade-store"},{"operation":"create","serviceName":"Add a product to a storefront","serviceDescription":"Add another product with its own price to a Tilla store you own.","serviceType":"A2MCP","fee":"0.5","endpoint":"https://tilla.gudman.xyz/add-product"}]'
+onchainos agent update --agent-id 6961 --service '[{"operation":"create","serviceName":"Upgrade a storefront","serviceDescription":"Refresh an existing Tilla store: new copy and look for a store you own, applied only after a safety screen passes.","serviceType":"A2MCP","fee":"0.03","endpoint":"https://tilla.gudman.xyz/upgrade-store"},{"operation":"create","serviceName":"Add a product to a storefront","serviceDescription":"Add another product with its own price to a Tilla store you own.","serviceType":"A2MCP","fee":"0.01","endpoint":"https://tilla.gudman.xyz/add-product"}]'
 ```
 
 If the CLI reports re-submission needed:
@@ -212,8 +212,11 @@ USDT/scan). One-clean-tx rule: never re-fire to verify.
    (Optional overrides if defaults are wrong: `TILLA_WARDEN_SCAN_URL`,
    `TILLA_WARDEN_PAYTO`, `TILLA_WARDEN_MAX_MICRO`.)
 3. `systemctl restart tilla-api` (allow ~10s to bind).
-4. Create ONE test store, then verify **exactly one** 0.01 USDT settle tx in
+4. Create ONE test store, then verify **exactly one 0.1 USDT0 settle tx** in
    `screening_receipts` (a `mode='paid'` row with a `tx_hash`) and on OKLink.
+   *(Price corrected 2026-07-26: this step said 0.01 USDT. The proven paid hire settled **0.1
+   USDT0** — PROOF §11, block 66208040. An operator following the old figure would look for the
+   wrong amount and conclude the hire failed.)*
 
 Funds-safety already built into the client (`app/warden_hire.py`): it refuses to
 sign unless the 402 challenge's scheme/asset/network/payTo match the pins and the

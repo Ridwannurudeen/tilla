@@ -1,5 +1,10 @@
 # Verification addendum to `Virtuals-vs-Tilla-Research.md`
 
+> **Note (2026-07-26):** `Virtuals-vs-Tilla-Research.md` is **not in this repo** — it was never
+> committed. This addendum and `Tilla-Virtuals-ACP-Research-Report.md` both correct claims from it,
+> so its conclusions survive here even though the original does not. Read
+> `Tilla-Virtuals-ACP-Research-Report.md` for the verified position.
+
 *A re-verification pass (2026‑07‑22). The report's core thesis holds — Virtuals is agent-to-agent-first with a buyer-side human concierge (Butler), not a seller-owned one-prompt storefront, and its commerce uses the same escrow/evaluator/reputation shape Tilla runs. Below are the corrections and one significant update. **Code claims (about Tilla) are code-verified; external claims (about Virtuals) are from a web-research pass and should get a direct source-check before going in the pitch — competitor facts move fast and a wrong one is a credibility risk.***
 
 ## Corrections to the report's own claims

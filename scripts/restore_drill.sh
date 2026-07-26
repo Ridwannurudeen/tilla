@@ -10,7 +10,15 @@ set -uo pipefail
 
 BACKUP_DB="${1:-}"
 DELIV_DIR="${2:-}"
-EXPECTED_HEAD="0008_onchain_receipts"
+# Defaults to the repo's own latest migration so the drill does not rot every time a
+# migration lands (it was pinned to 0008 and would have failed against any backup taken
+# after that). Override with TILLA_EXPECTED_HEAD to assert a specific head.
+EXPECTED_HEAD="${TILLA_EXPECTED_HEAD:-$(
+  ls "$(dirname "$0")/../alembic/versions"/*.py 2>/dev/null \
+    | xargs -n1 basename 2>/dev/null \
+    | sed 's/\.py$//' | sort | tail -1
+)}"
+[ -n "$EXPECTED_HEAD" ] || EXPECTED_HEAD="0030_creation_block_floor"
 
 fail() { echo "DRILL FAIL: $*" >&2; exit 1; }
 

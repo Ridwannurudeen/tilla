@@ -18,11 +18,20 @@ between this spec and reality is a failing test, not a stale doc.
 - **INV-A — non-custodial.** Every `pay_to` in a 402 challenge is the merchant
   wallet; Tilla never custodies funds and never proxies, quotes, or settles a
   peer's sale. Funds move only at settle, only between buyer and merchant.
-- **INV-B — no wallet / terms leak.** No public surface (feed, llms.txt,
-  discovery, agent card) exposes a merchant `pay_to`, a wholesale tier table,
-  buyer identities, or order data. The tier table surfaces only as an opt-in
-  `wholesale: true` boolean; a per-buyer price is disclosed only via a
-  per-request `/quote` (or MCP `get_product` with an `agent_id`).
+- **INV-B — no terms / identity leak.** No public surface (feed, llms.txt,
+  discovery, agent card) exposes a wholesale tier table, buyer identities, or
+  order data. The tier table surfaces only as an opt-in `wholesale: true`
+  boolean; a per-buyer price is disclosed only via a per-request `/quote` (or
+  MCP `get_product` with an `agent_id`).
+  *(Corrected 2026-07-26: this invariant previously also claimed no public
+  surface exposes a merchant `pay_to`. That was never true and was never meant
+  to be — `requiredFunds.pay_to` is **required** by this spec's own pinned
+  schema `docs/openapi.feed.yaml` and by `schemas/mcp-get-product.yaml`, and
+  `app/agentic.py::_required_funds` publishes it on every feed product. It is
+  published deliberately: `pay_to` is the merchant's own receiving address, and
+  an agent cannot pay without it. Publishing it is what makes the rail
+  non-custodial and verifiable, not a leak. What INV-B actually protects is
+  per-buyer pricing and identity.)*
 - **INV-C — INV-1 (tier integrity).** A wholesale discount is granted at
   settle-record time ONLY if the settled payer wallet equals the on-chain owner
   of the presented ERC-8004 agent id. Any unverifiable / mismatched claim, RPC
@@ -102,7 +111,9 @@ validates against the pinned schema for that surface (see the registry table).
 3. `curl -s "$BASE/s/$SLUG/quote?agent_id=$AID"` → validates `quote.yaml`;
    returns `base_price_micro`; tier fields present only for a verifiable owner.
 4. `curl -s $BASE/s/$SLUG/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`
-   → `result` validates `mcp-tools-list.yaml` (the four tools).
+   → `result` validates `mcp-tools-list.yaml` (**five** tools — corrected
+   2026-07-26; this said "the four tools", but the pinned schema and
+   `app/agentic.py` have long served five, the fifth being `preview_order`).
 5. `curl -s $BASE/s/$SLUG/mcp -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
    "params":{"name":"get_product","arguments":{"product_id":$PID}}}'` →
    `result.structuredContent` validates `mcp-get-product.yaml`; no tier table

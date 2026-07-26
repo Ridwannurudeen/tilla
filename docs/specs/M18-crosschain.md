@@ -1,6 +1,6 @@
 # M18 — Cross-chain checkout (VISION §2 → buildable spec)
 
-**Status: SPEC.** Derived from `docs/VISION.md` §2. **Verified against code
+**Status: BUILT AND SHIPPED** *(updated 2026-07-26 — this header said "SPEC"; the module has since been built, tested and deployed. See `docs/VISION.md` for the built state. The migration numbers quoted below are frozen at authoring time and are NOT current — the deployed head is `0030_creation_block_floor`.)* Originally derived from `docs/VISION.md` §2. **Verified against code
 2026-07-21:** what the facilitator supports today, per `app/payment.py` +
 `docs/spikes.md`, is exactly **`exact` (+ flag-gated `aggr_deferred`) on
 `eip155:196` with USDT0 `0x779d…3736`** — a single hard-pinned rail.

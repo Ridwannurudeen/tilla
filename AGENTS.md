@@ -2,7 +2,7 @@
 
 **You are authorized to build the ENTIRE Tilla roadmap in one continuous effort, without pausing for per-item approval — provided you obey every rule below.** Build in the specified order, pass the Quality Gate on every commit, parallelize freely *within* a phase, and stop only at the PREPARE-ONLY boundary. Drop this file at the repo root as `AGENTS.md` so it loads automatically.
 
-Authoritative plan: **`docs/Tilla-Building-Plan-Roadmap.md`** (the what / why / order / files / effort). Companion truth: `docs/Tilla-Full-Vision-VERIFIED.md` (real current state), `docs/Tilla-Virtuals-ACP-Research-Report.md` (adopt-list + file mappings + sources), plus the repo's `docs/VISION.md`, `docs/BUILD.md`, `docs/PROOF-onchain.md`.
+Authoritative plan: **`docs/ROADMAP.md`** + **`docs/BUILD.md`** *(corrected 2026-07-26 — this pointed at `docs/Tilla-Building-Plan-Roadmap.md`, which is now HISTORICAL/SUPERSEDED and wrong in almost every status marking)*. Historical plan: `docs/Tilla-Building-Plan-Roadmap.md` (the what / why / order / files / effort). Companion truth: `docs/Tilla-Full-Vision-VERIFIED.md` (real current state), `docs/Tilla-Virtuals-ACP-Research-Report.md` (adopt-list + file mappings + sources), plus the repo's `docs/VISION.md`, `docs/BUILD.md`, `docs/PROOF-onchain.md`.
 
 ---
 
@@ -14,6 +14,11 @@ Authoritative plan: **`docs/Tilla-Building-Plan-Roadmap.md`** (the what / why / 
 - The **code** of Phase 3 (escrow/custom-build state machine behind a phase-gated custodial flag, wholesale price tiers, reviews, offering envelope), Phase 4 (offering-envelope generalization, soul.md-style plain-language editing, Butler-style buy-flow polish, external-surface export shapes, link-in-bio), and Phase 5 (assemble the versioned public spec, plugin provider interfaces, autonomous-growth draft→approve→publish queue, TypeScript SDK).
 
 **PREPARE ONLY — write the code + tests, leave it flag-OFF and documented; DO NOT execute:**
+> *(Updated 2026-07-26: the rail list below is now HISTORICAL. Subscriptions, MPP, `aggr_deferred`,
+> EAS, the paid Warden hire and ACP-checkout have **all** since been enabled by the human and
+> proven on-chain — see `docs/PROOF-onchain.md`. The standing rule is unchanged and still binds:
+> an agent does not flip a production flag or spend real funds; the human does. It simply no
+> longer describes these six rails as pending.)*
 - Enabling any dormant rail (subscriptions, MPP, aggr_deferred, EAS, paid Warden, ACP-checkout) — you may harden and test them, but the flag is flipped only by the human in the VPS `.env` after a real settlement.
 - Anything needing live OKX/facilitator/Warden credentials or a funded wallet.
 - Registering Tilla as a Virtuals ACP provider (needs a Base wallet + signer + human registration).
@@ -41,7 +46,7 @@ Authoritative plan: **`docs/Tilla-Building-Plan-Roadmap.md`** (the what / why / 
 
 ## 3. Quality Gate — must pass before EVERY commit
 
-- **`python -m pytest -q` green.** Currently ~661 tests. Keep it green. Add tests for every new capability. For a bug fix: write the failing test first, then make it pass. (Suite takes ~2 min — allow for it.)
+- **`python -m pytest -q` green.** Currently 1017 tests. Keep it green. Add tests for every new capability. For a bug fix: write the failing test first, then make it pass. (Suite takes ~2 min — allow for it.)
 - **`ruff check .` clean AND `ruff format --check .` clean**, using the **pinned `ruff==0.15.22`** (CI installs it via `pip install -e ".[dev]"`; other ruff versions format differently and will red the CI). Same for `sdk/python`. If you formatted with a different local version, re-verify what CI sees: `git show HEAD:<file> | python -m ruff format --check -`.
 - **Any inline `<script>` you touch:** extract it and run `node --check`.
 - **Any theme/checkout/dashboard change:** render it (`app.render.render(content, addr, slug, theme)` for stores, `render.render_shell("_dashboard.html")` for the dashboard), then confirm the rendered output has **0** `innerHTML` for merchant data and **0** occurrences of "49".

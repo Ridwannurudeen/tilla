@@ -11,12 +11,12 @@ Deploy is per-file via `scripts/deploy.sh` (never a directory clobber). `tilla.d
 | Endpoint | Meaning | Cost | Used by |
 |---|---|---|---|
 | `GET /health` | pure liveness — no DB, no network, byte-identical to pre-M12 | trivial | deploy smoke, watchdog liveness probe |
-| `GET /ready` | readiness — DB `SELECT 1`, migration head == `0008_onchain_receipts`, sweeper + RPC heartbeats fresh | one sqlite `SELECT` + in-memory reads, **no network call** | watchdog (every ~60s) |
+| `GET /ready` | readiness — DB `SELECT 1`, migration head == `0030_creation_block_floor`, sweeper + RPC heartbeats fresh | one sqlite `SELECT` + in-memory reads, **no network call** | watchdog (every ~60s) |
 
 `/ready` is unauthenticated, unthrottled, and **never raises** — always JSON, `200` when ready else `503` naming the failing component:
 
 ```json
-{"ready": true, "checks": {"db":"ok","migrations":"0008_onchain_receipts","sweeper":"ok","rpc":"ok"}}
+{"ready": true, "checks": {"db":"ok","migrations":"0030_creation_block_floor","sweeper":"ok","rpc":"ok"}}
 ```
 
 - `sweeper`/`rpc` report `disabled` when `TILLA_SWEEP_ENABLED=0` (dev/tests). In prod they read heartbeats the sweeper stamps each tick: `sweeper` stale after `READY_SWEEP_STALE_SEC` (default 180s), `rpc` after `READY_RPC_STALE_SEC` (default 300s). No per-probe RPC call — an RPC outage surfaces via the sweeper's piggybacked head read, so the once-a-minute watchdog never burns `eth_blockNumber` quota.
@@ -86,7 +86,9 @@ Rollback: `rm -r /etc/systemd/system/tilla-api.service.d && systemctl daemon-rel
 
 Same-disk **keep-7** is the operating default.
 
-- `scripts/backup_db.sh` (cron `15 4 * * *` → `/var/log/tilla-backup.log`): WAL-safe `.backup` + `PRAGMA integrity_check` + keep-7, then `rsync -a` of `deliverables/` into `backups/deliverables/` (accumulating mirror, **no `--delete`** — deliverables are sha256-named + immutable, so a deleted file lingering in backup is acceptable). On any error a Telegram alert fires (`trap ERR`).
+- `scripts/backup_db.sh` (cron `15 4 * * *` → `/opt/tilla/backups/backup.log` — path corrected
+  2026-07-26; this doc said `/var/log/tilla-backup.log`, which does not exist. Note
+  `/etc/logrotate.d/tilla` still rotates the non-existent path, so the real log is unrotated): WAL-safe `.backup` + `PRAGMA integrity_check` + keep-7, then `rsync -a` of `deliverables/` into `backups/deliverables/` (accumulating mirror, **no `--delete`** — deliverables are sha256-named + immutable, so a deleted file lingering in backup is acceptable). On any error a Telegram alert fires (`trap ERR`).
 - **`stores/` is NOT backed up** — `index.html`/`store.json` are regenerated from the DB by `rerender_stores()` on every restart, so they are derived, not source.
 - The API logs to **journald** (no file, no rotation). journald's default 10%-of-disk cap applies box-wide (shared config not touched). Manual trim if ever needed: `journalctl --vacuum-time=30d`.
 
@@ -115,7 +117,7 @@ Unset → logs `offsite not configured` and exits 0 (safe no-op). Set → `rsync
 ## 8. Restore runbook + drill
 
 ### Restore drill (read-only, safe anytime)
-`scripts/restore_drill.sh <backup.db> [deliverables-dir]` restores into a **mktemp dir (never `/opt/tilla` live paths)**, runs `PRAGMA integrity_check`, asserts the migration head is `0008_onchain_receipts`, prints stores/orders/deliverables counts, and re-hashes up to 20 deliverables against their DB `file_sha256`. PASS/FAIL exit code.
+`scripts/restore_drill.sh <backup.db> [deliverables-dir]` restores into a **mktemp dir (never `/opt/tilla` live paths)**, runs `PRAGMA integrity_check`, asserts the migration head is `0030_creation_block_floor`, prints stores/orders/deliverables counts, and re-hashes up to 20 deliverables against their DB `file_sha256`. PASS/FAIL exit code.
 ```bash
 /opt/tilla/scripts/restore_drill.sh /opt/tilla/backups/tilla-$(date +%F).db /opt/tilla/backups/deliverables
 ```
@@ -125,7 +127,7 @@ Unset → logs `offsite not configured` and exits 0 (safe no-op). Set → `rsync
 systemctl stop tilla-api
 cp /opt/tilla/backups/tilla-<date>.db /opt/tilla/tilla.db     # restore DB
 rsync -a /opt/tilla/backups/deliverables/ /opt/tilla/deliverables/   # restore files
-cd /opt/tilla && .venv/bin/alembic current                    # confirm head == 0008_onchain_receipts
+cd /opt/tilla && .venv/bin/alembic current                    # confirm head == 0030_creation_block_floor
 systemctl start tilla-api
 # stores/ rebuilds itself: rerender_stores() runs at startup from the DB
 curl -fsS https://tilla.gudman.xyz/health && curl -fsS https://tilla.gudman.xyz/ready

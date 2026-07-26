@@ -1,6 +1,6 @@
 # M15 — Plugin / extension ecosystem (VISION §1 → buildable spec)
 
-**Status: SPEC.** Derived from `docs/VISION.md` §1. Format and discipline follow
+**Status: BUILT AND SHIPPED** *(updated 2026-07-26 — this header said "SPEC"; the module has since been built, tested and deployed. See `docs/VISION.md` for the built state. The migration numbers quoted below are frozen at authoring time and are NOT current — the deployed head is `0030_creation_block_floor`.)* Originally derived from `docs/VISION.md` §1. Format and discipline follow
 `docs/BUILD.md` M0–M14: smallest real slice first, binary acceptance, named tests,
 honest parking. **Nothing here changes live behavior until its increment ships.**
 

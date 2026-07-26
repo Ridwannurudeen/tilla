@@ -44,7 +44,10 @@ Domain: `{ name: "A2APaySubscription", version: "1", chainId, verifyingContract:
 
 This sidecar now lives in the Tilla repo at `sidecar/` and is fronted by the
 FastAPI proxy `app/subscriptions.py` (`POST /s/{slug}/subscribe`) and run by the
-systemd unit `deploy/tilla-sidecar.service` (127.0.0.1:8790, never nginx-exposed).
+systemd unit `deploy/tilla-sidecar.service` (port 8790, never nginx-exposed). **Correction
+2026-07-26:** this said `127.0.0.1:8790`, but `server.js` calls `app.listen(PORT)` with no host, so it
+binds **all** interfaces. It is unreachable externally only because ufw blocks the port — a firewall
+rule, not a bind. Pass a host to `app.listen` if you want the bind itself to be the guarantee.
 It is **deployed dormant**: the proxy 503s until `TILLA_SUBSCRIPTIONS_ENABLED=1`,
 and the sidecar's two creds-gated routes below hard-refuse (503) until OKX creds
 are present. A real subscribe/charge additionally needs a **USER-funded Permit2
@@ -52,7 +55,8 @@ buyer**; until a real settle tx is logged, no subscription claim is made anywher
 
 ## Prototype routes
 
-`server.js` exposes four routes. The `challenge`/`verify` pair NEVER calls the
+`server.js` exposes **nine** routes (corrected 2026-07-26 — this said four): challenge, verify,
+`/health`, `/health/creds`, settle, prepare, encode, cancel-prepare, cancel. The `challenge`/`verify` pair NEVER calls the
 facilitator; `health/creds` and `subscriptions/settle` contact it ONLY when OKX
 creds are present in the env, and 503 otherwise.
 

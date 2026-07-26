@@ -47,8 +47,11 @@ automated by an agent**; the `[verify]`/`[probe]` steps are read-only.
    first sweeper tick — expected).
 4. `[verify]` `curl -s https://tilla.gudman.xyz/ready` → `200` (DB + migration head + sweeper/RPC fresh).
    The migration-head check is **dynamic** — `db.expected_migration_head()` reads the alembic scripts and
-   compares to the DB's applied head — so it auto-matches the deployed head (`0027_commission_jobs`) once
-   you migrate. (`OPS.md`'s `0008_onchain_receipts` is a stale example, not a hardcoded value.)
+   compares to the DB's applied head — so it auto-matches the deployed head (`0030_creation_block_floor` as of 2026-07-26) once
+   you migrate. (`OPS.md` quotes a specific head only as an example of the shape, not as a hardcoded
+   value — it was refreshed to `0030_creation_block_floor` on 2026-07-26. `scripts/restore_drill.sh`
+   used to hardcode `0008_onchain_receipts` and would have failed against any newer backup; it now
+   derives the expected head from `alembic/versions/`, overridable via `TILLA_EXPECTED_HEAD`.)
 5. `[FUNDS]` One real arm's-length settlement over the rail — **exactly one send**, verified with a read
    call (`GET /api/checkout/<id>` + an independent `eth_getTransactionReceipt`), never a re-send to "check".
 6. `[record]` Append the tx to `docs/PROOF-onchain.md` in the existing format (labeled arm's-length).

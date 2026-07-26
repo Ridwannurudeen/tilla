@@ -1,6 +1,6 @@
 # M17 — Autonomous full growth agent (VISION §4 → buildable spec)
 
-**Status: SPEC.** Derived from `docs/VISION.md` §4. The seed IS built and live:
+**Status: BUILT AND SHIPPED** *(updated 2026-07-26 — this header said "SPEC"; the module has since been built, tested and deployed. See `docs/VISION.md` for the built state. The migration numbers quoted below are frozen at authoring time and are NOT current — the deployed head is `0030_creation_block_floor`.)* Originally derived from `docs/VISION.md` §4. The seed IS built and live:
 `app/growth.py` — merchant-gated `POST`/`GET /api/stores/{slug}/growth-kit`,
 prompt built EXCLUSIVELY from persisted screened `store.content`, strict
 `GrowthKit` schema (`extra="forbid"`, 280/78 caps), re-screened fail-closed

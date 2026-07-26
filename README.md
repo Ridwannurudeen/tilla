@@ -10,15 +10,21 @@ card, and x402 pay endpoints — so an autonomous agent can discover and buy fro
 person can.
 
 - **Live:** https://tilla.gudman.xyz — example store: https://tilla.gudman.xyz/s/invoice-flow/
-- **OKX marketplace:** listed as ASP **#6961** (x402-gated `create-store`, `upgrade-store`, `add-product`)
+- **OKX marketplace:** listed as ASP **#6961** with **six services** — three platform endpoints
+  (x402-gated `create-store` 0.05, `upgrade-store` 0.03, `add-product` 0.01) plus three Tilla-built
+  storefronts listed as their own buyable services, so every store Tilla makes becomes marketplace supply
 - **Settlement:** X Layer mainnet (chainId 196), USDT0 `0x779ded0c9e1022225f8e0630b35a9b54be713736`
 
 ## Why it's different
 
 Most storefront builders sell to people. Tilla sells to **people and agents** from one build:
 
-- **Non-custodial by design.** Funds settle buyer → merchant directly on-chain. Tilla never holds funds;
-  there is no fund-moving code except transactions the buyer signs themselves.
+- **Non-custodial by design.** Funds settle buyer → merchant directly on-chain. Tilla never holds,
+  custodies, or moves merchant or buyer money — every transfer of *their* funds is signed by them.
+  Stated precisely, because it is greppable: Tilla does hold two of its own keys behind feature
+  flags, and both spend only Tilla's own balance — the EAS attester broadcasts receipt attestations
+  (`app/attest.py`, costs Tilla gas) and the Warden hire signs Tilla's own x402 payments when it buys
+  a screening (`app/warden_hire.py`). Neither can touch a merchant's or buyer's funds.
 - **Dual-sided commerce.** A human uses wallet-connect checkout; an agent pays the same store over
   **x402** (EIP-3009 authorization) with no UI. Discovery is machine-native: `feed.json`, per-store MCP
   tools, an agent card, and a `/discovery` mirror.
@@ -28,10 +34,11 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
 
 ## Payment rails (x402)
 
-All four x402 schemes are built and tested. Three have settled on-chain — `exact` (including the
-agent buy and create-store flows), `aggr_deferred` and `period`; the metered channel is open and
-funded on-chain but has not settled. Every claim below has a re-verified receipt in
-[`docs/PROOF-onchain.md`](docs/PROOF-onchain.md):
+All four x402 schemes are built, tested, and **settled on-chain** — `exact` (including the agent buy
+and create-store flows), `aggr_deferred` (two orders netted into one settle tx), `period`
+subscriptions (two periods settled by the OKX subscription contract), and the MPP metered channel
+through its full lifecycle including the on-chain close. Every claim below has a re-verified receipt
+in [`docs/PROOF-onchain.md`](docs/PROOF-onchain.md):
 
 | Rail | What it is | Status |
 |---|---|---|
@@ -81,8 +88,9 @@ each a single clean transaction — full receipts in [`docs/PROOF-onchain.md`](d
 
 - **Human wallet checkout** — exact-amount sweeper match flips the order to paid and releases delivery.
 - **Agent x402 store buy** — one EIP-3009 authorization, facilitator settles, order delivered.
-- **Stranger create-store** — an agent pays Tilla's create-store fee (0.05 USDT0) and gets a live store back
-  (Tilla earns as an ASP).
+- **Stranger create-store** — an agent pays Tilla's create-store fee and gets a live store back, so
+  Tilla earns as an ASP. That settle was 1 USDT0, the fee at the time; the fee is 0.05 USDT0 today,
+  and a human paying the current 0.05 is a separate, later proof.
 - **aggr_deferred** — the facilitator relayer settles batched orders on-chain; Tilla's reconciler
   detects the transfer and finalizes the orders (settling → delivered) from on-chain evidence.
 
@@ -93,7 +101,7 @@ Self-trades are labeled as self-trades everywhere; nothing here claims organic e
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 943 tests
+pytest -q                # 1017 tests
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target
@@ -120,7 +128,9 @@ Migrations: `alembic upgrade head`. The local repo is the source of truth; the V
 
 ## Security & invariants
 
-- Non-custodial: `pay_to` is always the merchant; the only on-chain writes are user-signed.
+- Non-custodial: `pay_to` is always the merchant; every write that moves a merchant's or buyer's
+  funds is user-signed. The two server-signed paths (EAS attester, Warden hire) spend only Tilla's
+  own balance and are flag-gated.
 - Secrets never in the repo (`.env` lives on the VPS, chmod 600); test fixtures use fake creds.
 - Autoescape is mandated in the theme loader, not the theme.
 - Every settlement transition is idempotent and requires a confirmed on-chain tx hash.

@@ -169,3 +169,6 @@ Optional beats, in the order I'd add them back:
    Post 1 of the X thread, and the "Demo video link" row of the form table.
 3. Post the X thread, then paste the thread URL into the form's "X post link" row.
 4. Submit the form — **owner only**, and only once you've reviewed both drafts.
+
+**Deadline: treat it as 2026-07-27 22:59 UTC**, not 23:59. The HackQuest page shows both times in
+different places (see the note at the top of `docs/SUBMISSION.md`); the earlier one is the safe read.
