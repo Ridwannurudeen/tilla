@@ -55,14 +55,12 @@
 > Example store: https://tilla.gudman.xyz/s/invoice-flow/
 
 **Post 5b (the rails aren't a diagram — they settled)**
-> Four x402 schemes are live on X Layer. Three have settled on-chain, with the receipts
-> in Tilla's public proof log (docs/PROOF-onchain.md):
+> All four x402 schemes are live on X Layer and all four have settled on-chain, with every
+> receipt in Tilla's public proof log (docs/PROOF-onchain.md):
 >
-> exact · aggregated/deferred (one tx settling two orders) · period subscriptions
->
-> The fourth, metered channels, delivered a metered unit against a signed voucher and settled
-> its 0.1 USDT0 on-chain. The channel close is still in flight, so it's logged as partially
-> proven rather than counted among the three.
+> exact · aggregated/deferred (one tx settling two orders) · period subscriptions ·
+> metered payment channels, full lifecycle — open, voucher, delivery, close, with the
+> spend paid out and the remainder refunded
 >
 > Plus EAS attestation receipts and non-custodial escrow, both settled.
 >
@@ -117,7 +115,7 @@
 | **Live URL (example store)** | https://tilla.gudman.xyz/s/invoice-flow/ |
 | **Endpoint (ASP)** | https://tilla.gudman.xyz/create-store (x402-gated, 0.05 USDT, "Create Storefront") |
 | **Listed services** | 6 under agent #6961 — 3 platform (create / upgrade / add-product) + 3 Tilla-built storefronts listed as buyable services |
-| **On-chain proof log** | `docs/PROOF-onchain.md` — 10 rails proven with re-verified receipts, incl. Tilla *paying* another agent (0.1 USDT0, block 66208040). All self-funded arm's-length tests, labeled as such; none is organic third-party demand. |
+| **On-chain proof log** | `docs/PROOF-onchain.md` — 11 rails proven with re-verified receipts, incl. all four x402 schemes settled and Tilla *paying* another agent (0.1 USDT0, block 66208040). All self-funded arm's-length tests, labeled as such; none is organic third-party demand. |
 | **X post link** | [placeholder — insert after posting the thread above] |
 | **Demo video link (≤90s)** | [placeholder — insert once recorded] |
 

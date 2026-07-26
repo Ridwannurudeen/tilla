@@ -152,8 +152,11 @@ Optional beats, in the order I'd add them back:
 
 ## What NOT to claim on camera
 
-- Don't say the metered/MPP channel is "closed" or "settled in full" — the close is still in
-  flight. `docs/PROOF-onchain.md` §10 states it precisely; the video is safest not going near it.
+- The metered/MPP channel *is* fully settled — closed on-chain, spend paid out, remainder refunded
+  (`docs/PROOF-onchain.md` §10). You can say all four payment schemes settled. What you must not say
+  is that OKX's own API agrees: it still reports the channels as `CLOSING`. The chain is right and
+  the API is stale, and the proof log explains why. Safest on camera is "all four settled on-chain"
+  and nothing further.
 - Don't call any of the on-chain proofs organic demand. They are self-funded arm's-length tests
   and the proof log labels every one of them that way.
 - Don't quote a store count or sales figure from memory — if you want a number on screen, read it

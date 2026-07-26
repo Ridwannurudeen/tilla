@@ -38,7 +38,7 @@ funded on-chain but has not settled. Every claim below has a re-verified receipt
 | `exact` | Fixed-price checkout (human sweeper match + agent EIP-3009 settle) | **Live, proven on-chain** |
 | `aggr_deferred` | Batched/deferred settle — the OKX facilitator relayer settles buyer→merchant ~30s later, batching orders | **Proven on-chain**; Tilla auto-detects the facilitator-relayed settlement and finalizes orders |
 | `period` | Subscription billing via a Permit2 sidecar + proxy | **Proven on-chain**; two periods settled by the OKX subscription contract, relayed by the facilitator (blocks 66072022, 66072295) |
-| MPP metered | Pay-as-you-go metered payment channels (open → voucher → close/settle) | Built + tested; **partially proven** — channel opened and funded on-chain (2 USDT0 into the settlement-agent escrow) with one signed voucher, but **close/settle has not happened**, so no metered settlement is claimed |
+| MPP metered | Pay-as-you-go metered payment channels (open → voucher → close/settle) | Built + tested + **proven end-to-end on-chain** — channel opened and funded (2 USDT0 into the settlement-agent escrow), voucher signed, metered unit delivered, and the channel **closed on-chain**: 0.1 USDT0 paid to the merchant and the 1.9 remainder refunded to the payer. Receipts in `docs/PROOF-onchain.md` §10, which also records that OKX's settlement-agent API still reports the channel as `CLOSING` and why the chain is cited instead |
 
 Settlement detection is **fail-closed**: an order is only marked delivered against a real, confirmed
 on-chain tx hash; during an RPC outage the reaper never voids a paid-but-slow order.

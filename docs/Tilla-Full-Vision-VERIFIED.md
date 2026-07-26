@@ -61,7 +61,7 @@ Marked **[live]** (built and running), **[built]** (shipped and tested, but not 
   - one-off (x402 "exact") — [live; proven, 3 recorded settlement proofs].
   - subscriptions (x402 "period") — [live; enabled, first settlements proven on-chain — two real charges at blocks 66072022 and 66072295].
   - bulk/batch (`aggr_deferred`) — [live; enabled and proven — one real batch settle covering two orders at block 66059520. **No batch-priced product is currently listed**, so today's live 402 challenges carry only "exact"].
-  - pay-as-you-go metering (MPP) — [live; enabled, **channel opened, close pending** — one channel opened with a signed voucher against a 2 USDT deposit, never yet closed or settled. The close/settle half of the loop is unproven and is not claimed].
+  - pay-as-you-go metering (MPP) — [live and **fully proven on-chain** — channel opened with a signed voucher against a 2 USDT deposit, metered unit delivered, then closed on-chain: 0.1 USDT0 to the merchant, 1.9 refunded to the payer. See `docs/PROOF-onchain.md` §10].
 
   Every settlement above is a **self-funded arm's-length test** — real funds, our own second wallet, not external demand.
 - Discount codes, cross-sells, abandoned-checkout recovery, wallet-remembered repeat buyers, spend-cap/mandate-aware agent checkout [designed].
@@ -209,7 +209,7 @@ As more commerce is done *by* agents than by people filling carts, every seller 
 **Rails and surfaces promoted with precise scope (§3, §4, §9):**
 3. **Subscriptions** (x402 `period`) [built-dormant] → **[live]** — enabled, two real settles (blocks 66072022, 66072295).
 4. **`aggr_deferred`** [built-dormant] → **[live]** — enabled and proven by one batch settle covering two orders (block 66059520), with the honest caveat that **no batch-priced product is listed**, so live 402s carry only `exact`.
-5. **MPP** [built-dormant] → **[live, partial]** — enabled, one channel opened with a signed voucher (2 USDT deposit); **close/settle still unproven and not claimed**.
+5. **MPP** [built-dormant] → **[live, fully proven]** — enabled, channel opened with a signed voucher (2 USDT deposit), metered unit delivered, and **closed on-chain** (0.1 to the merchant, 1.9 refunded). Receipts in `docs/PROOF-onchain.md` §10.
 6. **Escrow** [designed, "state machine is not built"] → **[live]** — built, enabled, one full fund→release cycle on-chain (blocks 66036695 / 66036700), still verify-only and non-custodial; §10 risk 3 rewritten accordingly.
 7. **EAS attestations** [built-dormant] → **[live]** — enabled, 4 real attestations recorded.
 8. **ACP checkout** [built-dormant, "every endpoint returns 503"] → **[live]** — enabled, endpoints answer 401/422, one completed session settled on-chain (block 66025300).

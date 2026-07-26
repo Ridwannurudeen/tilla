@@ -199,10 +199,18 @@ not an agent's x402 signature), and the first one at the **current 0.05 USDT fee
 - `0xe558…c946` is a **different wallet from every agent test wallet above**, but it is still
   operator-funded — this is a self-serve *flow* proof, not organic third-party demand.
 
-## 10. MPP metered channel — PARTIALLY PROVEN (2026-07-23, re-verified 2026-07-26)
-Honest status: **channel opened, deposit on-chain, voucher signed, the 0.100000 spend settled
-on-chain; the channel close is in progress and has NOT completed.** The metered rail may be cited
-as "delivered and settled a metered unit"; it may **not** be cited as a completed channel close.
+## 10. MPP metered channel — PROVEN (2026-07-23, close located on-chain 2026-07-26)
+Full lifecycle settled on-chain: **open → deposit → voucher → metered delivery → close, with the
+spend paid to the merchant and the unspent remainder refunded to the payer.** Both channels closed
+in transactions sent to the escrow contract itself, both `status 1`, and the escrow balance
+reconciles to the digit across them.
+
+> **Read this before trusting either of the two earlier versions of this entry.** This section
+> previously claimed the close was complete, was then "corrected" on 2026-07-25 to say it was not,
+> and both versions were written from OKX's settlement-agent API rather than from the chain. The
+> API is wrong here — it still reports `CLOSING` with the full deposit as `remainingBalance` on
+> both channels, three days after the funds actually left escrow. The chain is the authority and
+> the chain is unambiguous. The receipts are below; anyone can re-read them.
 - Store `templatevault`, product "Agency Essentials Bundle" (metered, 0.1 USDT/call).
 - Channel id `0xfc41ec8b6928a798685d9b837de0188c` + `10c58ceaf62f50dc5a3c2b3b023e012c` — this is the
   settlement agent's channel identifier, **not** a tx hash; `eth_getTransactionReceipt` on it
@@ -212,24 +220,48 @@ as "delivered and settled a metered unit"; it may **not** be cited as a complete
   USDT0 Transfer **buyer `0x43ea…af55` -> SA escrow `0x5e55…ce3b` = 2.000000**, relayed by
   `0xf3bb…c608`. Attribution note: Tilla stores only the SA channel id, so this tx is matched to the
   channel by amount + payer + a block timestamp identical to the `channel.opened` event, not by a
-  recorded hash. A first 2 USDT0 deposit at block 66035190 (10:57:06 UTC) produced **no** channel
-  row — an abandoned attempt, recorded here so the escrow balance reconciles.
+  recorded hash.
+- **Correction (2026-07-26):** this entry previously described an earlier 2 USDT0 deposit at block
+  66035190 (10:57:06 UTC) as an *abandoned attempt* that produced no channel row. It was not
+  abandoned — it is the deposit for the second channel below. Escrow balance read at successive
+  blocks proves there were exactly **two** deposits, not three: **0.111039** before block 66035190,
+  **2.111039** after it, **4.111039** after block 66035448. Which deposit belongs to which channel is
+  inferred from ordering and timestamps rather than proven, because binding a deposit to a channel id
+  needs the escrow contract's event ABI, which is not published (the contract is not verified on
+  Sourcify). The reconciliation does not depend on that mapping: two deposits in, two closes out,
+  same total.
 - One voucher signed for cumulative **0.100000 USDT0** spend. Vouchers are off-chain accounting by
   design; the accumulated spend settles when the settlement agent settles or closes the channel.
-- **Two different sources of truth, both recorded here (2026-07-26 re-verification):**
-  - **Tilla's DB** row is still `open` (`mpp_channels`: deposit 2000000, spent 100000). The close was
-    driven out-of-band through the settlement-agent client rather than through the app, so the app
-    never saw it. Tilla's own row is therefore NOT evidence that nothing settled.
-  - **The settlement agent** (`session_status`, re-read 2026-07-26) reports for this channel:
-    `sessionStatus: CLOSING`, `settledOnChain: 100000`, `remainingBalance: 2000000`. So the
-    0.100000 spend **did** settle on-chain; the close itself is still in flight. The second channel
-    `0x971b0349…` reports `CLOSING`, `settledOnChain: 0`, `remainingBalance: 2000000`.
-- **Unreconciled, stated rather than hidden:** the SA escrow `0x5E55…CE3b` holds **0.113039 USDT0**
-  at re-verification, which does not reconcile with two channels each reporting a 2000000
-  `remainingBalance`. The close tx hashes were never recorded, and X Layer's 101-block `eth_getLogs`
-  cap makes a ~190k-block backscan impractical, so the discrepancy is left open rather than
-  explained away. The payer wallet `0x43ea…af55` holds **0.0 USDT0** — no refund has landed there.
-- Nothing here may be read as "channel closed" or "deposit refunded". Neither has been shown.
+- **Close of this channel** — tx `0xcecc3a1f194fd76744eddc6c783b3de8` + `99340f7e1f07bb1dbe34162e8bb8b5f8`
+  - **receipt status 1**, block **66056578**, sent **to the escrow contract** `0x5e55…ce3b` (an escrow
+    close call, not a bare transfer), 3 logs.
+  - The two USDT0 Transfers out of escrow are exactly the settlement: **0.100000 -> payee
+    `0x03d1…4ebb`** (the metered spend) and **1.900000 -> payer `0x43ea…af55`** (the unspent refund).
+    0.1 + 1.9 = the full 2.000000 deposit, distributed correctly.
+- **Second channel** `0x971b0349…` (a raw test channel, no Tilla order against it) — close tx
+  `0x40646e858f0737656b94003cd53b73ee` + `0e5476cc858b32de6d3c88a2478f1be4`
+  - **receipt status 1**, block **66056643**, also to the escrow contract, 2 logs.
+  - One Transfer: **2.000000 -> payer `0x43ea…af55`** — nothing was spent on this channel, so the
+    whole deposit refunded.
+- **The escrow reconciles exactly.** Balance of `0x5E55…CE3b` read at successive blocks via archive
+  `eth_call`: **4.113039 USDT0** before block 66056578, **2.113039** after it, **0.113039** after
+  block 66056643 — and 0.113039 is still the balance today. The two closes account for the full
+  4.000000, leaving nothing unexplained. (The residual 0.113039 is not ours: it was already 0.111039
+  before our first deposit, and this escrow is shared infrastructure serving other users' channels.
+  The 0.002000 that appeared between our deposits and our closes is likewise third-party traffic.)
+- **The payer's balance trail reconciles too**, read the same way: **0.200000** before the first
+  close, **2.100000** after it (+1.9), then **4.000000** after the second (+2.0, less an unrelated
+  0.100000 spend at block 66056609 — tx `0x20fa885e…`, confirmed by log scan). The wallet reads
+  **0.0 USDT0 today** because it went on to spend the recovered funds on the agent-channel orders in
+  Tilla's own database — a zero balance now is *not* evidence that no refund ever arrived.
+- **What OKX's settlement agent says, and why it is not cited as truth here.** The raw
+  `/api/v6/pay/mpp/session/status` response (re-read 2026-07-26, no fields dropped) still reports
+  both channels as `sessionStatus: CLOSING` with `remainingBalance: 2000000` — i.e. claiming 4 USDT0
+  still sits in escrow that demonstrably left it three days earlier. It carries no close tx hash and
+  no reason. This is stale off-chain bookkeeping on OKX's side; it does not change what settled.
+- **Tilla's own DB** row also still reads `open` (`mpp_channels`: deposit 2000000, spent 100000),
+  because the close was driven through the settlement-agent client rather than through the app, so
+  the app never observed it. Also not evidence either way — recorded so the gap is visible.
 
 ## 11. Tilla HIRES an agent — paid Warden scan — PROVEN (2026-07-25)
 The loop the other ten do not cover: Tilla as the **buyer**. Every prior entry has Tilla selling
@@ -265,20 +297,29 @@ agent's service over x402 and uses the answer in its own pipeline.
 | EAS receipt attestations (#7) | `0x2d1f7071…2bf184`, `0xf0f9290c…79a82a`, `0xb4a599fb…e6f7ae`, `0xf33ff17f…176d77` | 65997226, 66025315, 66059590, 66059624 | proven (4 uids, read back) |
 | ACP-standard checkout (#8) | `0xc44af2da…f393fb` | 66025300 | proven |
 | Human self-serve create-store fee (#9) | `0x7aab318f…f8ae8f` | 66151616 | proven |
-| MPP metered channel (#10) | deposit `0x125c88d9…61441f`; no close tx recorded | 66035448 | **partially proven** — deposit on-chain + 0.100000 `settledOnChain` per the SA; channel `CLOSING`, close not completed |
+| MPP metered channel (#10) | deposit `0x125c88d9…61441f`; closes `0xcecc3a1f…b8b5f8`, `0x40646e85…78f1be4` | 66035448, 66056578, 66056643 | proven (open → voucher → delivery → close; 0.1 to merchant, 3.9 refunded) |
 | Escrow job `1379aae00c6b4efd` | fund `0x486cc9cf…3da85b`; no release | 66054682 | **partially proven** — disputed, unreleased |
 | Tilla hires an agent, paid Warden scan (#11) | `0xf546da66…f403cc` | 66208040 | proven (Tilla as buyer) |
 
-Ten rails are proven with real on-chain USDT0 and independently re-verified receipts; the MPP
-channel and one disputed escrow job are recorded as partially proven and are never cited otherwise.
-Every settlement above is self-funded — Tilla's own wallets on both sides in most entries — and none
-of it is organic third-party demand.
+Eleven rails are proven with real on-chain USDT0 and independently re-verified receipts; one
+disputed escrow job remains partially proven and is never cited otherwise. Every settlement above is
+self-funded — Tilla's own wallets on both sides in most entries — and none of it is organic
+third-party demand.
 
 **Full re-verification 2026-07-26:** every transaction hash in this document was re-read from X
 Layer via `eth_getTransactionReceipt` — **15 of 15 returned `status 0x1`** at exactly the block
 recorded here (the 14 rail/attestation txs plus the #10 deposit). The four EAS attestation txs carry
 zero token transfers, as expected for attestations. Both test-wallet balances below were re-read the
-same day and still match. The only correction from that pass is entry #10, amended above.
+same day and still match.
+
+**Entry #10 was reopened the same day and upgraded to proven.** Its two close transactions had never
+been recorded, and OKX's settlement-agent API — the only source both earlier versions of the entry
+relied on — reports them as not having happened. They were located on-chain instead, by binary-
+searching the escrow contract's USDT0 balance with archive `eth_call` to find the blocks where it
+dropped, then reading the transfers in those blocks. That is a ~20-call search, which is why the
+earlier note that a "~190k-block backscan is impractical" did not have to be the end of it. The
+lesson worth keeping: a provider's own bookkeeping API is not a source of truth about settlement,
+and a currently-zero wallet balance says nothing about what once landed in it.
 
 Test-wallet balances, both re-read at chain head **66226170** (2026-07-25): `0x03d1…4ebb` holds
 **16.098832 USDT0** (down 0.1 — the Warden hire in #11); `0xf4c9…fa51` (merchant / Tilla fee payTo /
