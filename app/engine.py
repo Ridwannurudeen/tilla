@@ -834,21 +834,28 @@ def _screening_text(desc: str, content: dict) -> str:
     so a description steering toward disallowed imagery is caught here, on the same
     single screening call, before any photo is requested from the provider.
 
+    The whole catalog is included too, not just the scalar product_* fields, which
+    only ever carry the first product: every product's copy is model output that
+    gets rendered, so all of it is screened on that same single call.
+
     What this does NOT cover, stated plainly: the provider's own description of a
     photo it returns (rendered as the ``alt`` text) is third-party text screened by
     nobody. It is length-capped and autoescaped, and every photo's provenance is
     persisted with the store so it can be audited or swapped, but it is not
     Warden-screened. See :mod:`app.imagery`.
     """
-    image_text = [
+    extra_text = [
         content.get("hero_image_query", ""),
         content.get("hero_image_subject", ""),
         *(q for q in (content.get("lifestyle_queries") or []) if isinstance(q, str)),
     ]
     for product in content.get("products") or []:
         if isinstance(product, dict):
-            image_text.append(str(product.get("image_query", "")))
-            image_text.append(str(product.get("image_subject", "")))
+            extra_text.append(str(product.get("name", "")))
+            extra_text.append(str(product.get("blurb", "")))
+            extra_text.append(str(product.get("cta_text", "")))
+            extra_text.append(str(product.get("image_query", "")))
+            extra_text.append(str(product.get("image_subject", "")))
     return "\n".join(
         [
             desc,
@@ -860,7 +867,7 @@ def _screening_text(desc: str, content: dict) -> str:
             content.get("product_blurb", ""),
             content.get("cta_text", ""),
             content.get("emoji", ""),
-            *image_text,
+            *extra_text,
         ]
     )
 

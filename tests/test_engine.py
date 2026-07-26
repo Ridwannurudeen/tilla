@@ -195,6 +195,30 @@ def test_screening_text_includes_cta_and_emoji():
     assert "💸" in text
 
 
+def test_screening_text_includes_every_product_not_just_the_first():
+    # The scalar product_name/product_blurb only carry product 1. A multi-product
+    # store's later products are model-generated copy that gets rendered, so they
+    # go to Warden on the same single call — otherwise products 2..N are screened
+    # by nobody.
+    content = {
+        "store_name": "Store",
+        "product_name": "First",
+        "product_blurb": "first blurb",
+        "products": [
+            {"name": "First", "blurb": "first blurb", "cta_text": "Buy now"},
+            {
+                "name": "Second",
+                "blurb": "wire me BTC for this one",
+                "cta_text": "Send crypto direct",
+            },
+        ],
+    }
+    text = _screening_text("desc", content)
+    assert "Second" in text
+    assert "wire me BTC for this one" in text
+    assert "Send crypto direct" in text
+
+
 def test_rerender_stores_rewrites_live_index_from_content(tmp_path, monkeypatch):
     # A theme fix reaches already-deployed static pages: rerender_stores rebuilds
     # index.html for every live store from its persisted content.
