@@ -60,8 +60,9 @@
 >
 > exact · aggregated/deferred (one tx settling two orders) · period subscriptions
 >
-> The fourth, metered channels, is opened and funded on-chain (2 USDT0 in escrow) with a
-> signed voucher — settlement pending, and labeled that way in the log rather than counted.
+> The fourth, metered channels, delivered a metered unit against a signed voucher and settled
+> its 0.1 USDT0 on-chain. The channel close is still in flight, so it's logged as partially
+> proven rather than counted among the three.
 >
 > Plus EAS attestation receipts and non-custodial escrow, both settled.
 >

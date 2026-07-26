@@ -199,9 +199,10 @@ not an agent's x402 signature), and the first one at the **current 0.05 USDT fee
 - `0xe558…c946` is a **different wallet from every agent test wallet above**, but it is still
   operator-funded — this is a self-serve *flow* proof, not organic third-party demand.
 
-## 10. MPP metered channel — PARTIALLY PROVEN (2026-07-23)
-Honest status: **channel opened + voucher signed; close/settle pending.** Nothing here may be
-cited as a completed settlement.
+## 10. MPP metered channel — PARTIALLY PROVEN (2026-07-23, re-verified 2026-07-26)
+Honest status: **channel opened, deposit on-chain, voucher signed, the 0.100000 spend settled
+on-chain; the channel close is in progress and has NOT completed.** The metered rail may be cited
+as "delivered and settled a metered unit"; it may **not** be cited as a completed channel close.
 - Store `templatevault`, product "Agency Essentials Bundle" (metered, 0.1 USDT/call).
 - Channel id `0xfc41ec8b6928a798685d9b837de0188c` + `10c58ceaf62f50dc5a3c2b3b023e012c` — this is the
   settlement agent's channel identifier, **not** a tx hash; `eth_getTransactionReceipt` on it
@@ -214,8 +215,21 @@ cited as a completed settlement.
   recorded hash. A first 2 USDT0 deposit at block 66035190 (10:57:06 UTC) produced **no** channel
   row — an abandoned attempt, recorded here so the escrow balance reconciles.
 - One voucher signed for cumulative **0.100000 USDT0** spend. Vouchers are off-chain accounting by
-  design; the accumulated spend settles only when the settlement agent closes the channel.
-- Channel row status is still **`open`** — no close, no settle tx, nothing claimed.
+  design; the accumulated spend settles when the settlement agent settles or closes the channel.
+- **Two different sources of truth, both recorded here (2026-07-26 re-verification):**
+  - **Tilla's DB** row is still `open` (`mpp_channels`: deposit 2000000, spent 100000). The close was
+    driven out-of-band through the settlement-agent client rather than through the app, so the app
+    never saw it. Tilla's own row is therefore NOT evidence that nothing settled.
+  - **The settlement agent** (`session_status`, re-read 2026-07-26) reports for this channel:
+    `sessionStatus: CLOSING`, `settledOnChain: 100000`, `remainingBalance: 2000000`. So the
+    0.100000 spend **did** settle on-chain; the close itself is still in flight. The second channel
+    `0x971b0349…` reports `CLOSING`, `settledOnChain: 0`, `remainingBalance: 2000000`.
+- **Unreconciled, stated rather than hidden:** the SA escrow `0x5E55…CE3b` holds **0.113039 USDT0**
+  at re-verification, which does not reconcile with two channels each reporting a 2000000
+  `remainingBalance`. The close tx hashes were never recorded, and X Layer's 101-block `eth_getLogs`
+  cap makes a ~190k-block backscan impractical, so the discrepancy is left open rather than
+  explained away. The payer wallet `0x43ea…af55` holds **0.0 USDT0** — no refund has landed there.
+- Nothing here may be read as "channel closed" or "deposit refunded". Neither has been shown.
 
 ## 11. Tilla HIRES an agent — paid Warden scan — PROVEN (2026-07-25)
 The loop the other ten do not cover: Tilla as the **buyer**. Every prior entry has Tilla selling
@@ -251,7 +265,7 @@ agent's service over x402 and uses the answer in its own pipeline.
 | EAS receipt attestations (#7) | `0x2d1f7071…2bf184`, `0xf0f9290c…79a82a`, `0xb4a599fb…e6f7ae`, `0xf33ff17f…176d77` | 65997226, 66025315, 66059590, 66059624 | proven (4 uids, read back) |
 | ACP-standard checkout (#8) | `0xc44af2da…f393fb` | 66025300 | proven |
 | Human self-serve create-store fee (#9) | `0x7aab318f…f8ae8f` | 66151616 | proven |
-| MPP metered channel (#10) | deposit `0x125c88d9…61441f`; no close tx | 66035448 | **partially proven** — open + voucher only |
+| MPP metered channel (#10) | deposit `0x125c88d9…61441f`; no close tx recorded | 66035448 | **partially proven** — deposit on-chain + 0.100000 `settledOnChain` per the SA; channel `CLOSING`, close not completed |
 | Escrow job `1379aae00c6b4efd` | fund `0x486cc9cf…3da85b`; no release | 66054682 | **partially proven** — disputed, unreleased |
 | Tilla hires an agent, paid Warden scan (#11) | `0xf546da66…f403cc` | 66208040 | proven (Tilla as buyer) |
 
@@ -259,6 +273,12 @@ Ten rails are proven with real on-chain USDT0 and independently re-verified rece
 channel and one disputed escrow job are recorded as partially proven and are never cited otherwise.
 Every settlement above is self-funded — Tilla's own wallets on both sides in most entries — and none
 of it is organic third-party demand.
+
+**Full re-verification 2026-07-26:** every transaction hash in this document was re-read from X
+Layer via `eth_getTransactionReceipt` — **15 of 15 returned `status 0x1`** at exactly the block
+recorded here (the 14 rail/attestation txs plus the #10 deposit). The four EAS attestation txs carry
+zero token transfers, as expected for attestations. Both test-wallet balances below were re-read the
+same day and still match. The only correction from that pass is entry #10, amended above.
 
 Test-wallet balances, both re-read at chain head **66226170** (2026-07-25): `0x03d1…4ebb` holds
 **16.098832 USDT0** (down 0.1 — the Warden hire in #11); `0xf4c9…fa51` (merchant / Tilla fee payTo /
