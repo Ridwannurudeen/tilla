@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Tilla">
+  <!-- The mark every page already carries inline as a data: URI. Kept here as a
+       real file so /favicon.svg and the rasterized /favicon.ico resolve for
+       crawlers, bookmarks and clients that fetch the well-known path directly
+       instead of reading <link rel="icon">. Palette is the site's own. -->
+  <rect width="32" height="32" rx="7" fill="#0B0B12"/>
+  <rect x="5" y="5" width="7" height="7" fill="#BCFF2F"/>
+  <rect x="13" y="5" width="7" height="7" fill="#F5F5FA"/>
+  <rect x="21" y="13" width="7" height="7" fill="#BCFF2F"/>
+  <rect x="5" y="21" width="7" height="7" fill="#F5F5FA"/>
+  <rect x="13" y="13" width="7" height="7" fill="#6C5CE7"/>
+</svg>

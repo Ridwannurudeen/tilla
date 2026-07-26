@@ -126,14 +126,61 @@
 # dry-run-proven first, same as tilla's. Backup: shop.gudman.xyz.conf.PRE-HEADERS.
 #
 # ---------------------------------------------------------------------------
-# NOT DONE — deliberately left for after the hackathon
+# 9. Cache-Control on the nginx-served statics — APPLIED
 #
-# * CSP `script-src`/`style-src` — see item 7; needs nonces threaded through.
-# * limit_req on /feeds/ and the store-action regex (buy|mcp|reviews|quote|…).
-#   Read-only or already-priced paths, so lower urgency than the writes above.
-# * Cache-Control on static HTML and og.png (ETag/Last-Modified only today).
-# * A real /favicon.ico (pages use an inline SVG icon, so tabs render; only
-#   direct /favicon.ico fetches by old crawlers 404).
+# App-served routes already set their own (embed.js 3600, /discovery 300); only
+# files nginx reads off disk had ETag/Last-Modified alone.
+#
+#     location ~* ^/[^/]+\.(png|svg|ico|webp|jpg|jpeg|gif|woff2)$ { expires 1h; }
+#     location /   { add_header Cache-Control "no-cache" always; }
+#
+# HTML gets `no-cache`, NOT a max-age: these pages list live stores and prices, and
+# a stale copy in an intermediary is worse than a revalidation round-trip.
+# `no-cache` still permits a 304 against the existing ETag, so the cost is one
+# conditional request, not a re-download. Do not add `expires` alongside an
+# `add_header Cache-Control` — `expires` emits Cache-Control itself and you get
+# the header twice (this happened; the duplicate was removed).
+#
+# ⚠️ THE REGEX MUST STAY ANCHORED TO A SINGLE PATH SEGMENT (`^/[^/]+\.`).
+# It was first written as a bare `~* \.(png|svg|...)$`, which — because a regex
+# location beats a prefix location — hijacked `/s/{slug}/og.png` away from
+# `location /s/` and resolved it under `root /opt/tilla/www` instead of the store
+# alias. Result: EVERY store's og.png and og.svg 404'd, i.e. every store page lost
+# its social card, while the platform pages looked fine. Caught only by explicitly
+# re-testing store assets after the change. If you widen this regex, re-test
+# `/s/<slug>/og.png` before you walk away.
+#
+# ---------------------------------------------------------------------------
+# 10. limit_req on the last two open groups — APPLIED
+#
+#     location /feeds/                  limit_req zone=tilla_api burst=30 nodelay;
+#     location ~ ^/s/…/(buy|mcp|…)$     limit_req zone=tilla_api burst=40 nodelay;
+#
+# Bursts are deliberately generous: the store-action regex covers `buy`, so a
+# limit tight enough to bite would block a real purchase or a judge trying one.
+#
+# ---------------------------------------------------------------------------
+# 11. /favicon.ico + /favicon.svg — APPLIED
+#
+# The pages carry the icon inline as a data: URI, so tabs always rendered, but
+# `/favicon.ico` itself was a 404 — which is what crawlers, bookmark importers and
+# feed readers request blind. The mark is now a real file (`www/favicon.svg`) plus
+# a genuine ICO built by `scripts/make_favicon.py`. The box has rsvg-convert but no
+# ImageMagick / icotool / png2ico, so that script assembles the ICO container by
+# hand around a 32x32 PNG (PNG-in-ICO is a valid .ico, read by every current
+# browser and by the Windows shell — not a PNG with the extension changed).
+# `file` confirms: "MS Windows icon resource - 1 icon, 32x32 with PNG image data".
+#
+# ---------------------------------------------------------------------------
+# NOT DONE — the one item genuinely left
+#
+# * CSP `script-src` / `style-src`. Not deferred out of caution — deferred because
+#   it is a real change: every page inlines its CSS and JS (the landing page alone
+#   has 3 <script> and 2 <style> blocks), and the store pages are generated from
+#   themes. Hashes would have to be recomputed on every copy edit; nonces need a
+#   per-response template pass, which nginx-served static files do not get. Doing
+#   it properly means moving the static pages behind the app or building the CSP
+#   in the generator. See item 7 for the half that needed none of that.
 #
 # ---------------------------------------------------------------------------
 # NOT A DEFECT, checked and recorded so nobody re-opens it
