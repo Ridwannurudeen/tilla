@@ -1,9 +1,39 @@
 # Wildcard store subdomains — <slug>.tilla.gudman.xyz
 #
-# STATUS: the APP SIDE IS BUILT, TESTED AND DEPLOYED. The DNS record and the
-# certificate below are NOT done and are owner-gated — see "What is blocked".
-# Until they exist, nothing regresses: the subdomains simply do not resolve, and
-# every store stays reachable at https://tilla.gudman.xyz/s/<slug>/ as before.
+# ## STATUS: LIVE as of 2026-07-26. Stores serve at <slug>.tilla.gudman.xyz.
+#
+# The owner published the wildcard A record; the certificate was then issued by
+# manual DNS-01 and the vhost is in place. Verified live: four stores 200 with
+# `ssl_verify_result 0` against `CN=*.tilla.gudman.xyz`; the bare platform host
+# still serves its landing page (nginx prefers the exact server_name); reserved and
+# unknown labels 404; per-store feed.json / llms.txt / og.png resolve on the
+# subdomain; all seven sibling sites on the box unaffected.
+#
+# The applied vhost is committed at deploy/nginx-tilla-wildcard.conf and the
+# DNS-01 wait hook at scripts/dns01_wait_hook.sh.
+#
+# ### ⚠️ THIS CERTIFICATE DOES NOT AUTO-RENEW. It expires 2026-10-24.
+# /etc/letsencrypt/renewal/tilla-wildcard.conf records `authenticator = manual`
+# with `manual_auth_hook = /root/dns01_hook.sh`, and that hook blocks waiting for a
+# HUMAN to publish a fresh TXT record. So `certbot renew` will stall and then fail
+# for this lineage — unlike every other cert here, which uses webroot and renews
+# unattended. Two consequences, both deliberate:
+#   * the wildcard vhost sends `Strict-Transport-Security: max-age=300`, NOT the one
+#     year the platform host sends. A long max-age would turn the lapse into a hard
+#     outage for every store subdomain, since browsers would refuse HTTP fallback.
+#   * before October, automate it: enable Namecheap API access, install a certbot
+#     DNS plugin (certbot core ships none for Namecheap — third-party plugin or
+#     acme.sh), re-issue so the renewal config carries the plugin instead of the
+#     waiting hook, watch one unattended renewal succeed, and only then raise HSTS.
+# A calendar reminder is not a substitute for fixing this; a manual DNS-01 renewal
+# is exactly the kind of chore that gets missed.
+#
+# One gotcha that cost a cycle: `/etc/letsencrypt/cli.ini` pins
+# `authenticator = webroot` with the comment "never let certbot modify nginx
+# configs", and that conflicts with `--manual` ("Too many flags setting
+# configurators/installers/authenticators"). A wildcard CANNOT use webroot, which
+# cannot prove `*.`. Resolved by passing a one-off `--config` for that invocation
+# only; the global file is protective for every other cert and was left untouched.
 #
 # ---------------------------------------------------------------------------
 # Why bother
