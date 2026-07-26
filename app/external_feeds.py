@@ -50,11 +50,14 @@ def _openai_product(
     """One OpenAI product-feed item. `link`/`enable_checkout` point at the hosted
     store (the proven checkout); the x402 block is a vendor extension for x402-native
     agents. No wallet/pay_to is present."""
+    image_url = agentic.product_image_url(store, product, store_url)
     item = {
         "id": str(product.id),
         "title": product.name,
         "description": agentic._product_description(store),
         "link": store_url,
+        # Omitted when the product has no photograph rather than emitted empty.
+        **({"image_url": image_url} if image_url else {}),
         "price": {
             "amount": agentic._usdt_str(product.price_micro),
             "currency": agentic.CURRENCY,
@@ -131,6 +134,7 @@ def _tag(name: str, value) -> str:
 
 def _google_item(store: Store, product: Product, store_url: str) -> str:
     desc = agentic._product_description(store) or product.name
+    image_url = agentic.product_image_url(store, product, store_url)
     return "".join(
         [
             "<item>",
@@ -138,6 +142,10 @@ def _google_item(store: Store, product: Product, store_url: str) -> str:
             _tag("g:title", product.name),
             _tag("g:description", desc),
             _tag("g:link", store_url),
+            # g:image_link is a required Merchant Center field, so emitting it moves
+            # this export from shape-correct to actually submittable — but only when a
+            # real photograph exists; a fabricated one would be worse than its absence.
+            _tag("g:image_link", image_url) if image_url else "",
             # Price is emitted honestly as "N.NN USDT". GMC validation requires an
             # ISO-4217 currency; this is a shape-correct export the merchant adapts,
             # never a claim of a real USD price (see docs/acp-checkout.md runbook).

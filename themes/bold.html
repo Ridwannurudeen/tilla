@@ -174,6 +174,42 @@
     border:3px solid var(--text); background:var(--bg);
     box-shadow:10px 10px 0 var(--accent); }
   .plate canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+
+  /* ---------- photography ----------
+     Bold's identity is the tile collage in the mast, so a photograph does not fight
+     it for that corner. It gets its own hard-edged band instead: full bleed, 3px
+     rules top and bottom, zero radius. No filters — a product photo that has been
+     graded is a product photo that lies. */
+  .mast-band{ border-bottom:3px solid var(--text); background:var(--bg);
+    border-top:3px solid var(--text); margin-top:-3px; }
+  .mast-band img{ display:block; width:100%; height:clamp(220px,38vw,440px);
+    object-fit:cover; }
+  /* A photograph inside the product plate reuses the plate's whole chrome — 3px
+     border, offset shadow, fixed height — and drops the emoji medallion. */
+  .plate.shot-plate img{ position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; display:block; }
+  /* Catalog blocks: the shot is a bordered block above the type, offset-shadowed
+     like every other object in this theme. */
+  .item-shot{ position:relative; margin:0 0 clamp(16px,2.4vw,22px); overflow:hidden;
+    border:3px solid var(--text); background:var(--bg);
+    box-shadow:8px 8px 0 var(--accent); }
+  .item-shot img{ display:block; width:100%; aspect-ratio:4/3; object-fit:cover; }
+  .catalog .item:only-child .item-shot{ box-shadow:10px 10px 0 var(--accent); }
+  /* The lifestyle band: hard 3px gaps, no gutters, edge to edge. */
+  .band{ border-top:3px solid var(--text); border-bottom:3px solid var(--text);
+    background:var(--text); }
+  .band-grid{ display:grid; gap:3px;
+    grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr)); }
+  .band figure{ position:relative; margin:0; overflow:hidden; background:var(--bg); }
+  .band img{ display:block; width:100%; aspect-ratio:3/2; object-fit:cover; }
+  /* Licence obligation: the provider requires the photographer credit and a link. */
+  .credits{ flex:1 0 100%; order:9; display:flex; flex-wrap:wrap; gap:2px 14px;
+    margin-top:16px; padding-top:14px;
+    border-top:2px solid color-mix(in srgb,var(--text) 24%,transparent);
+    font-size:10px; font-weight:700; letter-spacing:.1em;
+    color:color-mix(in srgb,var(--text) 46%,transparent); }
+  .credits a{ text-decoration:none; color:inherit; }
+  .credits a:hover{ color:var(--text); text-decoration:underline; }
   .plate-mark{ position:absolute; top:50%; left:50%;
     transform:translate(-50%,-50%) rotate(-3deg);
     display:flex; align-items:center; justify-content:center;
@@ -315,6 +351,16 @@
     </div>
   </section>
 
+  {% if HERO_IMAGE %}
+  {# Decorative: the mast headline above already states what this is, so the band is
+     atmosphere and takes an empty alt rather than repeating itself to a screen
+     reader. Eager because it is the largest paint above the fold. #}
+  <section class="mast-band" aria-hidden="true">
+    <img src="{{ HERO_IMAGE.src }}" alt="" width="{{ HERO_IMAGE.width }}" height="{{ HERO_IMAGE.height }}"
+         loading="eager" fetchpriority="high" decoding="async">
+  </section>
+  {% endif %}
+
   <section class="ledger">
     <div class="wrap">
       <p class="ledger-title mono">Proof · on-chain</p>
@@ -327,15 +373,47 @@
     </div>
   </section>
 
+  {% if LIFESTYLE %}
+  <section class="band" aria-label="{{STORE_NAME}} in use">
+    <div class="band-grid">
+      {% for shot in LIFESTYLE %}
+      <figure>
+        <img src="{{ shot.src }}" alt="{{ shot.alt }}"
+             width="{{ shot.width }}" height="{{ shot.height }}"
+             loading="lazy" decoding="async">
+      </figure>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
   <section class="shop" id="buy">
     <div class="wrap">
       <div class="card">
         <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
+        {# With a single product the plate IS that product's shot. With several, each
+           catalog block carries its own, so the shared plate would only add a second
+           generative field on top of photographs. #}
+        {% if PRODUCTS|length == 1 and PRODUCTS[0].image %}
+        <figure class="plate shot-plate">
+          <img src="{{ PRODUCTS[0].image.src }}" alt="{{ PRODUCTS[0].image.alt }}"
+               width="{{ PRODUCTS[0].image.width }}" height="{{ PRODUCTS[0].image.height }}"
+               loading="lazy" decoding="async">
+        </figure>
+        {% elif not HERO_IMAGE %}
         <div class="plate" aria-hidden="true"><canvas id="plateField"></canvas><span class="plate-mark">{{EMOJI}}</span></div>
+        {% endif %}
         <div class="catalog">
         {% for p in PRODUCTS %}
           <article class="item">
             <span class="item-no mono" aria-hidden="true">{{ "%02d"|format(loop.index) }}</span>
+            {% if p.image and PRODUCTS|length > 1 %}
+            <figure class="item-shot">
+              <img src="{{ p.image.src }}" alt="{{ p.image.alt }}"
+                   width="{{ p.image.width }}" height="{{ p.image.height }}"
+                   loading="lazy" decoding="async">
+            </figure>
+            {% endif %}
             <h2>{{ p.name }}</h2>
             <p class="blurb">{{ p.blurb }}</p>
             <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
@@ -357,6 +435,14 @@
       <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
     </nav>
     <span>Settled on X Layer · chainId 196</span>
+    {% if PHOTO_CREDITS %}
+    <div class="credits">
+      <span><a href="https://www.pexels.com" rel="nofollow noopener" target="_blank">Photos provided by Pexels</a></span>
+      {% for c in PHOTO_CREDITS %}
+      <span>{% if c.credit_url %}<a href="{{ c.credit_url }}" rel="nofollow noopener" target="_blank">{{ c.credit }}</a>{% else %}{{ c.credit }}{% endif %}{% if c.source_url %} · <a href="{{ c.source_url }}" rel="nofollow noopener" target="_blank">Pexels</a>{% endif %}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
   </div>
 </footer>
 

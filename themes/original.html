@@ -110,10 +110,24 @@
   .hero{ position:relative; overflow:hidden; border-bottom:1px solid var(--hairline);
     padding:calc(64px + clamp(56px,10vh,120px) * var(--dna-space)) 0
             calc(clamp(60px,10vh,110px) * var(--dna-space)); }
-  #mosaic{ position:absolute; top:0; right:0; width:56%; height:100%; z-index:0;
+  /* The hero art slot. A photograph and the seeded mosaic occupy the SAME slot and
+     share every rule, including the mask fades and all three DNA hero variants, so
+     the photo inherits the store's layout instead of re-deriving it. Exactly one of
+     the two is emitted (see the markup): a store with no honest photograph keeps
+     the mosaic it always had. */
+  #mosaic, .hero-art{ position:absolute; top:0; right:0; width:56%; height:100%; z-index:0;
     pointer-events:none;
     -webkit-mask-image:linear-gradient(to right,transparent,#000 45%);
     mask-image:linear-gradient(to right,transparent,#000 45%); }
+  .hero-art{ margin:0; overflow:hidden; }
+  .hero-art img{ width:100%; height:100%; object-fit:cover; display:block; }
+  /* Contrast scrim. The palette guarantees >=7:1 body text against the BACKGROUND,
+     which says nothing about text over a photograph — so the headline side of the
+     image is laid back to the background colour rather than trusted to be dark. */
+  .hero-art::after{ content:""; position:absolute; inset:0; pointer-events:none;
+    background:linear-gradient(90deg, var(--bg) 0%,
+      color-mix(in srgb,var(--bg) 72%,transparent) 42%,
+      color-mix(in srgb,var(--bg) 18%,transparent) 78%, transparent 100%); }
   .eyebrow{ display:inline-flex; align-items:center; gap:10px;
     font-size:12px; font-weight:600; letter-spacing:.16em; text-transform:uppercase;
     color:color-mix(in srgb,var(--text) 66%,transparent); }
@@ -155,20 +169,33 @@
     flex-direction:column; align-items:flex-end; text-align:right;
   }
   body[data-hero="split"] .hero-sub{ flex:1 0 100%; }
-  body[data-hero="split"] #mosaic{
+  body[data-hero="split"] #mosaic,
+  body[data-hero="split"] .hero-art{
     top:auto; bottom:0; width:100%; height:42%;
     -webkit-mask-image:linear-gradient(to top,#000 25%,transparent);
     mask-image:linear-gradient(to top,#000 25%,transparent);
+  }
+  /* The split hero puts the art UNDER the copy, so the scrim runs vertically. */
+  body[data-hero="split"] .hero-art::after{
+    background:linear-gradient(0deg, transparent 0%,
+      color-mix(in srgb,var(--bg) 30%,transparent) 55%, var(--bg) 100%);
   }
   body[data-hero="offset"] .hero .wrap{
     display:flex; flex-direction:column; align-items:flex-end; text-align:right;
   }
   body[data-hero="offset"] .hero h1{ max-width:16ch; }
   body[data-hero="offset"] .hero-price{ align-self:flex-start; text-align:left; }
-  body[data-hero="offset"] #mosaic{
+  body[data-hero="offset"] #mosaic,
+  body[data-hero="offset"] .hero-art{
     right:auto; left:0;
     -webkit-mask-image:linear-gradient(to left,transparent,#000 45%);
     mask-image:linear-gradient(to left,transparent,#000 45%);
+  }
+  /* Offset reverses the copy to the right, so the scrim mirrors with it. */
+  body[data-hero="offset"] .hero-art::after{
+    background:linear-gradient(270deg, var(--bg) 0%,
+      color-mix(in srgb,var(--bg) 72%,transparent) 42%,
+      color-mix(in srgb,var(--bg) 18%,transparent) 78%, transparent 100%);
   }
 
   /* ---------- the Proof strip (monochrome ledger band, lime = chain) ---------- */
@@ -231,6 +258,42 @@
   .motion .reveal .plate-emoji span{ opacity:0; transform:scale(.86) translateY(10px);
     transition:opacity .7s ease-out .15s, transform .7s cubic-bezier(.2,.65,.25,1) .15s; }
   .motion .reveal.in .plate-emoji span{ opacity:1; transform:none; }
+
+  /* ---------- photography ----------
+     A product photograph reuses the .plate frame it replaces — same border, same
+     inset hairline, same aspect ratio — so it lands inside the theme's existing
+     grammar rather than beside it. No filters, no duotone, no colour grading: this
+     is a picture of a thing for sale, and styling it is misrepresenting it. */
+  .plate.shot-plate{ background:var(--surface); }
+  .plate.shot-plate img{ position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; display:block; }
+
+  /* Catalog cards: the shot is full-bleed to the card edge, above the type. The
+     negative margin matches .item's padding so the image meets the border. */
+  .item-shot{ position:relative; overflow:hidden; aspect-ratio:4/3;
+    margin:calc(-1 * clamp(20px,3vw,30px)) calc(-1 * clamp(20px,3vw,30px))
+           clamp(16px,2.2vw,22px);
+    border-bottom:1px solid var(--hairline); background:var(--surface); }
+  .item-shot img{ width:100%; height:100%; object-fit:cover; display:block; }
+
+  /* The lifestyle band: the product in its world. Full-bleed and hard-edged, with a
+     2px rule between frames — the block-print logic of the rest of the theme. */
+  .band{ border-bottom:1px solid var(--hairline); background:var(--surface); }
+  .band-grid{ display:grid; gap:2px;
+    grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); }
+  .band figure{ position:relative; margin:0; overflow:hidden; aspect-ratio:3/2; }
+  .band img{ width:100%; height:100%; object-fit:cover; display:block; }
+  /* Photographs load progressively; a fixed ratio box means the page never jumps. */
+  .band img, .item-shot img, .plate.shot-plate img, .hero-art img{ background:var(--surface); }
+
+  /* Photographer credits. The provider's licence requires the credit and the link,
+     so it is part of the theme rather than something a merchant can drop. */
+  .credits{ flex:1 0 100%; order:9; display:flex; flex-wrap:wrap; gap:2px 14px;
+    margin-top:16px; padding-top:14px; border-top:1px solid var(--hairline);
+    font-size:9.5px; letter-spacing:.1em;
+    color:color-mix(in srgb,var(--text) 42%,transparent); }
+  .credits a{ text-decoration:none; color:inherit; }
+  .credits a:hover{ color:var(--text); text-decoration:underline; }
   .card h2{ font-size:clamp(calc(1.9rem * var(--dna-ms2)), calc(4vw * var(--dna-ms2)), calc(3rem * var(--dna-ms2)));
     font-weight:calc(250 + var(--dna-weight)); line-height:1.06;
     letter-spacing:-.025em; color:var(--primary); text-wrap:balance; }
@@ -299,20 +362,30 @@
 
   @media (max-width:860px){
     .proof .wrap, .card-grid{ grid-template-columns:minmax(0,1fr); }
-    #mosaic{ width:100%; opacity:.3;
+    #mosaic, .hero-art{ width:100%; opacity:.3;
       -webkit-mask-image:linear-gradient(to bottom,transparent 8%,#000 70%);
       mask-image:linear-gradient(to bottom,transparent 8%,#000 70%); }
+    /* On one column the art sits directly behind the copy, so it is laid back
+       further than on desktop and its scrim runs vertically. */
+    .hero-art{ opacity:.42; }
+    .hero-art::after,
+    body[data-hero="split"] .hero-art::after,
+    body[data-hero="offset"] .hero-art::after{
+      background:linear-gradient(180deg, var(--bg) 0%,
+        color-mix(in srgb,var(--bg) 55%,transparent) 60%, transparent 100%); }
     .facts{ align-self:start; }
     /* hero variants collapse back to the stacked flow on small screens */
     body[data-hero="split"] .hero .wrap{ display:block; }
     body[data-hero="split"] .hero-price{ flex-direction:row; align-items:center; text-align:left; }
-    body[data-hero="split"] #mosaic{ top:0; bottom:auto; height:100%;
+    body[data-hero="split"] #mosaic,
+    body[data-hero="split"] .hero-art{ top:0; bottom:auto; height:100%;
       -webkit-mask-image:linear-gradient(to bottom,transparent 8%,#000 70%);
       mask-image:linear-gradient(to bottom,transparent 8%,#000 70%); }
     body[data-hero="offset"] .hero .wrap{ align-items:flex-start; text-align:left; }
     body[data-hero="offset"] .hero h1{ max-width:none; }
     body[data-hero="offset"] .hero-price{ align-self:auto; }
-    body[data-hero="offset"] #mosaic{ left:0; right:0;
+    body[data-hero="offset"] #mosaic,
+    body[data-hero="offset"] .hero-art{ left:0; right:0;
       -webkit-mask-image:linear-gradient(to bottom,transparent 8%,#000 70%);
       mask-image:linear-gradient(to bottom,transparent 8%,#000 70%); }
   }
@@ -338,7 +411,17 @@
 
 <main>
   <section class="hero">
+    {% if HERO_IMAGE %}
+    {# Decorative by role: masked, scrimmed, and sitting behind the headline that
+       already carries the meaning — so alt is empty rather than duplicating it into
+       a screen reader. eager + high priority because this is the largest paint. #}
+    <figure class="hero-art" aria-hidden="true">
+      <img src="{{ HERO_IMAGE.src }}" alt="" width="{{ HERO_IMAGE.width }}" height="{{ HERO_IMAGE.height }}"
+           loading="eager" fetchpriority="high" decoding="async">
+    </figure>
+    {% else %}
     <canvas id="mosaic" aria-hidden="true"></canvas>
+    {% endif %}
     <div class="wrap">
       {% if TAGLINE %}<p class="eyebrow mono">{{TAGLINE}}</p>{% endif %}
       <h1 id="heroHeadline">{{HERO_HEADLINE}}</h1>
@@ -366,6 +449,23 @@
     </div>
   </section>
 
+  {% if LIFESTYLE %}
+  {# The product in its world, between the proof strip and the catalog: it builds the
+     want that the catalog then answers. Full-bleed on purpose — it is the one place
+     on the page where the photography is the argument. #}
+  <section class="band reveal" aria-label="{{STORE_NAME}} in use">
+    <div class="band-grid">
+      {% for shot in LIFESTYLE %}
+      <figure>
+        <img src="{{ shot.src }}" alt="{{ shot.alt }}"
+             width="{{ shot.width }}" height="{{ shot.height }}"
+             loading="lazy" decoding="async">
+      </figure>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
   <section class="shop reveal" id="buy">
     <div class="wrap">
       {% if PRODUCTS|length == 1 %}
@@ -374,10 +474,21 @@
         <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
         <div class="card-grid">
           <div>
+            {% if p.image %}
+            {# A real photograph of the product is CONTENT, not decoration, so the
+               frame loses aria-hidden and the image carries the provider's own
+               description as its alt text. #}
+            <figure class="plate shot-plate">
+              <img src="{{ p.image.src }}" alt="{{ p.image.alt }}"
+                   width="{{ p.image.width }}" height="{{ p.image.height }}"
+                   loading="lazy" decoding="async">
+            </figure>
+            {% else %}
             <figure class="plate" aria-hidden="true">
               <canvas id="plateField"></canvas>
               <div class="plate-emoji"><span>{{EMOJI}}</span></div>
             </figure>
+            {% endif %}
             <h2>{{ p.name }}</h2>
             <p class="blurb">{{ p.blurb }}</p>
           </div>
@@ -390,14 +501,26 @@
       </div>
       {% endfor %}
       {% else %}
+      {# The intro banner is generative texture. With a hero photograph above it, a
+         second field of the same texture is noise — the catalog's own shots carry
+         the visual weight instead. #}
+      {% if not HERO_IMAGE %}
       <figure class="plate plate-banner" aria-hidden="true">
         <canvas id="plateField"></canvas>
         <div class="plate-emoji"><span>{{EMOJI}}</span></div>
       </figure>
+      {% endif %}
       <p class="cat-eyebrow mono">The catalog</p>
       <div class="catalog">
         {% for p in PRODUCTS %}
         <article class="item">
+          {% if p.image %}
+          <figure class="item-shot">
+            <img src="{{ p.image.src }}" alt="{{ p.image.alt }}"
+                 width="{{ p.image.width }}" height="{{ p.image.height }}"
+                 loading="lazy" decoding="async">
+          </figure>
+          {% endif %}
           <h3>{{ p.name }}</h3>
           <p class="item-blurb">{{ p.blurb }}</p>
           <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
@@ -421,6 +544,16 @@
       <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
     </nav>
     <span>Settled on X Layer · chainId 196</span>
+    {% if PHOTO_CREDITS %}
+    {# Licence obligation, not decoration: the provider's API terms require the
+       photographer credit and a link back, so it ships with the theme. #}
+    <div class="credits">
+      <span><a href="https://www.pexels.com" rel="nofollow noopener" target="_blank">Photos provided by Pexels</a></span>
+      {% for c in PHOTO_CREDITS %}
+      <span>{% if c.credit_url %}<a href="{{ c.credit_url }}" rel="nofollow noopener" target="_blank">{{ c.credit }}</a>{% else %}{{ c.credit }}{% endif %}{% if c.source_url %} · <a href="{{ c.source_url }}" rel="nofollow noopener" target="_blank">Pexels</a>{% endif %}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
   </div>
 </footer>
 

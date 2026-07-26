@@ -48,7 +48,17 @@ from x402.http.utils import (
 )
 from x402.schemas import AssetAmount
 
-from app import affiliates, b2b, chain, checkout, config, delivery, federation, webhooks
+from app import (
+    affiliates,
+    b2b,
+    chain,
+    checkout,
+    config,
+    delivery,
+    federation,
+    imagery,
+    webhooks,
+)
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -1789,12 +1799,30 @@ def _effective_sla(product: Product) -> int:
     )
 
 
+def product_image_url(store: Store, product: Product, store_url: str) -> str | None:
+    """This product's photograph as an absolute URL, or None.
+
+    Matched by product ID rather than by position: ``content['products']`` is rebuilt
+    from the live Product rows on every catalog edit, so an index would eventually
+    hand an agent a picture of a different item than the one it is being offered.
+    """
+    content = store.content if isinstance(store.content, dict) else {}
+    for item in content.get("products") or []:
+        if isinstance(item, dict) and item.get("id") == product.id:
+            return imagery.product_image_url(item, store_url)
+    return None
+
+
 def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> dict:
+    image_url = product_image_url(store, product, store_url)
     return {
         "id": str(product.id),
         "title": product.name,
         "description": _product_description(store),
         "link": store_url,
+        # Additive and omitted entirely when the product has no photograph, so an
+        # agent never has to distinguish "no picture" from "broken picture".
+        **({"image_url": image_url} if image_url else {}),
         "price": {"amount": _usdt_str(product.price_micro), "currency": CURRENCY},
         "availability": "in_stock",
         "sla_minutes": _effective_sla(product),

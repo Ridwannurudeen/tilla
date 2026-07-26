@@ -34,6 +34,10 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
   opt out of escaping).
 - **No two stores look alike.** Layout, typography and colour are derived per store, so two merchants
   describing the same business do not get the same shop — see below.
+- **Real photography, verified against the product.** A store is not a wall of text: the hero, every
+  product card and a lifestyle band carry actual photographs, self-hosted per store. A photo is only
+  used when the provider's own description of it contains the concrete nouns the product requires, so
+  a shop selling dumbbells never shows a yoga mat — see below.
 - **Every store gets its own address.** `<slug>.tilla.gudman.xyz`, on a wildcard certificate that
   renews unattended, so a shop reads as the merchant's own rather than a row in someone else's
   directory. A merchant who wants their real domain can claim one and keep everything else the same.
@@ -67,6 +71,33 @@ can never reach a style context. Design identity is resolved at generation time 
 store, so a shop's look never drifts — verified stable across all 18 live stores. Full design system in
 [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md).
 
+## Photography that matches what is being sold
+
+Describe a gym-wear brand and the store shows leggings on a person in a gym — not a headline over a
+gradient. Every generated store resolves real photographs at creation time and **self-hosts them in its
+own directory** ([`app/imagery.py`](app/imagery.py)), so pages stay fast, need no third-party image CDN,
+leak no buyer to anyone, and keep working forever.
+
+The hard part is not fetching a picture, it is fetching the *right* one, and that is enforced rather
+than hoped for:
+
+- **The model writes a query per product**, not one per store — "black athletic leggings on a woman",
+  not "gym". It also declares the **concrete nouns a photo must contain** to depict that item.
+- **Every candidate is scored against the provider's own description of the photo**, so a search that
+  returns something off-topic scores zero and is discarded. Highest coverage wins; ties break on the
+  store's slug seed, so a store's photography is varied across stores and fixed for any one store.
+- **No match means no photograph.** A store selling a template or a service keeps its generative
+  texture instead of borrowing a stranger's laptop — the same fail-closed discipline as settlement
+  detection. A product's photo travels with its **product id**, so a catalog edit can never slide a
+  picture onto the wrong item.
+- **Agents see them too.** `feed.json`, the OpenAI product feed and Google Merchant `g:image_link` all
+  carry the photograph, and `schema.org/Product` uses the real product shot rather than the brand card —
+  a catalog entry with a picture is worth more to a buying agent deciding what to purchase.
+
+Photography is additive and fails open: with no provider key, an outage, or nothing relevant found, the
+store is created exactly as before. Photographs are credited to their photographer with a link back, as
+their licence requires.
+
 ## Payment rails (x402)
 
 All four x402 schemes are built, tested, and **settled on-chain** — `exact` (including the agent buy
@@ -93,6 +124,7 @@ app/
   engine.py       LLM store generation + slug-seeded design personas
   render.py       Jinja2 autoescaped theme rendering
   palette.py      colour derived from one hue, with WCAG + perceptual floors
+  imagery.py      real photography, verified against the product, self-hosted
   checkout.py     order state machine + on-chain verification
   chain.py        X Layer RPC (balanceOf, receipts, getLogs)
   payment.py      x402 rail (per-store dynamic accepts)
@@ -138,7 +170,7 @@ being checked.
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 1107 tests
+pytest -q                # 1164 tests
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target
@@ -160,7 +192,7 @@ Migrations: `alembic upgrade head`. The local repo is the source of truth; the V
 | [`docs/BUILD.md`](docs/BUILD.md) | Committed build scope, pinned toolchain, per-module acceptance |
 | [`docs/PROOF-onchain.md`](docs/PROOF-onchain.md) | On-chain settlement proof log (real tx receipts) |
 | [`docs/specs/tilla-protocol-v1.md`](docs/specs/tilla-protocol-v1.md) | The open feed / agent-card / 402 conventions |
-| [`docs/runbooks/`](docs/runbooks/) | Rail enablement, custom domains, on-chain marketplace ops |
+| [`docs/runbooks/`](docs/runbooks/) | Rail enablement, custom domains, photography, on-chain marketplace ops |
 | [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md) | Why no two stores look alike, and how it is enforced |
 | [`docs/VISION.md`](docs/VISION.md) | Forward "commerce OS" design + what's built (M15–M18) |
 

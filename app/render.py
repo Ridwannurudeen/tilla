@@ -13,7 +13,7 @@ from typing import Mapping
 from jinja2 import FileSystemLoader, select_autoescape
 from jinja2.sandbox import SandboxedEnvironment
 
-from app import config, payment
+from app import config, imagery, payment
 from app.config import PUBLIC_BASE_URL, THEMES_DIR
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{3,8}$")
@@ -113,6 +113,85 @@ def _safe_enum(value: object, mapping: Mapping, fallback: str) -> str:
     return mapping[value] if isinstance(value, str) and value in mapping else fallback
 
 
+# Owned by :mod:`app.imagery`, which writes these files. Aliased rather than
+# re-declared so the renderer, the machine feeds and the image route can never drift
+# apart on what a valid photograph path looks like.
+_IMAGE_PATH = imagery.IMAGE_PATH
+
+
+def _safe_url(value: object) -> str:
+    """An absolute https URL, or "". Photo credit links are third-party strings that
+    land in an ``href``, and autoescaping does NOT defuse a ``javascript:`` URL —
+    escaping protects the attribute's delimiters, not its scheme. So the scheme is
+    checked here rather than trusted, the same fail-closed contract as _safe_hex."""
+    if not isinstance(value, str) or len(value) > 300:
+        return ""
+    return value if value.startswith("https://") else ""
+
+
+def _safe_image(raw: object) -> dict | None:
+    """Validate one persisted photograph before it can reach a template, or return
+    None so the theme falls back to its generative texture.
+
+    Every field is re-checked here even though :mod:`app.imagery` computed it: a
+    store's ``content`` is persisted JSON that can also arrive from an imported
+    ``store.json``, so the renderer treats it as untrusted input rather than
+    assuming its own writer produced it. ``path`` in particular is matched against
+    an exact digest shape — no traversal, no absolute URL, no other extension.
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    path = raw.get("path")
+    if not isinstance(path, str) or not _IMAGE_PATH.fullmatch(path):
+        return None
+
+    def _dim(value: object, fallback: int) -> int:
+        return value if isinstance(value, int) and 0 < value <= 8000 else fallback
+
+    return {
+        "src": path,
+        "alt": str(raw.get("alt") or "")[:200],
+        "width": _dim(raw.get("width"), 1200),
+        "height": _dim(raw.get("height"), 627),
+        "credit": str(raw.get("credit") or "")[:120],
+        "credit_url": _safe_url(raw.get("credit_url")),
+        "source_url": _safe_url(raw.get("source_url")),
+    }
+
+
+def _imagery_ctx(content: Mapping) -> dict:
+    """The store-level photography tokens: the hero image, the lifestyle band, and
+    the photographer credits the provider's licence requires. Each is empty for a
+    store with no photography — every theme guards on that and renders exactly as it
+    did before photography existed."""
+    raw = content.get("imagery")
+    if not isinstance(raw, Mapping):
+        raw = {}
+    # Hard-capped at imagery.MAX_LIFESTYLE, not merely trusted to be within it: the
+    # editorial theme letters these plates (PL. 01.A/B/C) by index, so a longer list
+    # arriving from a hand-edited or imported store.json would raise mid-render and
+    # break the page. The bound belongs on this side of the template.
+    lifestyle = [
+        image
+        for image in (_safe_image(item) for item in (raw.get("lifestyle") or []))
+        if image is not None
+    ][: imagery.MAX_LIFESTYLE]
+    credits = [
+        {
+            "credit": str(item.get("credit") or "")[:120],
+            "credit_url": _safe_url(item.get("credit_url")),
+            "source_url": _safe_url(item.get("source_url")),
+        }
+        for item in imagery.credits(content)
+        if item.get("credit")
+    ]
+    return {
+        "HERO_IMAGE": _safe_image(raw.get("hero")),
+        "LIFESTYLE": lifestyle,
+        "PHOTO_CREDITS": credits,
+    }
+
+
 def _dna_ctx(content: Mapping) -> dict:
     """The five validated Design DNA tokens (docs/DESIGN-DNA.md). A store whose
     content has no design_dna — or a partial/invalid one — gets the defaults on
@@ -154,12 +233,20 @@ def _seo_ctx(content: Mapping, slug: str, base_url: str | None = None) -> dict:
     store_name = str(content.get("store_name", "My Store"))
     description = str(content.get("hero_subcopy") or content.get("tagline") or "")
     product_name = str(content.get("product_name", "")) or store_name
+    # Prefer the primary product's real photograph over the Open Graph card. The OG
+    # card is a typographic brand tile — correct for a social unfurl, wrong as the
+    # schema.org/Product image, which search and agent shopping surfaces read as a
+    # picture OF THE PRODUCT. Falls back to the card when there is no photograph.
+    products = content.get("products")
+    primary_image = None
+    if isinstance(products, list) and products and isinstance(products[0], Mapping):
+        primary_image = _safe_image(products[0].get("image"))
     jsonld = {
         "@context": "https://schema.org",
         "@type": "Product",
         "name": product_name,
         "description": str(content.get("product_blurb", "")),
-        "image": og_image,
+        "image": f"{canonical}{primary_image['src']}" if primary_image else og_image,
         "brand": {"@type": "Brand", "name": store_name},
         "offers": {
             "@type": "Offer",
@@ -206,6 +293,11 @@ def _products_ctx(content: Mapping) -> dict:
             "blurb": str(item.get("blurb", "")),
             "price": str(item.get("price_usdt", 0)),
             "cta": str(item.get("cta_text", "Buy now")),
+            # The product's own photograph, or None. None is the normal case for
+            # anything with no honest photograph (software, a template, a service),
+            # and every theme falls back to its generative plate on None rather
+            # than showing a stand-in.
+            "image": _safe_image(item.get("image")),
         }
         for i, item in enumerate(raw)
         if isinstance(item, Mapping)
@@ -219,6 +311,7 @@ def _products_ctx(content: Mapping) -> dict:
                 "blurb": str(content.get("product_blurb", "")),
                 "price": str(content.get("price_usdt", 0)),
                 "cta": str(content.get("cta_text", "Buy now")),
+                "image": None,
             }
         ]
     return {"PRODUCTS": products}
@@ -252,6 +345,7 @@ def _store_ctx(
         **_palette_ctx(content),
         **_dna_ctx(content),
         **_products_ctx(content),
+        **_imagery_ctx(content),
         **_seo_ctx(content, slug, base_url),
     }
 

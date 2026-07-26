@@ -541,8 +541,16 @@ def custom_domain_llms(request: Request, session: Session = Depends(get_session)
     return agentic.llms_txt(request, slug=store.slug, session=session)
 
 
+# HEAD is registered alongside GET on both asset routes below. nginx answers HEAD on
+# the platform's static `/s/` path, but a store subdomain and a custom domain proxy
+# everything here, so without it those hosts answered 405 to the social scrapers,
+# link checkers and monitors that probe an asset with HEAD before fetching it.
+# Starlette's FileResponse already suppresses the body for HEAD (it sets
+# send_header_only from the request method), so one handler serves both correctly.
 @app.get("/og.png")
 @app.get("/og.svg")
+@app.head("/og.png")
+@app.head("/og.svg")
 def custom_domain_og(request: Request, session: Session = Depends(get_session)):
     """Serve the store's Open Graph card on its verified custom domain, so the OG image
     URL (``https://<domain>/og.png``) referenced by the custom-domain page resolves. The
@@ -556,6 +564,48 @@ def custom_domain_og(request: Request, session: Session = Depends(get_session)):
         raise HTTPException(404, "not found")
     media = "image/png" if name == "og.png" else "image/svg+xml"
     return FileResponse(asset, media_type=media)
+
+
+# A store photograph's filename, exactly as app.imagery writes it: a digest of the
+# bytes. Anchored, so the path parameter cannot name anything else in the store dir.
+_STORE_IMAGE_NAME = re.compile(r"[0-9a-f]{8,64}\.jpg")
+
+
+@app.get("/img/{name}")
+@app.head("/img/{name}")
+def custom_domain_image(
+    name: str, request: Request, session: Session = Depends(get_session)
+):
+    """Serve a store's own photograph on its verified custom domain or its platform
+    subdomain.
+
+    On the platform host these files are static: nginx serves STORES_DIR at ``/s/``,
+    so ``/s/<slug>/img/<hex>.jpg`` never reaches the app. The wildcard subdomain
+    vhost proxies EVERYTHING to the app (deploy/nginx-tilla-wildcard.conf), and a
+    custom-domain store is served at its own root, so on both of those hosts the
+    theme's relative ``img/<hex>.jpg`` resolves here instead — without this route
+    every photograph on every subdomain store would 404.
+
+    `name` is matched against the digest shape rather than sanitized: the store is
+    resolved from the Host header (fail-closed, custom domain first), and the file is
+    then read only from THAT store's directory, so one store can never serve
+    another's asset and no path parameter can escape the directory.
+    """
+    store = _store_for_host(request, session)
+    if store is None:
+        raise HTTPException(404, "not found")
+    if not _STORE_IMAGE_NAME.fullmatch(name):
+        raise HTTPException(404, "not found")
+    asset = config.STORES_DIR / store.slug / "img" / name
+    if not asset.is_file():
+        raise HTTPException(404, "not found")
+    # Content-addressed: the bytes for a given name can never change, so it is safe
+    # to let browsers and CDNs keep it for a year.
+    return FileResponse(
+        asset,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 # ---------- ASP endpoint: create a store (x402-paid) ----------

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tilla store engine: prompt -> generated brand+content -> premium live store.
 Usage: python3 -m app.engine "I sell a Notion productivity template for $9" [receive_address]
-Env: TILLA_LLM_KEY (Anthropic), TILLA_LLM_MODEL (optional), TILLA_STORES_DIR (default /opt/tilla/stores)
+Env: TILLA_LLM_KEY (Anthropic), TILLA_LLM_MODEL (optional), TILLA_STORES_DIR (default /opt/tilla/stores),
+     TILLA_IMAGE_KEY (optional Pexels key; absent = stores generate with no photography)
 """
 
 import json
@@ -27,9 +28,15 @@ from pydantic import (
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app import config, palette, providers, screening
+from app import config, imagery, palette, providers, screening
 from app.db import SessionLocal
 from app.delivery import mint_manage_key
+
+# StoreImagery is imported by NAME as well as the module above: the
+# GeneratedContent field is itself called `imagery`, so an annotation written as
+# `imagery.StoreImagery` would resolve against the field once the class body binds
+# that name.
+from app.imagery import StoreImagery
 from app.models import (
     Product,
     ScreeningReceipt,
@@ -305,6 +312,13 @@ class ProductContent(BaseModel):
     blurb: str = Field(default="", max_length=400)
     price_usdt: float = Field(default=0, ge=0, le=10000)
     cta_text: str = Field(default="Buy now", max_length=40)
+    # Photography search text, and ONLY search text. The model never supplies a
+    # path or a URL — :mod:`app.imagery` resolves those server-side — so no model
+    # output can reach an <img src>. `image_subject` is the accuracy mechanism: the
+    # concrete nouns a candidate photo's own description must contain before it is
+    # allowed to represent this product (see app/imagery.py::_score).
+    image_query: str = Field(default="", max_length=120)
+    image_subject: str = Field(default="", max_length=120)
 
 
 class GeneratedContent(BaseModel):
@@ -342,6 +356,32 @@ class GeneratedContent(BaseModel):
     # silently and the seed would quietly decide everything.
     brand: BrandBrief | None = None
     design_persona: str | None = None
+    # Photography. The three *_quer*/subject fields are search text FROM the model;
+    # `imagery` is the resolved result and is SERVER-OWNED — create_store overwrites
+    # it wholesale from app.imagery.resolve(), exactly as it overwrites design_dna
+    # from resolve_design(). It is declared here so it survives the validate/dump
+    # round trip and so a re-render of a live store keeps its photographs.
+    hero_image_query: str = Field(default="", max_length=120)
+    hero_image_subject: str = Field(default="", max_length=120)
+    lifestyle_queries: list[str] = Field(default_factory=list, max_length=3)
+    imagery: StoreImagery | None = None
+
+    @field_validator("lifestyle_queries", mode="before")
+    @classmethod
+    def _coerce_lifestyle(cls, v):
+        """Keep only strings, capped — a stray shape here must not fail a paid
+        create-store, and imagery is cosmetic."""
+        if not isinstance(v, list):
+            return []
+        return [s[:120] for s in v if isinstance(s, str) and s.strip()][:3]
+
+    @field_validator("imagery", mode="before")
+    @classmethod
+    def _coerce_imagery(cls, v):
+        """Drop a malformed imagery block rather than failing generation. A model
+        that invents this key (it is never asked for) is ignored here, and
+        create_store overwrites the field regardless."""
+        return v if isinstance(v, dict) else None
 
     @field_validator("design_persona", mode="before")
     @classmethod
@@ -439,6 +479,15 @@ def resync_catalog(session, store, extras_override=None) -> None:
     content = dict(store.content or {})
     old = content.get("products") or []
     extras = {}
+    # A product's photograph and the search text that found it are display extras
+    # too, and they must follow the PRODUCT rather than its position: this function
+    # rebuilds the list from the live rows, so deleting one product shifts every
+    # later index. Carrying them by product id is what keeps a card's photo attached
+    # to the item it actually depicts after a dashboard catalog edit — and keeps the
+    # queries available so `upgrade_store` can re-resolve photography later.
+    # Nothing here contacts the image provider: a catalog edit reuses the photos it
+    # already has.
+    carried: dict[object, dict] = {}
     for i, item in enumerate(old):
         if not isinstance(item, dict):
             continue
@@ -446,6 +495,14 @@ def resync_catalog(session, store, extras_override=None) -> None:
         if key is None and i < len(active):
             key = active[i].id
         extras[key] = (str(item.get("blurb", "")), str(item.get("cta_text", "Buy now")))
+        passthrough = {}
+        if isinstance(item.get("image"), dict):
+            passthrough["image"] = item["image"]
+        for field in ("image_query", "image_subject"):
+            if isinstance(item.get(field), str) and item[field]:
+                passthrough[field] = item[field]
+        if passthrough:
+            carried[key] = passthrough
     if extras_override:
         extras.update(extras_override)
     content["products"] = [
@@ -455,6 +512,7 @@ def resync_catalog(session, store, extras_override=None) -> None:
             "price_usdt": p.price_micro / 1e6,
             "blurb": extras.get(p.id, ("", "Buy now"))[0],
             "cta_text": extras.get(p.id, ("", "Buy now"))[1],
+            **carried.get(p.id, {}),
         }
         for p in active
     ]
@@ -612,8 +670,14 @@ def _post_generation(prompt: str) -> dict:
         "content-type": "application/json",
     }
     payload = {
+        # Raised from 1024 when photography search text was added to the schema:
+        # four products now carry an image_query and an image_subject each, plus the
+        # hero pair and up to three lifestyle queries. Measured output before that
+        # change averaged 479 tokens and peaked at 558, so 1024 had real headroom —
+        # but a truncated response is a failed paid create-store, and the extra
+        # ceiling costs nothing unless it is used (output is billed per token).
         "model": MODEL,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "messages": [{"role": "user", "content": prompt}],
     }
     for attempt in range(2):  # initial try + at most one retry
@@ -652,10 +716,47 @@ def generate(desc):
         "store_name (short brand), tagline (<=6 words), hero_headline (punchy, <=8 words), "
         "hero_subcopy (1 sentence), "
         "products (an array of 1 to 4 objects, each an object with: name, blurb (1-2 sentences, "
-        "benefit-led), price_usdt (number), cta_text (<=4 words)) — a focused catalog of related "
+        "benefit-led), price_usdt (number), cta_text (<=4 words), image_query, image_subject) "
+        "— a focused catalog of related "
         "items that fit the brand; use a single item when the merchant clearly sells one thing, "
         "otherwise 2 to 4 distinct items, "
         "emoji (single emoji for the brand), "
+        # PHOTOGRAPHY. The store previously had none, and a wrong photo is worse
+        # than no photo — a stock shot of a yoga mat on a store selling dumbbells
+        # is a false product claim we made on the merchant's page. So the model is
+        # asked for two different things per slot: the QUERY (what to search) and
+        # the SUBJECT (the nouns a candidate photo's own description must contain
+        # before app/imagery.py will use it). The subject is what turns "a search
+        # returned something" into "this photo verifiably shows the product".
+        #
+        # The empty-field instruction is the honesty valve, and it matters more than
+        # the rest: asked to illustrate a Notion template, stock photography can
+        # only offer a stranger's laptop. The model is the best available judge of
+        # whether a thing is photographable at all, so it is given explicit
+        # permission to decline — and declining leaves the store on its generative
+        # texture, which is the correct outcome, not a degraded one.
+        "hero_image_query (2-6 words naming a real, photographable scene that shows what this "
+        "brand sells, phrased the way a stock photographer would caption it, e.g. "
+        "'woman lifting dumbbells in gym', 'espresso pouring into white cup'), "
+        "hero_image_subject (2-4 concrete visible nouns from that scene, space-separated, "
+        "no adjectives, e.g. 'dumbbell gym woman' or 'espresso cup coffee'), "
+        "lifestyle_queries (an array of 0 to 3 further photographable scenes, same style, "
+        "showing the product in use or the world around it), "
+        "and for EACH product: image_query and image_subject. A product's image_query must make "
+        "THAT ITEM the main subject of the frame, not a background detail — lead with the item and "
+        "say so, e.g. 'close up of black compression leggings' rather than 'woman at the gym in "
+        "leggings', 'folded wool scarf on a table' rather than 'person walking in winter'. Name the "
+        "item first, keep it to what is being sold, and do not add other products (shoes, phones, "
+        "laptops, mugs) that would compete with it for attention. image_subject is 2-4 concrete "
+        "visible nouns that a photo MUST contain to depict that item, and its FIRST word must be "
+        "the item's own everyday noun — the word a photographer would caption it with ('leggings', "
+        "'scarf', 'candle', 'espresso'), never a material, texture, or generic word like 'fabric', "
+        "'fold', 'product' or 'item'. Put the product noun first and supporting detail after it. "
+        "CRITICAL: if what is being sold cannot honestly be photographed — software, a template, "
+        "an ebook, a digital download, a subscription, a service, anything with no physical form — "
+        "return an EMPTY STRING for every image_query and image_subject and an EMPTY ARRAY for "
+        "lifestyle_queries. Never substitute a generic desk, laptop, office or abstract scene for "
+        "a product that has no photograph. An empty field is correct and expected. "
         # Colour and layout are no longer free choices. Asked to pick four hex
         # values and five style axes, the model returned essentially one palette
         # shape and three layouts across the entire catalogue — so the axes are
@@ -726,6 +827,28 @@ def generate(desc):
 
 
 def _screening_text(desc: str, content: dict) -> str:
+    """The text Warden screens, assembled BEFORE anything is rendered or fetched.
+
+    The photography search text is included: it is model-generated, derived from the
+    merchant's description, and it decides what images the store goes looking for —
+    so a description steering toward disallowed imagery is caught here, on the same
+    single screening call, before any photo is requested from the provider.
+
+    What this does NOT cover, stated plainly: the provider's own description of a
+    photo it returns (rendered as the ``alt`` text) is third-party text screened by
+    nobody. It is length-capped and autoescaped, and every photo's provenance is
+    persisted with the store so it can be audited or swapped, but it is not
+    Warden-screened. See :mod:`app.imagery`.
+    """
+    image_text = [
+        content.get("hero_image_query", ""),
+        content.get("hero_image_subject", ""),
+        *(q for q in (content.get("lifestyle_queries") or []) if isinstance(q, str)),
+    ]
+    for product in content.get("products") or []:
+        if isinstance(product, dict):
+            image_text.append(str(product.get("image_query", "")))
+            image_text.append(str(product.get("image_subject", "")))
     return "\n".join(
         [
             desc,
@@ -737,6 +860,7 @@ def _screening_text(desc: str, content: dict) -> str:
             content.get("product_blurb", ""),
             content.get("cta_text", ""),
             content.get("emoji", ""),
+            *image_text,
         ]
     )
 
@@ -813,6 +937,25 @@ def create_store(desc, addr=None, delivery=None, theme=None):
 
         d = STORES_DIR / slug
         d.mkdir(parents=True, exist_ok=True)
+        # Photography, resolved here rather than at generation time for the same
+        # reason the palette and the DNA are: it is seeded from the FINAL slug (the
+        # seed breaks ties between equally-relevant candidates, so a store's photos
+        # are varied across stores and fixed for any one store), and the files land
+        # in that slug's own directory. Resolved even when screening is pending, so
+        # the resume path re-renders WITH the photographs instead of losing them.
+        #
+        # On the rare re-slug retry below this runs again against the new directory,
+        # costing a few extra provider calls — accepted, because it keeps the images,
+        # the palette and the DNA all derived from one slug with no special case.
+        #
+        # Fails open by construction (see app/imagery.py): no key, a provider
+        # outage, or nothing that verifiably depicts the product all leave this
+        # empty, and the store renders on its generative texture exactly as it did
+        # before photography existed.
+        imagery.apply(
+            content,
+            imagery.resolve(content, d, _mulberry32(_fnv1a(slug + ":imagery"))),
+        )
 
         if pending:
             # Persist everything needed to resume (render + go live) once
@@ -977,6 +1120,24 @@ def upgrade_store(session, store, description=None, theme=None) -> dict:
     content = store.content
     d = STORES_DIR / store.slug
     d.mkdir(parents=True, exist_ok=True)
+    # Photography is re-resolved AFTER the resync, never before it: the resynced list
+    # is the real Product rows, whereas the freshly generated list may hold invented
+    # items in a different order, so resolving against the generated list would attach
+    # photographs positionally to products that are not the ones being sold. The
+    # resync carried each item's image_query across by id, so the search text is
+    # still here to resolve from.
+    #
+    # An upgrade regenerates the store's whole presentation, so its photography is
+    # regenerated with it rather than left describing the previous copy. Same
+    # fail-open contract as create: if the provider is unreachable the store simply
+    # keeps the photographs it already had.
+    resolved = imagery.resolve(content, d, _mulberry32(_fnv1a(store.slug + ":imagery")))
+    if any(image is not None for image in resolved.products) or resolved.hero:
+        imagery.apply(content, resolved)
+        from sqlalchemy.orm.attributes import flag_modified
+
+        store.content = content
+        flag_modified(store, "content")
     _write_store_pages(d, content, store.pay_to, store.slug, theme_file)
     _persist_receipt(session, store.id, outcome.receipt)
     log_event(

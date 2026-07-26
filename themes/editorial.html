@@ -287,6 +287,39 @@
     color:color-mix(in srgb,var(--text) 62%,transparent);
   }
 
+  /* ---------- photography ----------
+     This theme is a numbered folio of captioned plates, so a photograph is not an
+     addition to its idiom — it is the thing the idiom was built for. Every shot
+     reuses .plate-frame (hairline rule, inset rule, 4:3) and keeps its caption, so
+     the photography reads as plates in the same publication. No filters: a graded
+     product photograph misrepresents the product. */
+  .plate-frame.shot-frame{ background:var(--bg); }
+  .plate-frame.shot-frame img{ position:absolute; inset:0; width:100%; height:100%;
+    object-fit:cover; display:block; }
+  .hero-plate{ margin-top:clamp(28px,4.5vh,46px); }
+  .hero-plate .plate-frame{ aspect-ratio:16/9; }
+  /* Catalog entries become an ILLUSTRATED index: a small ruled square at the head
+     of each row, in line with the numeral. */
+  .item-thumb{
+    flex:none; margin:0; width:clamp(54px,7vw,86px); aspect-ratio:1/1;
+    overflow:hidden; border:1px solid var(--hairline); border-radius:2px;
+    background:var(--tint);
+  }
+  .item-thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
+  /* The lifestyle plates: further plates in the same folio, captioned in sequence. */
+  .plates{ display:grid; gap:clamp(16px,2.4vw,26px);
+    grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); }
+  .plates figure{ margin:0; }
+  .plates .plate-frame{ aspect-ratio:3/2; }
+  /* Licence obligation: the provider requires the photographer credit and a link. */
+  .credits{ flex:1 0 100%; order:9; display:flex; flex-wrap:wrap; gap:2px 14px;
+    margin-top:16px; padding-top:14px;
+    border-top:1px solid color-mix(in srgb,var(--text) 14%,transparent);
+    font-size:9.5px; letter-spacing:.16em;
+    color:color-mix(in srgb,var(--text) 40%,transparent); }
+  .credits a{ text-decoration:none; color:inherit; }
+  .credits a:hover{ color:var(--text); text-decoration:underline; }
+
   /* ---------- folio footer ---------- */
   footer{ border-top:var(--rule) solid var(--hairline); }
   .folio-foot{
@@ -357,6 +390,42 @@
       <div>
         <h1>{{HERO_HEADLINE}}</h1>
         <p class="lede">{{HERO_SUBCOPY}}</p>
+        {% if HERO_IMAGE %}
+        {# A captioned plate, numbered in the folio's own sequence. The caption
+           carries the photographer credit the licence requires, in the place this
+           theme already puts plate metadata. #}
+        <figure class="plate hero-plate">
+          <div class="plate-frame shot-frame">
+            <img src="{{ HERO_IMAGE.src }}" alt="{{ HERO_IMAGE.alt }}"
+                 width="{{ HERO_IMAGE.width }}" height="{{ HERO_IMAGE.height }}"
+                 loading="eager" fetchpriority="high" decoding="async">
+          </div>
+          <figcaption class="plate-caption mono">
+            <span>PL. 01</span>
+            <span class="cap-name">{% if HERO_IMAGE.credit %}Photograph · {{ HERO_IMAGE.credit }}{% else %}{{STORE_NAME}}{% endif %}</span>
+          </figcaption>
+        </figure>
+        {% endif %}
+        {% if LIFESTYLE %}
+        {# Sub-numbered inside plate 01 rather than given their own section: a folio
+           sub-letters companion plates, and renumbering the 01/02/03 sections to
+           make room would put the theme's own index out of step with its captions. #}
+        <div class="plates">
+          {% for shot in LIFESTYLE %}
+          <figure>
+            <div class="plate-frame shot-frame">
+              <img src="{{ shot.src }}" alt="{{ shot.alt }}"
+                   width="{{ shot.width }}" height="{{ shot.height }}"
+                   loading="lazy" decoding="async">
+            </div>
+            <figcaption class="plate-caption mono">
+              <span>PL. 01.{{ 'ABC'[loop.index0] }}</span>
+              <span class="cap-name">{{ shot.credit }}</span>
+            </figcaption>
+          </figure>
+          {% endfor %}
+        </div>
+        {% endif %}
       </div>
     </section>
 
@@ -383,6 +452,21 @@
         <span class="label">The Purchase</span>
       </div>
       <div class="card">
+        {% if PRODUCTS|length == 1 and PRODUCTS[0].image %}
+        {# One product: the purchase plate IS that product's photograph, captioned
+           with the product's own name — not aria-hidden, because it is content. #}
+        <figure class="plate">
+          <div class="plate-frame shot-frame">
+            <img src="{{ PRODUCTS[0].image.src }}" alt="{{ PRODUCTS[0].image.alt }}"
+                 width="{{ PRODUCTS[0].image.width }}" height="{{ PRODUCTS[0].image.height }}"
+                 loading="lazy" decoding="async">
+          </div>
+          <figcaption class="plate-caption mono">
+            <span>PL. 03</span>
+            <span class="cap-name">{{ PRODUCTS[0].name }}</span>
+          </figcaption>
+        </figure>
+        {% elif not HERO_IMAGE %}
         <div class="plate" aria-hidden="true">
           <div class="plate-frame">
             <svg class="plate-field" id="plateField" viewBox="0 0 400 300"></svg>
@@ -393,6 +477,7 @@
             <span class="cap-name">{{STORE_NAME}}</span>
           </div>
         </div>
+        {% endif %}
         {%- if PRODUCTS|length == 1 %}
         {%- set p = PRODUCTS[0] %}
         <h2>{{ p.name }}</h2>
@@ -406,6 +491,13 @@
           {%- for p in PRODUCTS %}
           <article class="item">
             <span class="item-num mono" aria-hidden="true">{{ '%02d'|format(p.index + 1) }}</span>
+            {%- if p.image %}
+            <figure class="item-thumb">
+              <img src="{{ p.image.src }}" alt="{{ p.image.alt }}"
+                   width="{{ p.image.width }}" height="{{ p.image.height }}"
+                   loading="lazy" decoding="async">
+            </figure>
+            {%- endif %}
             <div class="item-body">
               <div class="item-line">
                 <h2 class="item-name">{{ p.name }}</h2>
@@ -434,6 +526,14 @@
         <a href="/marketplace.html">All stores <span aria-hidden="true">→</span></a>
       </nav>
       <span>Settled on X Layer · chainId 196</span>
+      {% if PHOTO_CREDITS %}
+      <div class="credits">
+        <span><a href="https://www.pexels.com" rel="nofollow noopener" target="_blank">Photos provided by Pexels</a></span>
+        {% for c in PHOTO_CREDITS %}
+        <span>{% if c.credit_url %}<a href="{{ c.credit_url }}" rel="nofollow noopener" target="_blank">{{ c.credit }}</a>{% else %}{{ c.credit }}{% endif %}{% if c.source_url %} · <a href="{{ c.source_url }}" rel="nofollow noopener" target="_blank">Pexels</a>{% endif %}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
     </div>
   </footer>
 </div>
