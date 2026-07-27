@@ -195,6 +195,23 @@ def test_screening_text_includes_cta_and_emoji():
     assert "💸" in text
 
 
+def test_an_over_long_art_prompt_is_cut_on_a_word_boundary():
+    # Regression from the live catalogue: the first pass chopped every prompt
+    # mid-word ('...suggesting financ') and that fragment is what the image
+    # generator was actually handed.
+    from app.engine import ART_PROMPT_MAX, GeneratedContent, clip_words
+
+    long = ("morning light across a clean oak desk " * 12).strip()
+    out = GeneratedContent(hero_art_prompt=long).hero_art_prompt
+    assert len(out) <= ART_PROMPT_MAX
+    assert not out.endswith(" ")
+    assert long.startswith(out), "the kept text must be a prefix, not a rewrite"
+    assert out.split()[-1] in long.split(), "last token must be a whole word"
+    # short prompts pass through untouched
+    assert clip_words("a calm studio corner", ART_PROMPT_MAX) == "a calm studio corner"
+    assert clip_words(None, ART_PROMPT_MAX) == ""
+
+
 def test_screening_text_includes_the_generated_art_prompt():
     # hero_art_prompt never reaches a stock provider, but it IS the literal
     # instruction an image generator is handed — if anything the more important of

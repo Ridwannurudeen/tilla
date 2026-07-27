@@ -56,6 +56,28 @@ STORES_DIR = config.STORES_DIR
 DEFAULT_ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"  # demo receive address
 # floor for a live store; a non-positive price would auto-confirm checkout
 MIN_PRICE_USDT = 1.0
+
+# Bound on the generation-only atmosphere prompt (GeneratedContent.hero_art_prompt).
+# Generous enough to hold one full sentence, because this text is handed straight to
+# an image generator and a half-sentence draws a half-scene.
+ART_PROMPT_MAX = 200
+
+
+def clip_words(text: object, limit: int) -> str:
+    """`text` truncated to at most `limit` characters, never mid-word.
+
+    Shared by the create path (the GeneratedContent validator) and the backfill
+    script deliberately: two copies of "shorten a prompt" would drift, and the
+    whole point is that a store photographed by either route gets the same string.
+    """
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    head, sep, _ = cut.rpartition(" ")
+    return (head if sep else cut).rstrip(" ,;:-")
+
+
 # One in-process retry on a transient Anthropic failure, spaced by this pause.
 LLM_RETRY_SLEEP_SEC = 2.0
 
@@ -368,8 +390,17 @@ class GeneratedContent(BaseModel):
     # physical form. Deliberately NOT a search query: it is never sent to the stock
     # provider, because a real photograph of a real desk asserts something about
     # goods that do not exist (see app.imagery._generated_hero).
-    hero_art_prompt: str = Field(default="", max_length=160)
+    hero_art_prompt: str = Field(default="", max_length=ART_PROMPT_MAX)
     imagery: StoreImagery | None = None
+
+    @field_validator("hero_art_prompt", mode="before")
+    @classmethod
+    def _clip_art_prompt(cls, v):
+        """Truncate on a WORD boundary rather than reject or chop mid-word. This
+        string is handed verbatim to an image generator, and a first pass over the
+        live digital stores cut every prompt mid-word ('…suggesting financ',
+        '…notebooks and war') — the generator is then drawing from a fragment."""
+        return clip_words(v, ART_PROMPT_MAX) if isinstance(v, str) else ""
 
     @field_validator("lifestyle_queries", mode="before")
     @classmethod
@@ -768,12 +799,15 @@ def generate(desc):
         # rule above exists to prevent. A generated frame depicts nothing real, so
         # it can carry mood without carrying a lie — and the theme labels it.
         "hero_art_prompt (ONLY when you returned those fields empty because the goods have no "
-        "physical form — otherwise return an EMPTY STRING): one sentence describing an "
-        "ATMOSPHERIC scene to illustrate the brand's world, which must NOT depict the product, a "
-        "screen, an interface, or any text. Describe light, material, colour and place — e.g. "
-        "'morning light across a clean oak desk with a linen notebook and a cup of black coffee' "
-        "or 'calm studio corner with paper, brass instruments and soft shadow'. No people's faces, "
-        "no logos, no signage, no invented brand marks. "
+        "physical form — otherwise return an EMPTY STRING): ONE sentence of AT MOST 20 WORDS "
+        "describing a still, empty, ATMOSPHERIC scene to illustrate the brand's world. Describe "
+        "light, material, colour and place — e.g. 'morning light across a clean oak desk with a "
+        "linen notebook and a cup of black coffee' or 'calm studio corner with paper, brass "
+        "instruments and soft shadow'. FORBIDDEN, with no exceptions: the product itself; any "
+        "phone, laptop, tablet, monitor, screen or user interface; any person or part of a person; "
+        "any text, signage, logo or brand mark. Measured on the live catalogue, those are exactly "
+        "the two the model reaches for unprompted — an invoicing tool asked for a glowing phone, a "
+        "team tool for seated teammates — so treat them as hard bans, not preferences. "
         # Colour and layout are no longer free choices. Asked to pick four hex
         # values and five style axes, the model returned essentially one palette
         # shape and three layouts across the entire catalogue — so the axes are

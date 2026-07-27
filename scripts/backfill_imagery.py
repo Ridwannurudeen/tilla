@@ -72,12 +72,16 @@ an ebook, a digital download, a subscription, a service, anything with no physic
 lifestyle_queries. Never substitute a generic desk, laptop or office scene for a product
 that has no photograph. Empty is correct and expected.
 
-ONLY in that case, also return hero_art_prompt: one sentence describing an ATMOSPHERIC
-scene to illustrate the brand's world, which must NOT depict the product, a screen, an
-interface, or any text. Describe light, material, colour and place — e.g. 'morning light
-across a clean oak desk with a linen notebook and a cup of black coffee'. No people's
-faces, no logos, no signage. It is never searched for; it is drawn, and the page says so.
-If the goods CAN be photographed, return an empty string for it."""
+ONLY in that case, also return hero_art_prompt: ONE sentence of AT MOST 20 WORDS
+describing a still, empty, ATMOSPHERIC scene to illustrate the brand's world. Describe
+light, material, colour and place — e.g. 'morning light across a clean oak desk with a
+linen notebook and a cup of black coffee'. FORBIDDEN, with no exceptions: the product
+itself; any phone, laptop, tablet, monitor, screen or user interface; any person or part
+of a person; any text, signage, logo or brand mark. Those last two are exactly what gets
+reached for unprompted — an invoicing tool asked for a glowing phone, a team tool for
+seated teammates — so treat them as hard bans, not preferences. It is never searched for;
+it is drawn, and the page says so. If the goods CAN be photographed, return an empty
+string for it."""
 
 
 def ask_for_queries(content: dict) -> dict:
@@ -123,7 +127,7 @@ def merge_queries(content: dict, raw: dict) -> dict:
     # a photographable store keeps its photograph. Bounded to the same length the
     # GeneratedContent field declares.
     merged["hero_art_prompt"] = (
-        str(raw.get("hero_art_prompt") or "")[:160]
+        engine.clip_words(raw.get("hero_art_prompt"), engine.ART_PROMPT_MAX)
         if not merged["hero_image_query"]
         else ""
     )
