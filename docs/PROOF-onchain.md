@@ -1,9 +1,20 @@
 # Tilla — on-chain proof log
 
-All settlements below are **self-funded arm's-length tests** paid from Tilla's own wallets with
-real on-chain USDT0. They prove the payment -> verify -> deliver pipeline works end to end on
-every rail Tilla advertises; they are **not** external/organic customer demand and are labeled as
-such wherever cited.
+Every settlement below is real on-chain USDT0 and proves the payment -> verify -> deliver pipeline
+works end to end on the rail it names. **Funding source differs per entry and is stated per entry —
+do not read a blanket label onto them.**
+
+- **Self-funded arm's-length** (Tilla's own wallets on both sides): #1-#4, #6-#9, and #11. These
+  prove *mechanism*, not demand.
+- **Paid by a wallet outside our control**: **#5** (batch rail) and **#10** (MPP channel), both
+  paid by `0x43ea…af55` — an address that is not one of Tilla's wallets and appears nowhere in
+  Tilla's own transaction history, so it was never funded by us. It has since paid **8 delivered
+  orders totalling 7.10 USDT0**.
+- **Third-party counterparties Tilla paid**: **#12** — three ASPs under different owners.
+
+Separately from these rails, ASP #6961 now carries **four public reviews from three independent
+buyer wallets** and `soldCount` 49. An earlier revision of this file claimed *all* settlements were
+self-funded; that was wrong for #5 and #10 and understated the project. Corrected 2026-07-28.
 
 **Wallet roles are stated PER TRANSACTION.** The same address plays different roles in different
 entries (Tilla's original buyer wallet is also the payTo of the stores it later created), so no
@@ -348,10 +359,13 @@ Wallet balance moved **39.790953 -> 39.760953 USDT0**, exactly -0.030000 for the
 | Escrow job `1379aae00c6b4efd` | fund `0x486cc9cf…3da85b`; no release | 66054682 | **partially proven** — disputed, unreleased |
 | Tilla hires an agent, paid Warden scan (#11) | `0xf546da66…f403cc` | 66208040 | proven (Tilla as buyer) |
 
-Eleven rails are proven with real on-chain USDT0 and independently re-verified receipts; one
-disputed escrow job remains partially proven and is never cited otherwise. Every settlement above is
-self-funded — Tilla's own wallets on both sides in most entries — and none of it is organic
-third-party demand.
+Twelve rails are proven with real on-chain USDT0 and independently re-verified receipts; one
+disputed escrow job remains partially proven and is never cited otherwise. **Most** entries are
+self-funded — Tilla's own wallets on both sides — and those prove mechanism rather than demand. Two
+are not: **#5 and #10 were paid by `0x43ea…af55`, a wallet outside our control that we never
+funded**, and **#12** is Tilla paying three ASPs under different owners. Third-party traction is
+tracked separately on the listing itself (four public reviews from three independent wallets,
+`soldCount` 49).
 
 **Full re-verification 2026-07-26:** the fifteen transaction hashes that this document carried at the
 start of that day were each re-read from X Layer via `eth_getTransactionReceipt` — **15 of 15

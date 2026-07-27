@@ -166,8 +166,9 @@ docs/             ROADMAP, BUILD, protocol spec, runbooks, on-chain proof
 
 ## On-chain proof
 
-Real, self-funded, arm's-length settlements on X Layer mainnet (buyer wallet distinct from merchant),
-each a single clean transaction — full receipts in [`docs/PROOF-onchain.md`](docs/PROOF-onchain.md):
+Real settlements on X Layer mainnet, each a single clean transaction, buyer wallet always distinct
+from merchant — full receipts in [`docs/PROOF-onchain.md`](docs/PROOF-onchain.md), where the funding
+source is stated **per entry** rather than blanket-labelled:
 
 - **Human wallet checkout** — exact-amount sweeper match flips the order to paid and releases delivery.
 - **Agent x402 store buy** — one EIP-3009 authorization, facilitator settles, order delivered.
@@ -176,9 +177,11 @@ each a single clean transaction — full receipts in [`docs/PROOF-onchain.md`](d
 - **aggr_deferred** — the facilitator relayer settles batched orders on-chain; Tilla's reconciler
   detects the transfer and finalizes the orders (settling → delivered) from on-chain evidence.
 
-The rail proofs above are self-funded arm's-length tests and are labeled as such — the proof log
-distinguishes proven *mechanism* from customer *traction* throughout, so anything cited here holds up
-to being checked.
+**Most** rail proofs are self-funded arm's-length tests — Tilla's own wallets on both sides — and
+those prove *mechanism*, not demand. Two are not: the batch rail and the MPP channel were both paid
+by `0x43ea…af55`, a wallet outside our control that appears nowhere in Tilla's own transaction
+history and has since paid 8 delivered orders totalling 7.10 USDT0. The proof log says which is
+which per entry, so anything cited here holds up to being checked.
 
 Traction is tracked separately and to the same standard. ASP #6961 carries **four public reviews
 from three independent buyer wallets** (all in the 5-star band, `securityRate` 5.0, `soldCount` 49)
