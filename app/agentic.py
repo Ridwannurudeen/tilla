@@ -189,8 +189,32 @@ def _product_for_path(session: Session, store: Store, path: str) -> Product | No
     )
 
 
+def _deferred_deliverable_ok(session: Session, store_id: int) -> bool:
+    """True iff this store's active deliverable is a server-gated FILE — the one
+    shape the deferred rail may be offered on.
+
+    aggr_deferred delivers on a facilitator-VERIFIED authorization and settles
+    on-chain later, so every claimable good has to stay revocable until the settle
+    lands: a file download is gated on TERMINAL_DELIVERED and the void path revokes
+    the entitlement. A ``text`` deliverable — and an ABSENT one, which falls back to
+    the ``store.delivery`` text — rides in the immediate response body, and knowledge
+    cannot be taken back. ``POST /api/stores/{slug}/pricing`` refuses that
+    configuration at write time (``app/main.py``); this is the same invariant at
+    SERVE time, so a row that predates the guard, or one written around it, still
+    cannot advertise or take payment on the rail.
+    """
+    active = session.scalar(
+        select(Deliverable)
+        .where(Deliverable.store_id == store_id, Deliverable.active.is_(True))
+        .order_by(Deliverable.id.desc())
+        .limit(1)
+    )
+    return active is not None and active.kind == "file"
+
+
 def _is_batch_path(path: str) -> bool:
-    """True iff the product THIS /buy path targets declares pricing_model='batch'.
+    """True iff the product THIS /buy path targets declares pricing_model='batch'
+    AND the store's deliverable is revocable (see :func:`_deferred_deliverable_ok`).
     The agent-guard uses it to decide whether the aggr_deferred accepts-entry stays
     in the 402 challenge. It keys on the path, not the store, because a multi-product
     store can mix rails: keying on the store's primary product advertised aggr on a
@@ -207,7 +231,9 @@ def _is_batch_path(path: str) -> bool:
                 return False
             product = _product_for_path(session, store, path)
             return (
-                product is not None and (product.pricing_model or "one_time") == "batch"
+                product is not None
+                and (product.pricing_model or "one_time") == "batch"
+                and _deferred_deliverable_ok(session, store.id)
             )
     except Exception:
         logger.exception("aggr batch-check failed for %s", path)
@@ -277,12 +303,24 @@ def _pricing_model(product: Product) -> str:
 def enabled_schemes(product: Product) -> list[str]:
     """The x402 schemes actually OFFERED on this product's /buy route, given the
     live server flags. 'exact' is always present; 'aggr_deferred' appears ONLY for
-    a batch product AND only when TILLA_AGGR_DEFERRED is on — so feeds/MCP never
-    advertise a rail that cannot settle. Metered (MPP) and subscription (period)
-    are separate endpoints, not x402 buy schemes, so they do not appear here."""
+    a batch product, only when TILLA_AGGR_DEFERRED is on, and only when the store's
+    deliverable is revocable (:func:`_deferred_deliverable_ok`) — so feeds/MCP never
+    advertise a rail the 402 challenge and the pay-time gate would then refuse.
+    Metered (MPP) and subscription (period) are separate endpoints, not x402 buy
+    schemes, so they do not appear here.
+
+    The deliverable lookup opens its own short read session — the same shape
+    :func:`_is_batch_path` uses — because the feed/MCP item builders are pure
+    (store, product) functions with no session to thread. It runs only for a batch
+    product, and any DB error strips the entry (fail-safe, never over-advertise)."""
     schemes = ["exact"]
     if _pricing_model(product) == "batch" and config.AGGR_DEFERRED_ENABLED:
-        schemes.append("aggr_deferred")
+        try:
+            with SessionLocal() as session:
+                if _deferred_deliverable_ok(session, product.store_id):
+                    schemes.append("aggr_deferred")
+        except Exception:
+            logger.exception("aggr deliverable-check failed for product %s", product.id)
     return schemes
 
 
@@ -656,13 +694,22 @@ def _do_agent_buy(
         if _product_id_from_path(request.url.path) is None:
             raise HTTPException(409, "store has no active product")
         raise HTTPException(404, "product not found")
-    # Pay-time HARD GATE: an aggr_deferred payment against a non-batch product is
-    # refused BEFORE settlement (same funds-safe >=400-skips-settle pattern).
-    if (
-        _payment_scheme(request) == PAYMENT_SCHEME_AGGR_DEFERRED
-        and (product.pricing_model or "one_time") != "batch"
-    ):
-        raise HTTPException(409, "aggr_deferred is only available for batch products")
+    # Pay-time HARD GATE: an aggr_deferred payment against a non-batch product, or
+    # against one whose deliverable is not revocable, is refused BEFORE settlement
+    # (same funds-safe >=400-skips-settle pattern). The deliverable half is the
+    # last of the three layers — challenge, feed, here — so even a challenge that
+    # was minted before a deliverable changed cannot be paid against.
+    if _payment_scheme(request) == PAYMENT_SCHEME_AGGR_DEFERRED:
+        if (product.pricing_model or "one_time") != "batch":
+            raise HTTPException(
+                409, "aggr_deferred is only available for batch products"
+            )
+        if not _deferred_deliverable_ok(session, store.id):
+            raise HTTPException(
+                409,
+                "aggr_deferred requires a file deliverable: text is released in the "
+                "response body, before a deferred settle confirms on-chain",
+            )
     auth = (
         payload.payload.get("authorization")
         if isinstance(payload.payload, dict)

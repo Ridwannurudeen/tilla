@@ -3,6 +3,12 @@ pure PAYMENT-REQUIRED challenge filter, the agent-guard's per-store header rewri
 and the pay-time handler scheme gate that 409s a non-batch aggr payment BEFORE any
 settle. A real settle needs an OKX TEE agentic-wallet buyer and is USER-gated, so
 nothing here asserts a settlement — only that the OPTION is offered honestly.
+
+Both halves of "honestly" are pinned: the product must be batch-priced AND its
+deliverable must be revocable (a file), because the rail delivers on a verified
+authorization and settles later. That second half is checked in all three layers —
+challenge, advertisement, pay-time — so a row predating the write-time /pricing
+guard cannot serve the rail either.
 """
 
 import asyncio
@@ -19,7 +25,7 @@ from x402.schemas import PaymentPayload, PaymentRequired, PaymentRequirements
 import app.main as main  # noqa: F401 — ensures app + limiter wired for direct calls
 from app import agentic, checkout, config
 from app.db import SessionLocal
-from app.models import Order, Product, Store
+from app.models import Deliverable, Order, Product, Store
 from app.payment import (
     build_store_payment_option,
     build_store_payment_options,
@@ -58,6 +64,35 @@ def _set_pricing(slug: str, model: str) -> None:
         p = agentic._active_product(s, store.id)
         p.pricing_model = model
         s.commit()
+
+
+def _add_deliverable(slug: str, kind: str = "file") -> int:
+    """The deferred rail is only offered on a revocable (file) deliverable, so every
+    batch fixture below needs one — make_store leaves a store on the store.delivery
+    text fallback, which the rail must refuse."""
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        d = Deliverable(
+            store_id=store.id,
+            kind=kind,
+            payload="secret text" if kind == "text" else None,
+            file_sha256=("d" * 64) if kind == "file" else None,
+            file_name="thing.zip" if kind == "file" else None,
+            file_size=1234 if kind == "file" else None,
+            mime="application/zip" if kind == "file" else None,
+            active=True,
+        )
+        s.add(d)
+        s.commit()
+        return d.id
+
+
+def _batch_store(make_store, slug: str) -> None:
+    """A store the deferred rail may actually serve: batch pricing AND a file
+    deliverable."""
+    make_store(slug=slug)
+    _set_pricing(slug, "batch")
+    _add_deliverable(slug)
 
 
 # ------------------------------------------------------- accepts-builder
@@ -146,8 +181,7 @@ def test_guard_strips_aggr_for_non_batch_store(make_store, monkeypatch):
 
 
 def test_guard_keeps_aggr_for_batch_store(make_store, monkeypatch):
-    make_store(slug="gd2")
-    _set_pricing("gd2", "batch")
+    _batch_store(make_store, "gd2")
     monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
     resp = _dispatch_402("gd2", _challenge_header("exact", "aggr_deferred"))
     schemes = [
@@ -181,6 +215,7 @@ def test_guard_keeps_aggr_for_a_batch_product_on_a_one_time_store(
     # The store's PRIMARY product is one_time; /buy/<id> names a batch one. Keying the
     # filter on the store stripped the aggr entry the handler would have honoured.
     make_store(slug="gd4")
+    _add_deliverable("gd4")
     pid = _add_product("gd4", "Batch thing", "batch")
     monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
     resp = _dispatch_402(
@@ -200,8 +235,7 @@ def test_guard_strips_aggr_for_a_one_time_product_on_a_batch_store(
 ):
     # The mirror image: primary product is batch, /buy/<id> names a one_time one. The
     # handler 409s aggr here, so the challenge must not advertise it.
-    make_store(slug="gd5")
-    _set_pricing("gd5", "batch")
+    _batch_store(make_store, "gd5")
     pid = _add_product("gd5", "One-time thing", "one_time")
     monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
     resp = _dispatch_402(
@@ -214,6 +248,77 @@ def test_guard_strips_aggr_for_a_one_time_product_on_a_batch_store(
         ).accepts
     ]
     assert schemes == ["exact"]
+
+
+def _dispatch_schemes(slug: str, path: str | None = None) -> list[str]:
+    resp = _dispatch_402(slug, _challenge_header("exact", "aggr_deferred"), path)
+    return [
+        a.scheme
+        for a in decode_payment_required_header(
+            resp.headers["PAYMENT-REQUIRED"]
+        ).accepts
+    ]
+
+
+# --------------------------------- deliverable gate (all three layers)
+# The rail delivers on a verified authorization and settles later, so the good has
+# to stay revocable until the settle lands. A text deliverable — and an absent one,
+# which is the store.delivery text fallback — cannot be taken back. /pricing refuses
+# that at write time; these pin the same invariant at serve time, which is what a
+# row predating the guard (or written around it) actually hits.
+def test_guard_strips_aggr_for_batch_store_with_no_deliverable(make_store, monkeypatch):
+    make_store(slug="gd6")
+    _set_pricing("gd6", "batch")  # no deliverable -> store.delivery text fallback
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    assert _dispatch_schemes("gd6") == ["exact"]
+
+
+def test_guard_strips_aggr_for_batch_store_with_text_deliverable(
+    make_store, monkeypatch
+):
+    make_store(slug="gd7")
+    _set_pricing("gd7", "batch")
+    _add_deliverable("gd7", kind="text")
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    assert _dispatch_schemes("gd7") == ["exact"]
+
+
+def test_feed_omits_aggr_for_batch_store_with_text_deliverable(make_store, monkeypatch):
+    # The advertisement layer agrees with the challenge layer: a feed that offered a
+    # rail the 402 then strips would be over-advertising.
+    make_store(slug="gd8")
+    _set_pricing("gd8", "batch")
+    _add_deliverable("gd8", kind="text")
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "gd8"))
+        product = agentic._active_product(s, store.id)
+        assert agentic.enabled_schemes(product) == ["exact"]
+
+
+def test_feed_offers_aggr_for_batch_store_with_file_deliverable(
+    make_store, monkeypatch
+):
+    _batch_store(make_store, "gd9")
+    monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "gd9"))
+        product = agentic._active_product(s, store.id)
+        assert agentic.enabled_schemes(product) == ["exact", "aggr_deferred"]
+
+
+def test_handler_409s_aggr_on_batch_with_text_deliverable(make_store):
+    # The funds-safe layer: >=400 before settle, so the signed authorization is
+    # never executed and no order exists.
+    make_store(slug="hg4")
+    _set_pricing("hg4", "batch")
+    _add_deliverable("hg4", kind="text")
+    with SessionLocal() as s:
+        with pytest.raises(Exception) as exc:
+            agentic.agent_buy(_paid_request("hg4", "aggr_deferred"), "hg4", s)
+    assert getattr(exc.value, "status_code", None) == 409
+    with SessionLocal() as s:
+        assert s.scalar(select(Order)) is None
 
 
 def test_guard_untouched_when_flag_off(make_store, monkeypatch):
@@ -266,8 +371,7 @@ def test_handler_409s_aggr_on_non_batch_before_settle(make_store):
 
 
 def test_handler_allows_aggr_on_batch_store(make_store):
-    make_store(slug="hg2")
-    _set_pricing("hg2", "batch")
+    _batch_store(make_store, "hg2")
     with SessionLocal() as s:
         resp = agentic.agent_buy(_paid_request("hg2", "aggr_deferred"), "hg2", s)
     assert resp.status_code == 200
@@ -288,8 +392,7 @@ def test_handler_allows_exact_on_non_batch(make_store):
 
 # --------------------------------- aggr_deferred settle reconciliation (finding #3)
 def _batch_settling_order(make_store, slug: str) -> str:
-    make_store(slug=slug)
-    _set_pricing(slug, "batch")
+    _batch_store(make_store, slug)
     with SessionLocal() as s:
         agentic.agent_buy(_paid_request(slug, "aggr_deferred"), slug, s)
     from app.models import Order
@@ -613,6 +716,7 @@ def _chain_settling_order(make_store, slug, price=1_000_000, pay_to="0x" + "a" *
     """A batch order held 'settling' after the live empty-tx settle (settle_ref NULL)."""
     make_store(slug=slug, price_micro=price, pay_to=pay_to)
     _set_pricing(slug, "batch")
+    _add_deliverable(slug)
     with SessionLocal() as s:
         agentic.agent_buy(_paid_request(slug, "aggr_deferred"), slug, s)
     # The live path: /settle 200 with no decodable tx leaves it settling, ref NULL.
@@ -647,6 +751,7 @@ def test_chain_reconcile_batches_one_transfer_to_two_orders(make_store, monkeypa
     monkeypatch.setattr(config, "AGGR_DEFERRED_ENABLED", True)
     make_store(slug="ch2", price_micro=1_000_000, pay_to="0x" + "a" * 40)
     _set_pricing("ch2", "batch")
+    _add_deliverable("ch2")
     ids = []
     for i in range(2):
         nonce = "0x" + f"{i:064x}"

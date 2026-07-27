@@ -125,7 +125,22 @@ response. The residual exposure — a tx-less settle on the settle-first `exact`
 is bounded to the in-band body of products a merchant chose to sell as text, is worth
 at most one payload per unique signed authorization, and books no revenue either way.
 
-Grandfathered: `sync`'s product was set to `batch` before this guard existed (text
-fallback, demo payload). Left as-is deliberately — rewriting a listed product's rails
-during a marketplace review cycle is a worse trade than the demo-text exposure. Flip it
-to `one_time` or upload a file deliverable at the next natural touch.
+The write-time guard alone left a hole: it only runs when someone POSTs `/pricing`, so a
+row that predates it — or one written around it — kept serving the rail. `sync`'s product
+was set to `batch` before the guard existed (no deliverable row at all, so: text
+fallback), and its live 402 was still advertising `aggr_deferred`. The same invariant now
+also runs at SERVE time, in all three places that can offer or honour the rail:
+
+| Layer | Function | Effect when the deliverable is not a file |
+|---|---|---|
+| 402 challenge | `agentic._is_batch_path` | the `aggr_deferred` accepts-entry is stripped |
+| feed / MCP advertisement | `agentic.enabled_schemes` | the scheme is not listed |
+| pay-time hard gate | `agentic.agent_buy` | 409 **before** settle — the signed authorization is never executed, zero funds move |
+
+All three read one helper, `agentic._deferred_deliverable_ok`, and all three fail safe (a
+DB error strips the entry rather than over-advertising). No store row was edited to fix
+this — `sync` keeps its `batch` pricing_model, and simply stops being offered the rail
+until it has a file deliverable. **Consequence to know before probing: with no store
+currently holding a file deliverable, no live endpoint advertises `aggr_deferred`.** The
+rail itself is unchanged and still proven on-chain (`docs/PROOF-onchain.md` §batch);
+uploading a file deliverable to any batch product restores the live offer.
