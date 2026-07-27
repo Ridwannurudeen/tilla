@@ -195,6 +195,16 @@ def test_screening_text_includes_cta_and_emoji():
     assert "💸" in text
 
 
+def test_screening_text_includes_the_generated_art_prompt():
+    # hero_art_prompt never reaches a stock provider, but it IS the literal
+    # instruction an image generator is handed — if anything the more important of
+    # the two to screen.
+    text = _screening_text(
+        "desc", {"hero_art_prompt": "morning light across a clean oak desk"}
+    )
+    assert "morning light across a clean oak desk" in text
+
+
 def test_screening_text_includes_every_product_not_just_the_first():
     # The scalar product_name/product_blurb only carry product 1. A multi-product
     # store's later products are model-generated copy that gets rendered, so they

@@ -364,6 +364,11 @@ class GeneratedContent(BaseModel):
     hero_image_query: str = Field(default="", max_length=120)
     hero_image_subject: str = Field(default="", max_length=120)
     lifestyle_queries: list[str] = Field(default_factory=list, max_length=3)
+    # Generation-only atmosphere for the hero of a store selling something with no
+    # physical form. Deliberately NOT a search query: it is never sent to the stock
+    # provider, because a real photograph of a real desk asserts something about
+    # goods that do not exist (see app.imagery._generated_hero).
+    hero_art_prompt: str = Field(default="", max_length=160)
     imagery: StoreImagery | None = None
 
     @field_validator("lifestyle_queries", mode="before")
@@ -757,6 +762,18 @@ def generate(desc):
         "return an EMPTY STRING for every image_query and image_subject and an EMPTY ARRAY for "
         "lifestyle_queries. Never substitute a generic desk, laptop, office or abstract scene for "
         "a product that has no photograph. An empty field is correct and expected. "
+        # The one thing those stores DO get. It is not a search query and is never
+        # sent to a stock provider: a real photograph of a real desk asserts
+        # something about goods that have no physical form, which is the claim the
+        # rule above exists to prevent. A generated frame depicts nothing real, so
+        # it can carry mood without carrying a lie — and the theme labels it.
+        "hero_art_prompt (ONLY when you returned those fields empty because the goods have no "
+        "physical form — otherwise return an EMPTY STRING): one sentence describing an "
+        "ATMOSPHERIC scene to illustrate the brand's world, which must NOT depict the product, a "
+        "screen, an interface, or any text. Describe light, material, colour and place — e.g. "
+        "'morning light across a clean oak desk with a linen notebook and a cup of black coffee' "
+        "or 'calm studio corner with paper, brass instruments and soft shadow'. No people's faces, "
+        "no logos, no signage, no invented brand marks. "
         # Colour and layout are no longer free choices. Asked to pick four hex
         # values and five style axes, the model returned essentially one palette
         # shape and three layouts across the entire catalogue — so the axes are
@@ -832,7 +849,10 @@ def _screening_text(desc: str, content: dict) -> str:
     The photography search text is included: it is model-generated, derived from the
     merchant's description, and it decides what images the store goes looking for —
     so a description steering toward disallowed imagery is caught here, on the same
-    single screening call, before any photo is requested from the provider.
+    single screening call, before any photo is requested from the provider. That
+    covers ``hero_art_prompt`` too: it never reaches a stock provider, but it is the
+    literal instruction an image GENERATOR is handed, which is if anything the more
+    important of the two to screen.
 
     The whole catalog is included too, not just the scalar product_* fields, which
     only ever carry the first product: every product's copy is model output that
@@ -847,6 +867,7 @@ def _screening_text(desc: str, content: dict) -> str:
     extra_text = [
         content.get("hero_image_query", ""),
         content.get("hero_image_subject", ""),
+        content.get("hero_art_prompt", ""),
         *(q for q in (content.get("lifestyle_queries") or []) if isinstance(q, str)),
     ]
     for product in content.get("products") or []:

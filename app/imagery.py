@@ -759,6 +759,52 @@ def _slot(
     return None
 
 
+def _generated_hero(
+    provider: _Provider,
+    prompt: str,
+    rand: Callable[[], float],
+) -> StoreImage | None:
+    """A hero for a store whose goods cannot honestly be photographed at all.
+
+    Software, templates, memberships and services get an EMPTY hero_image_query by
+    design — a stranger's laptop standing in for a Notion template is the exact false
+    claim the rest of this module exists to refuse — so :func:`_slot` never runs for
+    them and they render on their generative texture alone. That is honest but it is
+    also why 8 of the live stores had no imagery whatsoever.
+
+    Generation closes that specific hole, on one condition that makes it honest: the
+    prompt is NEVER sent to the stock provider. A searched photograph of a real desk
+    is a photograph OF something, and putting it on a software storefront asserts a
+    thing that is not true. A generated frame depicts nothing real and asserts
+    nothing about the goods — the same standard the photographed stores' heroes are
+    already held to (``require_depicts=False``; a gym floor is a fine hero for a
+    gym-wear store). It is still held to the BRANDING rule, so invented logos and
+    label text are refused exactly as they are everywhere else, and the themes
+    disclose it as generated illustration.
+
+    Hero only. A product card is a claim about the item for sale, and no amount of
+    atmosphere makes a generated frame a truthful picture of a thing being sold.
+    """
+    if not prompt or not generation_enabled() or provider.bytes_left <= 0:
+        return None
+    width, height = _GEOMETRY[_VARIANT["hero"]]
+    # Same several-seeds courtesy the photographed path gets: one unlucky
+    # deterministic draw must not be a permanent failure for that slug.
+    for _ in range(MAX_GENERATE_ATTEMPTS):
+        blob = _generate(prompt, int(rand() * 2**31), width, height)
+        if blob is None:
+            continue
+        if not _verify(blob, prompt, require_depicts=False):
+            continue
+        image = provider.store(blob, {"alt": prompt}, _VARIANT["hero"])
+        if image is not None:
+            image.generated = True
+            logger.info("imagery: generated an atmosphere hero for %r", prompt[:60])
+            return image
+    logger.info("imagery: no generated hero survived inspection for %r", prompt[:60])
+    return None
+
+
 def resolve(
     content: dict,
     store_dir: pathlib.Path,
@@ -817,6 +863,13 @@ def resolve(
         )
         if hero is not None:
             imagery.hero = hero
+        else:
+            # Nothing photographable, or nothing that survived inspection. The model
+            # supplies hero_art_prompt only when the goods have no physical form, so
+            # for every photographed store this is empty and the branch is a no-op.
+            imagery.hero = _generated_hero(
+                provider, str(content.get("hero_art_prompt") or ""), rand
+            )
 
         for query in (content.get("lifestyle_queries") or [])[:MAX_LIFESTYLE]:
             if not isinstance(query, str):

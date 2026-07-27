@@ -4,8 +4,13 @@
 Deliberately NOT :func:`app.engine.upgrade_store`. That regenerates a store's copy,
 which would rewrite the brand and blurbs of stores that already carry settled orders
 and of the three cited in ``docs/PROOF-onchain.md``. This asks the model for image
-SEARCH TEXT ONLY, derived from the copy each store already has, and leaves every word
-of that copy — and every Product row and price — untouched.
+text ONLY, derived from the copy each store already has, and leaves every word of that
+copy — and every Product row and price — untouched.
+
+"Image text" is search text plus, for a store selling something with no physical form,
+a ``hero_art_prompt``: a generation-only atmosphere line that is never sent to the stock
+provider (see ``app.imagery._generated_hero``). Those stores are exactly the ones a
+search-only backfill leaves with nothing at all.
 
 Usage (on the VPS, where the key and the stores live):
     /opt/tilla/.venv/bin/python -m scripts.backfill_imagery highland-roast
@@ -52,6 +57,7 @@ Output ONLY valid JSON (no markdown) with EXACTLY these keys:
     showing the product in use or the world around it.
   products: an array with EXACTLY {count} objects, in the SAME ORDER as listed above,
     each with image_query and image_subject.
+  hero_art_prompt: see the last paragraph. Empty string unless it applies.
 
 A product's image_query must make THAT ITEM the main subject of the frame, not a
 background detail — 'close up of black compression leggings', not 'woman at the gym'.
@@ -64,7 +70,14 @@ CRITICAL: if what is being sold cannot honestly be photographed — software, a 
 an ebook, a digital download, a subscription, a service, anything with no physical form
 — return an EMPTY STRING for every image_query and image_subject and an EMPTY ARRAY for
 lifestyle_queries. Never substitute a generic desk, laptop or office scene for a product
-that has no photograph. Empty is correct and expected."""
+that has no photograph. Empty is correct and expected.
+
+ONLY in that case, also return hero_art_prompt: one sentence describing an ATMOSPHERIC
+scene to illustrate the brand's world, which must NOT depict the product, a screen, an
+interface, or any text. Describe light, material, colour and place — e.g. 'morning light
+across a clean oak desk with a linen notebook and a cup of black coffee'. No people's
+faces, no logos, no signage. It is never searched for; it is drawn, and the page says so.
+If the goods CAN be photographed, return an empty string for it."""
 
 
 def ask_for_queries(content: dict) -> dict:
@@ -106,6 +119,14 @@ def merge_queries(content: dict, raw: dict) -> dict:
         for s in (raw.get("lifestyle_queries") or [])
         if isinstance(s, str) and s.strip()
     ][: imagery.MAX_LIFESTYLE]
+    # Generation-only, and only meaningful when the hero query came back empty —
+    # a photographable store keeps its photograph. Bounded to the same length the
+    # GeneratedContent field declares.
+    merged["hero_art_prompt"] = (
+        str(raw.get("hero_art_prompt") or "")[:160]
+        if not merged["hero_image_query"]
+        else ""
+    )
     supplied = raw.get("products") or []
     for i, product in enumerate(merged.get("products") or []):
         if not isinstance(product, dict):
@@ -120,6 +141,8 @@ def merge_queries(content: dict, raw: dict) -> dict:
 
 def describe(slug: str, content: dict) -> None:
     print(f"  hero     : {content['hero_image_query']!r}")
+    if content.get("hero_art_prompt"):
+        print(f"  hero art : {content['hero_art_prompt']!r} (generated, not searched)")
     print(f"  lifestyle: {content['lifestyle_queries']}")
     for product in content.get("products") or []:
         if isinstance(product, dict):

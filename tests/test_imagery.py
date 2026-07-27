@@ -1437,6 +1437,109 @@ class TestGeneratedImagery:
         assert result.hero is None
         assert not list(tmp_path.glob("img/*"))
 
+    # ---------------- atmosphere heroes for stores with nothing to photograph
+    # Software/templates/memberships correctly return EVERY search field empty, so
+    # _slot never runs and those stores rendered on bare texture. hero_art_prompt is
+    # the one thing they get, and it is generation-only: sending it to the stock
+    # provider would put a photograph of a real desk on a storefront for goods that
+    # have no physical form, which is the claim the empty-field rule exists to stop.
+    def _digital(self, prompt="morning light across a clean oak desk"):
+        return {
+            "hero_image_query": "",
+            "hero_image_subject": "",
+            "lifestyle_queries": [],
+            "products": [{"image_query": "", "image_subject": ""}],
+            "hero_art_prompt": prompt,
+        }
+
+    def test_a_digital_store_gets_a_generated_atmosphere_hero(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(monkeypatch, FakeSession({}))
+        monkeypatch.setattr(imagery, "_generate", lambda *a, **k: JPEG)
+        result = imagery.resolve(self._digital(), tmp_path, seeded())
+        assert result.hero is not None
+        assert result.hero.generated is True
+        assert result.hero.credit == ""
+        assert result.products == [None], "still no generated product card"
+        assert (tmp_path / result.hero.path).read_bytes() == JPEG
+
+    def test_the_art_prompt_is_never_sent_to_the_stock_provider(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        """The load-bearing guarantee. A searched photograph is a photograph OF
+        something real; putting one on a software storefront asserts a thing that is
+        not true. The prompt must reach the generator and nothing else."""
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        session = FakeSession({})
+        install(monkeypatch, session)
+        monkeypatch.setattr(imagery, "_generate", lambda *a, **k: JPEG)
+        result = imagery.resolve(self._digital(), tmp_path, seeded())
+        assert result.hero is not None and result.hero.generated is True
+        assert session.searched == [], "no search may be issued for a digital store"
+
+    def test_a_photographed_store_ignores_the_art_prompt(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        """A real photograph always wins; the atmosphere path is the empty-hero case
+        only, never a second chance to overwrite a found photo."""
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(
+            monkeypatch,
+            FakeSession({"gym floor at dawn": [photo(1, "A gym floor at dawn")]}),
+        )
+        called = []
+        monkeypatch.setattr(
+            imagery, "_generate", lambda *a, **k: called.append(1) or JPEG
+        )
+        result = imagery.resolve(
+            {
+                "hero_image_query": "gym floor at dawn",
+                "hero_image_subject": "gym floor",
+                "hero_art_prompt": "morning light across a clean oak desk",
+            },
+            tmp_path,
+            seeded(),
+        )
+        assert result.hero is not None and result.hero.generated is False
+        assert called == []
+
+    def test_an_atmosphere_hero_is_still_branding_checked(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(monkeypatch, FakeSession({}))
+        monkeypatch.setattr(imagery, "_generate", lambda *a, **k: JPEG)
+        monkeypatch.setattr(
+            imagery, "_verify", lambda blob, description, require_depicts=True: False
+        )
+        result = imagery.resolve(self._digital(), tmp_path, seeded())
+        assert result.hero is None
+        assert not list(tmp_path.glob("img/*")), "a refusal leaves no orphan file"
+
+    def test_no_art_prompt_leaves_the_store_exactly_as_it_was(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(monkeypatch, FakeSession({}))
+        called = []
+        monkeypatch.setattr(
+            imagery, "_generate", lambda *a, **k: called.append(1) or JPEG
+        )
+        result = imagery.resolve(self._digital(prompt=""), tmp_path, seeded())
+        assert result.hero is None
+        assert called == []
+
+    def test_an_atmosphere_hero_needs_generation_switched_on(
+        self, monkeypatch, keyed, tmp_path
+    ):
+        monkeypatch.delenv(imagery.GENERATE_ENV, raising=False)
+        install(monkeypatch, FakeSession({}))
+        monkeypatch.setattr(imagery, "_generate", lambda *a, **k: JPEG)
+        result = imagery.resolve(self._digital(), tmp_path, seeded())
+        assert result.hero is None
+
     def test_generation_is_seeded_and_asks_for_no_text(self, monkeypatch):
         calls = []
         self._gen(monkeypatch, calls=calls)
