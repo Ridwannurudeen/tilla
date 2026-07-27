@@ -47,11 +47,11 @@
 > Same store, two buyers. Only possible because it's built on OKX's Agent Payments Protocol rails.
 
 **Post 5 (proof it's real)**
-> This isn't a mockup. Tilla is a registered OKX ASP — agent #6961 — and it now lists
-> SIX services on the marketplace:
+> This isn't a mockup. Tilla is a registered OKX ASP — agent #6961 — and it lists
+> NINE services on the marketplace:
 >
 > 3 platform services (create / upgrade / add-product)
-> + 3 merchant storefronts Tilla built, each listed as its own buyable service
+> + 6 merchant storefronts Tilla built, each listed as its own buyable service
 >
 > Every store Tilla creates can become supply inside OKX's own marketplace.
 >
@@ -101,6 +101,20 @@ post above claims the fail-closed behaviour, which is what actually happened. Th
 is separately true from the marketplace (both report `0xf4c9…fa51`) and is kept as a parenthetical.
 See `docs/PROOF-onchain.md` §11.
 
+**Post 5e (the part that makes a generated store look real)**
+> Generated stores usually look generated: headline, blurb, price, coloured box.
+>
+> Tilla writes a photo brief per product, then refuses any picture that can't be proved to show
+> the thing being sold — it scores every candidate against the provider's own caption, and a
+> vision model looks at the chosen image before it ships. Wrong product, someone else's brand:
+> rejected.
+>
+> 26 live stores. 219 photographs. Nothing stock-generic, nothing mislabelled.
+>
+> And when a store sells software — nothing photographable — it gets drawn atmosphere instead,
+> clearly labelled as illustration. A real photo of a real desk would be a claim about goods
+> that don't exist.
+
 **Post 6 (the vision)**
 *Source for the figures, if a judge asks — McKinsey projects agentic commerce at up to **$1T in
 orchestrated US retail revenue by 2030** (~30% of projected B2C revenue across all retail
@@ -132,7 +146,9 @@ inflate it.*
 | **Live URL (product)** | https://tilla.gudman.xyz/ |
 | **Live URL (example store)** | https://tilla.gudman.xyz/s/invoice-flow/ |
 | **Endpoint (ASP)** | https://tilla.gudman.xyz/create-store (x402-gated, 0.05 USDT, "Create Storefront") |
-| **Listed services** | 6 under agent #6961 — 3 platform (create / upgrade / add-product) + 3 Tilla-built storefronts listed as buyable services |
+| **Listed services** | 9 under agent #6961 — 3 platform (create / upgrade / add-product) + 6 Tilla-built storefronts listed as buyable services. Each carries a full parameter contract and a worked example. |
+| **Scale built** | 26 live stores, every one carrying real product photography (219 images), 1218 automated tests green in CI |
+| **Agent-to-agent proof** | Job `0xcbe0ce6e…a005` — an OKX.AI user task designated to #6961 ran connect → x402 agreement → 0.05 USDT paid → deliverable returned → `[x402 Job Completed]`, producing a live store at https://tilla.gudman.xyz/s/checkpoint/ |
 | **On-chain proof log** | `docs/PROOF-onchain.md` — 11 rails proven with re-verified receipts, incl. all four x402 schemes settled and Tilla *paying* another agent (0.1 USDT0, block 66208040). All self-funded arm's-length tests, labeled as such; none is organic third-party demand. |
 | **X post link** | [placeholder — insert after posting the thread above] |
 | **Demo video link (≤90s)** | [placeholder — insert once recorded] |
@@ -147,9 +163,10 @@ inflate it.*
 > Agentic commerce is forecast at roughly $1T in the US alone by 2030 (and $3-5T globally, per McKinsey), but almost nothing exists to let a non-technical solo entrepreneur stand up a storefront that can transact with both human customers and autonomous agent buyers. Tilla is the missing on-ramp — it turns OKX's Agent Payments Protocol into something a single founder can use in one prompt, directly serving Star Xu's "one person, unlimited workforce" (OPC) thesis.
 
 **What's novel:**
-> - First storefront/checkout builder confirmed to exist on the OKX.AI marketplace (verified gap across EN and CN listings).
+> - First storefront/checkout builder confirmed to exist on the OKX.AI marketplace (verified gap across EN and CN listings — re-checked 2026-07-27: OKX's own `asp-match` router, asked to "build me an online store with crypto checkout", still returns only price/news/research agents. It has no storefront ASP to route to).
 > - Dual-sided by construction: the same store is a human-facing website and an agent-payable ASP simultaneously — a structure only expressible on OKX's rails.
 > - Full-stack proof of OKX's Agent Payments Protocol vision (x402, on-chain verification, agent-to-agent commerce) wrapped in a one-prompt UX, rather than a developer-only integration.
+> - Product imagery that fails closed: a per-product photo brief, candidates scored against the provider's own caption, and a vision check on the chosen image before it ships — so a store never displays a competitor's branded product or the wrong item. Stores selling something unphotographable get labelled generated illustration rather than a misleading stock photo.
 
 ---
 
@@ -161,7 +178,24 @@ inflate it.*
 
 ## Notes for the owner
 
-- All URLs, agent ID, the live 402 challenge, and pricing above are the verified real assets as of 2026-07-24 — nothing invented.
+- All URLs, agent ID, the live 402 challenge, and pricing above are the verified real assets, re-verified 2026-07-27 — nothing invented.
 - Two placeholders remain: the demo video link and the X-post link (fill in once each exists, then paste the X-post link into the form).
 - Recommend posting the X thread first, then using its URL in the form's "X post link" field.
 - Do not post or submit until you've reviewed and approved this draft.
+
+**⚠️ Listing status at the time of writing (2026-07-27, ~07:20 UTC).** Agent #6961 reads
+`approvalDisplayStatus 2` — *"Listing under review"* with remark *"AI quality review suggested
+pass"*, so its marketplace card currently shows **"not listed"** while the re-review runs. Two
+earlier reviews were rejected and both causes are fixed and verified: (1) an nginx rate limit
+answered OKX's own reviewer with 503 — raised, and rejections now return 429; their probes on
+2026-07-27 returned zero 503s; (2) the A2A reply layer had a stale runtime and timed out — restarted,
+and the completed job above is the proof it now answers.
+
+If the listing is still "not listed" when you submit, **say so plainly in the form rather than
+claiming otherwise** — the nine services, the endpoints, the stores and the completed A2A job are
+all independently checkable regardless of the card's state, and an honest note costs less than a
+judge finding the discrepancy. Nothing in this document depends on the review clearing.
+
+**Nine of the recent orders sit in `settling`** — OKX's review bot buys from every storefront and
+its settlements have never landed on-chain. Those are not revenue and must never be counted as
+sales; `soldCount` on the marketplace card (9) is the only figure that reflects settled activity.

@@ -146,8 +146,15 @@ Verified live 2026-07-26: `/create-store` returns 402.
 | | |
 |---|---|
 | **Screen** | OKX marketplace, agent **#6961** |
-| **Action** | Scroll the service list so all six are visible. |
-| **Shows** | 3 platform services (create 0.05 / upgrade 0.03 / add-product 0.01) + 3 Tilla-built storefronts listed as their own buyable services |
+| **Action** | Scroll the service list so all NINE are visible. |
+| **Shows** | 3 platform services (create 0.05 / upgrade 0.03 / add-product 0.01) + 6 Tilla-built storefronts listed as their own buyable services |
+
+> ⚠️ **Check this shot before you record it (updated 2026-07-27).** The listing is in re-review, so
+> the marketplace card may read **"not listed"** — if it does, this shot will not show what the
+> script describes. **Substitute:** run `onchainos agent service-list --agent-id 6961` in the
+> terminal and film that output instead — it lists all nine services with their fees and endpoints
+> and is true regardless of the card's state. Do not film a card that says "not listed" while
+> narrating that it is listed.
 
 > **Say:** "Tilla is a registered ASP on OKX — and the stores it builds get listed as services too.
 > Every store it makes becomes new supply inside OKX's own marketplace."
@@ -178,6 +185,30 @@ This is the beat almost nobody else has. Give it room.
 > **Say:** "Tilla. The commerce layer for the one-person company. Built for OKX AI."
 
 Hold the URL for a full two seconds before you cut.
+
+---
+
+## New material since the last draft (2026-07-27) — use if you have room
+
+Two things landed that are strong on camera. Both are cuttable; neither is worth losing shot 5 or 6.
+
+**Photography (best candidate — it is the most visible change).** Between shots 3 and 3b, put two
+stores side by side: `iron-built.tilla.gudman.xyz` (real product photography) and
+`focusflow.tilla.gudman.xyz` (drawn atmosphere, because it sells software).
+
+> **Say:** "Every store gets real product photography — and Tilla refuses any picture it can't
+> prove shows the thing being sold. A store selling software gets drawn atmosphere instead,
+> labelled as illustration, because a photo of a real desk would be a claim about goods that
+> don't exist."
+
+Verified 2026-07-27: 26 live stores, all carrying imagery, 219 photographs. The "Some imagery is
+generated illustration" line renders in the footer of the generated ones — worth a beat on screen.
+
+**The A2A round trip (only if shot 6 feels thin).** Job `0xcbe0ce6e…a005` — an OKX.AI user task
+designated to #6961 that ran connect → x402 agreement → 0.05 USDT paid → deliverable → completed,
+producing the live store at `tilla.gudman.xyz/s/checkpoint/`. Say it plainly as "an agent hired
+Tilla through OKX's own task rail and got a working store back." **Label it as a self-funded test —
+buyer 4844 and Tilla share an owner, and the marketplace itself blocked the rating for that reason.**
 
 ---
 
