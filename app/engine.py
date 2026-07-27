@@ -726,6 +726,19 @@ def _post_generation(prompt: str) -> dict:
         # ceiling costs nothing unless it is used (output is billed per token).
         "model": MODEL,
         "max_tokens": 2048,
+        # Same description SHOULD yield the same catalog. A customer bought twice
+        # with identical input and got different product names, different prices
+        # (5000 vs 2500) and a different product COUNT — reported 2026-07-27, see
+        # docs/ISSUES.md #1. Greedy sampling removes most of that variance.
+        #
+        # NOT a determinism guarantee, and deliberately not described as one:
+        # temperature 0 has never guaranteed byte-identical output. It is also
+        # model-gated — accepted on the configured claude-haiku-4-5, but a 400 on
+        # Opus 4.7+ / Sonnet 5 / Fable 5, and TILLA_LLM_MODEL is env-settable. The
+        # request drops it and retries once if the model rejects it (below), so a
+        # future model swap degrades to today's behaviour instead of failing every
+        # paid create-store.
+        "temperature": 0,
         "messages": [{"role": "user", "content": prompt}],
     }
     for attempt in range(2):  # initial try + at most one retry
@@ -745,6 +758,19 @@ def _post_generation(prompt: str) -> dict:
                 time.sleep(LLM_RETRY_SLEEP_SEC)
                 continue
             raise GenerationUnavailable(f"anthropic returned {r.status_code}")
+        # A model that refuses the sampling parameter (Opus 4.7+, Sonnet 5, Fable 5
+        # all 400 on `temperature`) must not take the whole paid create-store down
+        # with it: drop the field and retry once. Costs one wasted call the first
+        # time TILLA_LLM_MODEL points at such a model, then behaves as it did
+        # before determinism was added.
+        if (
+            r.status_code == 400
+            and "temperature" in payload
+            and "temperature" in r.text.lower()
+        ):
+            logger.warning("model %s rejected temperature; retrying without it", MODEL)
+            payload.pop("temperature")
+            continue
         try:
             r.raise_for_status()
         except requests.HTTPError as exc:
@@ -768,6 +794,16 @@ def generate(desc):
         "— a focused catalog of related "
         "items that fit the brand; use a single item when the merchant clearly sells one thing, "
         "otherwise 2 to 4 distinct items, "
+        # PRICES ARE THE MERCHANT'S, NOT YOURS. A real store went live selling the
+        # same service at 5000 one run and 2500 the next, from identical input,
+        # because nothing here constrained the number (docs/ISSUES.md #1). An
+        # invented price is a claim about someone's business, and a merchant who
+        # does not read the generated catalog closely could publish it.
+        "and for prices: if the merchant's description states a price, use that EXACT number for "
+        "that item and do not adjust it. When no price is stated, choose a modest, conservative "
+        "figure typical for that kind of item, keep every product in one coherent range, and "
+        "never invent a large headline figure — an unstated price is a placeholder the merchant "
+        "will correct, not a valuation of their work. "
         "emoji (single emoji for the brand), "
         # PHOTOGRAPHY. The store previously had none, and a wrong photo is worse
         # than no photo — a stock shot of a yoga mat on a store selling dumbbells

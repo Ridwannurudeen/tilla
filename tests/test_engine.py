@@ -600,3 +600,103 @@ def test_unique_slug_stays_in_pattern_with_a_long_brand_word(tmp_path, monkeypat
     slug = engine.unique_slug(base, {"tagline": "extraordinarily-long-descriptor"})
     assert len(slug) <= config.SLUG_MAX_LEN
     assert re.fullmatch(config.SLUG_PATTERN, slug), slug
+
+
+# ---------- generation request shape (docs/ISSUES.md #1) ----------
+# A customer bought twice with identical input and got different product names,
+# different prices (5000 vs 2500) and a different product count. These pin the two
+# halves of the fix: greedy sampling, and prices that belong to the merchant.
+class _Resp:
+    def __init__(self, status=200, text="", payload=None):
+        self.status_code = status
+        self.text = text
+        self._payload = payload or {
+            "content": [{"text": "{}"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(f"status {self.status_code}")
+
+
+def test_generation_requests_greedy_sampling(monkeypatch):
+    import app.engine as engine
+
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+        return _Resp()
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(engine.requests, "post", fake_post)
+    engine._post_generation("hello")
+    assert sent["temperature"] == 0
+
+
+def test_generation_drops_temperature_when_the_model_rejects_it(monkeypatch):
+    """Opus 4.7+, Sonnet 5 and Fable 5 all 400 on `temperature`, and
+    TILLA_LLM_MODEL is env-settable — a model swap must not take every paid
+    create-store down with it."""
+    import app.engine as engine
+
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(dict(json))
+        if "temperature" in json:
+            return _Resp(
+                status=400,
+                text="temperature: Extra inputs are not permitted",
+            )
+        return _Resp()
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(engine.requests, "post", fake_post)
+    out = engine._post_generation("hello")
+    assert out["content"][0]["text"] == "{}"
+    assert len(calls) == 2, "should retry exactly once"
+    assert "temperature" in calls[0] and "temperature" not in calls[1]
+
+
+def test_generation_still_fails_on_an_unrelated_400(monkeypatch):
+    import app.engine as engine
+    import pytest
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _Resp(status=400, text="messages: field required")
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(engine.requests, "post", fake_post)
+    with pytest.raises(engine.GenerationUnavailable):
+        engine._post_generation("hello")
+
+
+def test_prompt_makes_prices_belong_to_the_merchant(monkeypatch):
+    import app.engine as engine
+
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+        return _Resp()
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(engine.requests, "post", fake_post)
+    try:
+        engine.generate("I sell candles for 25 USDT")
+    except Exception:
+        pass  # the empty {} payload fails validation downstream; the prompt is the assertion
+    prompt = sent["messages"][0]["content"]
+    assert "use that EXACT number" in prompt
+    assert "never invent a large headline figure" in prompt
