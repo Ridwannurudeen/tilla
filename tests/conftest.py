@@ -37,6 +37,16 @@ def _clean_db():
 
 
 @pytest.fixture(autouse=True)
+def _sync_imagery(monkeypatch):
+    """Photography resolves inline during tests. In production it runs in a
+    background thread AFTER create_store returns (IMAGERY_ASYNC) — a thread that
+    outlives a test would run against torn-down monkeypatches and could reach the
+    real network. Tests that exercise the async path flip this back deliberately
+    with their own controlled worker."""
+    monkeypatch.setattr("app.engine.IMAGERY_ASYNC", False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limiter():
     """slowapi's in-memory limiter is a module-level singleton keyed by
     client IP; every TestClient call shares one IP, so without a reset each

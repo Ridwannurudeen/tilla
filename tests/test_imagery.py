@@ -1595,3 +1595,152 @@ def test_a_rejected_seed_walks_to_the_next_deterministic_seed(monkeypatch, tmp_p
     assert result.hero is not None and result.hero.generated is True
     assert len(seeds) == 2, "the second seed must actually be tried"
     assert (tmp_path / result.hero.path).read_bytes() == JPEG + b"b"
+
+
+# ==================================================== async photography (create path)
+# In production IMAGERY_ASYNC is ON: the paid create returns in seconds and a
+# background thread lands the photos + re-renders. Measured live 2026-07-27: OKX's
+# review client closes the connection at ~30s (nginx 499) and the inline pipeline
+# can take 30-90s — so the synchronous path was failing their harness.
+def test_async_create_spawns_the_imagery_worker(tmp_path, monkeypatch, keyed):
+    import threading
+
+    import respx
+    from httpx import Response
+
+    import app.engine as engine
+    from app.config import WARDEN_SCREEN_URL
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(engine, "IMAGERY_ASYNC", True)
+    monkeypatch.setattr(
+        engine,
+        "generate",
+        lambda desc: engine.GeneratedContent.model_validate(
+            {"store_name": "Async Store", "price_usdt": 9}
+        ).model_dump(),
+    )
+    called = {}
+    done = threading.Event()
+
+    def fake_worker(store_id, slug):
+        called["args"] = (store_id, slug)
+        done.set()
+
+    monkeypatch.setattr(engine, "_resolve_imagery_async", fake_worker)
+    with respx.mock:
+        respx.post(WARDEN_SCREEN_URL).mock(
+            return_value=Response(200, json={"verdict": "ALLOW"})
+        )
+        result = engine.create_store("async things", "0x" + "b" * 40)
+    # the create returned LIVE with no photos — the worker owns them
+    assert (tmp_path / result["slug"] / "index.html").exists()
+    assert done.wait(3), "the imagery worker must be spawned"
+    assert called["args"][1] == result["slug"]
+
+
+def test_async_worker_lands_photos_and_rerenders(tmp_path, monkeypatch, keyed):
+    """Drive the worker DIRECTLY (deterministic — no thread) against a store the
+    async create left textured: photos must reach the DB content, store.json and
+    the re-rendered page."""
+    import json as _json
+
+    import respx
+    from httpx import Response
+
+    import app.engine as engine
+    from app.config import WARDEN_SCREEN_URL
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(engine, "IMAGERY_ASYNC", True)
+    real_worker = engine._resolve_imagery_async  # saved before it is patched out
+    monkeypatch.setattr(
+        engine,
+        "generate",
+        lambda desc: engine.GeneratedContent.model_validate(
+            {
+                "store_name": "Worker Store",
+                "price_usdt": 9,
+                "product_name": "Kettle",
+                "hero_image_query": "copper kettle on a stove",
+                "hero_image_subject": "kettle stove",
+            }
+        ).model_dump(),
+    )
+    monkeypatch.setattr(engine, "_resolve_imagery_async", lambda *a: None)  # no thread
+    with respx.mock:
+        respx.post(WARDEN_SCREEN_URL).mock(
+            return_value=Response(200, json={"verdict": "ALLOW"})
+        )
+        result = engine.create_store("kettles", "0x" + "b" * 40)
+    slug = result["slug"]
+    html_before = (tmp_path / slug / "index.html").read_text(encoding="utf-8")
+    assert "img/" not in html_before
+
+    # now run the REAL worker body with the provider mocked (keyed already stubs
+    # the vision check True and sets the image key)
+    install(
+        monkeypatch,
+        FakeSession(
+            {"copper kettle on a stove": [photo(1, "A copper kettle on a stove")]}
+        ),
+    )
+    with SessionLocal() as s:
+        store_id = s.scalar(select(Store.id).where(Store.slug == slug))
+    real_worker(store_id, slug)
+
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        assert store.content["imagery"]["hero"]["path"].startswith("img/")
+    meta = _json.loads((tmp_path / slug / "store.json").read_text(encoding="utf-8"))
+    assert meta["content"]["imagery"]["hero"]["path"].startswith("img/")
+    html_after = (tmp_path / slug / "index.html").read_text(encoding="utf-8")
+    assert "img/" in html_after, "the page must be re-rendered with the photo"
+
+
+def test_async_worker_failure_leaves_the_store_standing(tmp_path, monkeypatch, keyed):
+    import respx
+    from httpx import Response
+
+    import app.engine as engine
+    from app.config import WARDEN_SCREEN_URL
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(engine, "IMAGERY_ASYNC", True)
+    real_worker = engine._resolve_imagery_async
+    monkeypatch.setattr(
+        engine,
+        "generate",
+        lambda desc: engine.GeneratedContent.model_validate(
+            {"store_name": "Sturdy Store", "price_usdt": 9}
+        ).model_dump(),
+    )
+    monkeypatch.setattr(engine, "_resolve_imagery_async", lambda *a: None)
+    with respx.mock:
+        respx.post(WARDEN_SCREEN_URL).mock(
+            return_value=Response(200, json={"verdict": "ALLOW"})
+        )
+        result = engine.create_store("sturdy goods", "0x" + "b" * 40)
+    slug = result["slug"]
+
+    def boom(*a, **k):
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(imagery, "resolve", boom)
+    with SessionLocal() as s:
+        store_id = s.scalar(select(Store.id).where(Store.slug == slug))
+    real_worker(store_id, slug)  # must swallow, not raise
+
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        assert store.status == "live"
+        # GeneratedContent always carries the key (default None); what matters is
+        # that no photos were written
+        assert not (store.content or {}).get("imagery")
+    assert (tmp_path / slug / "index.html").exists()

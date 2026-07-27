@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from collections.abc import Mapping
@@ -56,6 +57,17 @@ STORES_DIR = config.STORES_DIR
 DEFAULT_ADDR = "0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51"  # demo receive address
 # floor for a live store; a non-positive price would auto-confirm checkout
 MIN_PRICE_USDT = 1.0
+
+# Photography runs in a background thread after the store is live, because the
+# inline pipeline (provider searches + a vision check per image, sometimes
+# generation) takes 30-90s and OKX's review client hangs up at ~30s — measured
+# live 2026-07-27: their paid create-store attempts logged nginx 499 (client
+# closed) at ~30s intervals while a photography-light create completed 200 in
+# 15s. The store is fully live on its generative texture the moment the call
+# returns — photography has been a progressive enhancement since the backfill —
+# and the thread re-renders the page when the photos land. Tests that assert
+# photos synchronously flip this off.
+IMAGERY_ASYNC = True
 
 # Bound on the generation-only atmosphere prompt (GeneratedContent.hero_art_prompt).
 # Generous enough to hold one full sentence, because this text is handed straight to
@@ -1014,10 +1026,14 @@ def create_store(desc, addr=None, delivery=None, theme=None):
         # outage, or nothing that verifiably depicts the product all leave this
         # empty, and the store renders on its generative texture exactly as it did
         # before photography existed.
-        imagery.apply(
-            content,
-            imagery.resolve(content, d, _mulberry32(_fnv1a(slug + ":imagery"))),
-        )
+        #
+        # ASYNC BY DEFAULT (IMAGERY_ASYNC): the paid caller gets the live store in
+        # seconds and _resolve_imagery_async rerenders when the photos land.
+        if not IMAGERY_ASYNC:
+            imagery.apply(
+                content,
+                imagery.resolve(content, d, _mulberry32(_fnv1a(slug + ":imagery"))),
+            )
 
         if pending:
             # Persist everything needed to resume (render + go live) once
@@ -1117,11 +1133,20 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                     store_id=store.id,
                 )
                 session.commit()
+                created_store_id = store.id
             break
         except IntegrityError:
             shutil.rmtree(d, ignore_errors=True)
             if attempt == 1:
                 raise
+
+    if IMAGERY_ASYNC and imagery.enabled():
+        threading.Thread(
+            target=_resolve_imagery_async,
+            args=(created_store_id, slug),
+            name=f"imagery-{slug}",
+            daemon=True,
+        ).start()
 
     if pending:
         return {
@@ -1142,6 +1167,62 @@ def create_store(desc, addr=None, delivery=None, theme=None):
         "price_usdt": content.get("price_usdt", 0),
         "manage_key": manage_key,
     }
+
+
+def _resolve_imagery_async(store_id: int, slug: str) -> None:
+    """Resolve a fresh store's photography AFTER its create call has returned.
+
+    The paid caller already has a fully live store on its generative texture; this
+    thread adds the photographs and re-renders when they land. It re-reads the
+    store's content from the DB at BOTH ends: at the start so the queries resolved
+    are the persisted ones, and again before writing, so a catalog edit that
+    happened while the provider was searching is never clobbered by a stale copy
+    (photos attach per product id via imagery.apply, same as the backfill).
+    Fail-open like every other imagery path — any error leaves the store exactly
+    as the create call delivered it, and only this thread dies.
+    """
+    try:
+        with SessionLocal() as session:
+            store = session.get(Store, store_id)
+            if store is None or not isinstance(store.content, dict):
+                return
+            content = json.loads(json.dumps(store.content))
+        d = STORES_DIR / slug
+        resolved = imagery.resolve(content, d, _mulberry32(_fnv1a(slug + ":imagery")))
+        if (
+            resolved.hero is None
+            and not any(image is not None for image in resolved.products)
+            and not resolved.lifestyle
+        ):
+            return  # nothing cleared the bar; the texture stands
+        with SessionLocal() as session:
+            store = session.get(Store, store_id)
+            if store is None or not isinstance(store.content, dict):
+                return
+            content = json.loads(json.dumps(store.content))
+            imagery.apply(content, resolved)
+            store.content = content
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(store, "content")
+            meta_path = d / "store.json"
+            if meta_path.is_file():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                meta["content"] = content
+                meta_path.write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            # Pending stores get their render (with these photos) from
+            # resume_pending; re-rendering here would create the index.html that
+            # keeps checkout 409'd until screening clears.
+            if store.status == "live":
+                _write_store_pages(d, content, store.pay_to, slug, store.theme)
+            session.commit()
+        logger.info("imagery: async resolve landed for %s", slug)
+    except Exception:
+        logger.exception(
+            "imagery: async resolve failed for %s (store keeps its texture)", slug
+        )
 
 
 def upgrade_store(session, store, description=None, theme=None) -> dict:
