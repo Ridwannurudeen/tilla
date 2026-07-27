@@ -51,6 +51,21 @@ the contract chosen.
 regenerates the whole presentation. Tell affected merchants to check their catalog before sharing
 the URL.
 
-**Status:** open, deferred past the 2026-07-27 submission deadline by decision — production is frozen
-during judging, and this is a quality defect in generated copy, not a failure of purchase, payment,
-delivery or fund safety. Both of the reporter's stores are live and were paid for successfully.
+**Status: FIXED 2026-07-28** (`39631f2`, deployed). Both halves shipped:
+
+1. *Prices belong to the merchant.* A price stated in the description is now used exactly; an
+   unstated one must be modest, coherent across the catalog, and never a large headline figure.
+   This is the half that mattered — an invented 5000 is a claim about someone's business.
+2. *The catalog stops rerolling.* Sampling is greedy (`temperature: 0`), so the same description
+   no longer yields different names, prices and product counts. Deliberately **not** described as a
+   determinism guarantee: temperature 0 has never guaranteed byte-identical output.
+
+`temperature` is model-gated — accepted on the configured `claude-haiku-4-5`, a 400 on Opus 4.7+ /
+Sonnet 5 / Fable 5 — and `TILLA_LLM_MODEL` is env-settable, so the request drops the field and
+retries once if the model refuses. A future model swap degrades to the old behaviour instead of
+failing every paid `create-store`. Four tests pin the request shape, the retry, and that an
+unrelated 400 still fails loudly.
+
+The reporter's two stores are unchanged and still live; the fix applies to stores created from now
+on. Either can be regenerated with its `manage_key` via `upgrade-store` if they want the new
+pricing behaviour applied.
