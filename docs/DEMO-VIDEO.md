@@ -146,13 +146,13 @@ Verified live 2026-07-26: `/create-store` returns 402.
 | | |
 |---|---|
 | **Screen** | OKX marketplace, agent **#6961** |
-| **Action** | Scroll the service list so all NINE are visible. |
-| **Shows** | 3 platform services (create 0.05 / upgrade 0.03 / add-product 0.01) + 6 Tilla-built storefronts listed as their own buyable services |
+| **Action** | Scroll the service list so all SEVEN are visible. |
+| **Shows** | Create Storefront (0.05) + 6 Tilla-built storefronts listed as their own buyable services |
 
 > ⚠️ **Check this shot before you record it (updated 2026-07-27).** The listing is in re-review, so
 > the marketplace card may read **"not listed"** — if it does, this shot will not show what the
 > script describes. **Substitute:** run `onchainos agent service-list --agent-id 6961` in the
-> terminal and film that output instead — it lists all nine services with their fees and endpoints
+> terminal and film that output instead — it lists all seven services with their fees and endpoints
 > and is true regardless of the card's state. Do not film a card that says "not listed" while
 > narrating that it is listed.
 

@@ -48,9 +48,9 @@
 
 **Post 5 (proof it's real)**
 > This isn't a mockup. Tilla is a registered OKX ASP — agent #6961 — and it lists
-> NINE services on the marketplace:
+> SEVEN services on the marketplace:
 >
-> 3 platform services (create / upgrade / add-product)
+> the Create Storefront platform service
 > + 6 merchant storefronts Tilla built, each listed as its own buyable service
 >
 > Every store Tilla creates can become supply inside OKX's own marketplace.
@@ -146,7 +146,7 @@ inflate it.*
 | **Live URL (product)** | https://tilla.gudman.xyz/ |
 | **Live URL (example store)** | https://tilla.gudman.xyz/s/invoice-flow/ |
 | **Endpoint (ASP)** | https://tilla.gudman.xyz/create-store (x402-gated, 0.05 USDT, "Create Storefront") |
-| **Listed services** | 9 under agent #6961 — 3 platform (create / upgrade / add-product) + 6 Tilla-built storefronts listed as buyable services. Each carries a full parameter contract and a worked example. |
+| **Listed services** | 7 under agent #6961 — Create Storefront + 6 Tilla-built storefronts listed as buyable services. Each carries a full parameter contract and a worked example, and every one completes for an unattended agent buyer (an empty paid create returns a sample store). |
 | **Scale built** | 26 live stores, every one carrying real product photography (219 images), 1218 automated tests green in CI |
 | **Agent-to-agent proof** | Job `0xcbe0ce6e…a005` — an OKX.AI user task designated to #6961 ran connect → x402 agreement → 0.05 USDT paid → deliverable returned → `[x402 Job Completed]`, producing a live store at https://tilla.gudman.xyz/s/checkpoint/ |
 | **On-chain proof log** | `docs/PROOF-onchain.md` — 11 rails proven with re-verified receipts, incl. all four x402 schemes settled and Tilla *paying* another agent (0.1 USDT0, block 66208040). All self-funded arm's-length tests, labeled as such; none is organic third-party demand. |
@@ -192,7 +192,7 @@ answered OKX's own reviewer with 503 — raised, and rejections now return 429; 
 and the completed job above is the proof it now answers.
 
 If the listing is still "not listed" when you submit, **say so plainly in the form rather than
-claiming otherwise** — the nine services, the endpoints, the stores and the completed A2A job are
+claiming otherwise** — the seven services, the endpoints, the stores and the completed A2A job are
 all independently checkable regardless of the card's state, and an honest note costs less than a
 judge finding the discrepancy. Nothing in this document depends on the review clearing.
 
