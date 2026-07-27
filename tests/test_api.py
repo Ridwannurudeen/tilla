@@ -27,9 +27,25 @@ def test_checkout_404_unknown_store():
 
 
 # ---------- validation ----------
-def test_create_store_422_on_empty_description():
+# ABSENT input is defaulted to the sample store; PRESENT-but-invalid input still
+# refuses. OKX's review automation pays and then replays an empty body — a 422
+# there became "endpoint requires parameters" in the agent task flow, no human
+# answered, and the review timed out. These pin the split.
+def test_create_store_empty_description_proceeds_to_sample_store():
+    # Without TILLA_LLM_KEY the handler 503s AFTER validation — so a 503 here
+    # proves the empty body was accepted, same as the valid-body test above.
     r = client.post("/create-store", json={"description": ""})
-    assert r.status_code == 422
+    assert r.status_code == 503
+
+
+def test_create_store_empty_json_body_proceeds():
+    r = client.post("/create-store", json={})
+    assert r.status_code == 503
+
+
+def test_create_store_no_body_at_all_proceeds():
+    r = client.post("/create-store")
+    assert r.status_code == 503
 
 
 def test_create_store_422_on_oversized_description():
@@ -223,6 +239,47 @@ def test_create_store_live_when_screening_allows(tmp_path, monkeypatch):
     assert (slug_dir / "index.html").exists()
     meta = json.loads((slug_dir / "store.json").read_text(encoding="utf-8"))
     assert meta["status"] == "live"
+
+
+@respx.mock
+def test_create_store_empty_body_delivers_the_sample_store(tmp_path, monkeypatch):
+    # The full unattended-reviewer path: paid POST with NO parameters ends in a
+    # live store built from DEFAULT_STORE_DESCRIPTION, and the response says a
+    # default was used so a machine caller can tell its input never arrived.
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    seen = {}
+
+    def fake_generate(desc):
+        from app.engine import GeneratedContent
+
+        seen["description"] = desc
+        return GeneratedContent.model_validate(
+            {"store_name": "Sample Store", "price_usdt": 9}
+        ).model_dump()
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr("app.engine.generate", fake_generate)
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    r = client.post("/create-store", json={})
+    assert r.status_code == 200
+    body = r.json()
+    assert seen["description"] == app.main.DEFAULT_STORE_DESCRIPTION
+    assert "sample store" in body["note"]
+    assert (tmp_path / body["slug"] / "index.html").exists()
+
+
+@respx.mock
+def test_create_store_with_description_carries_no_note(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    _mock_llm(monkeypatch, {"store_name": "Real Store", "price_usdt": 9})
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    r = client.post("/create-store", json={"description": "I sell honest socks"})
+    assert r.status_code == 200
+    assert "note" not in r.json()
 
 
 @respx.mock

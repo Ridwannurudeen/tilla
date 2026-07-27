@@ -609,8 +609,24 @@ def custom_domain_image(
 
 
 # ---------- ASP endpoint: create a store (x402-paid) ----------
+# What a paid caller gets when they supply NO description at all. OKX's review
+# automation pays the x402 challenge and then replays with an empty body — a 422
+# there surfaces in the agent task flow as "endpoint requires parameters", which
+# asks a human, and an unattended reviewer has none: the task times out and the
+# listing is rejected for it (twice, 2026-07-27). A paid call with no parameters
+# now delivers a sample store instead. Only ABSENT input is defaulted — input
+# that is present but invalid (bad address, unknown theme, oversized text) still
+# refuses before settle, because silently "fixing" an explicit value could route
+# a merchant's sales to a mistyped wallet.
+DEFAULT_STORE_DESCRIPTION = (
+    "A small digital studio selling a downloadable weekly planner template for 9 USDT"
+)
+
+
 class CreateStoreBody(BaseModel):
-    description: str = Field(min_length=1, max_length=config.MAX_DESCRIPTION_LEN)
+    # Optional since the empty-body fix: "" (or an absent body) means the caller
+    # asked for a store without saying what it sells — they get the sample store.
+    description: str = Field(default="", max_length=config.MAX_DESCRIPTION_LEN)
     receive_address: str | None = None
     # Optional theme choice; None lets the LLM pick. An unknown value is a 422.
     theme: str | None = None
@@ -663,10 +679,25 @@ def _run_create_store(
 
 @app.post("/create-store")
 @limiter.limit("6/minute")
-def create_store_post(request: Request, body: CreateStoreBody):
+def create_store_post(request: Request, body: CreateStoreBody | None = None):
     if not os.environ.get("TILLA_LLM_KEY"):
         raise HTTPException(503, "generation unavailable")
-    return _run_create_store(body.description, body.receive_address, body.theme)
+    # `None` covers a POST with no JSON body at all — the same caller-supplied-
+    # nothing case as `{}`, so it earns the same sample store, not a 422.
+    body = body or CreateStoreBody()
+    description = body.description.strip()
+    defaulted = not description
+    if defaulted:
+        description = DEFAULT_STORE_DESCRIPTION
+    result = _run_create_store(description, body.receive_address, body.theme)
+    if defaulted and isinstance(result, dict):
+        # Additive: tell the (machine) caller what happened, so an agent that
+        # meant to pass a description can see its input never arrived.
+        result["note"] = (
+            "no description provided; a sample store was generated — POST "
+            '{"description": "what you sell"} to create a real one'
+        )
+    return result
 
 
 @app.get("/create-store")
@@ -679,7 +710,10 @@ def create_store_get(request: Request):
     return JSONResponse(
         {
             "error": "method not allowed; use POST to create a store",
-            "how": "POST {description, receive_address, theme?} (x402-paid) → returns a live store URL",
+            "how": (
+                "POST {description?, receive_address?, theme?} (x402-paid) → "
+                "returns a live store URL; an empty body creates a sample store"
+            ),
         },
         status_code=405,
         headers={"Allow": "POST"},

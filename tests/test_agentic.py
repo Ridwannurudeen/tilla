@@ -110,9 +110,12 @@ def test_agent_card_skills_carry_input_schema_and_sla():
     card = client.get("/.well-known/agent-card.json").json()
     skills = {s["id"]: s for s in card["skills"]}
     cs = skills["create-store"]
-    # the create-store input contract is the real CreateStoreBody schema
+    # the create-store input contract is the real CreateStoreBody schema —
+    # description became OPTIONAL with the empty-body-creates-a-sample-store fix,
+    # and the card must advertise that truthfully so an unattended agent knows a
+    # bare paid POST completes.
     assert "description" in cs["input_schema"]["properties"]
-    assert "description" in cs["input_schema"]["required"]
+    assert "description" not in cs["input_schema"].get("required", [])
     assert cs["sample_request"]["description"]
     assert isinstance(cs["sla_minutes"], int) and cs["sla_minutes"] > 0
     # buy advertises the optional product_id selector
