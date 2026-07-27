@@ -299,6 +299,38 @@ agent's service over x402 and uses the answer in its own pipeline.
   between two agents under one owner — a proof of the *mechanism*, not of third-party demand.
   Recorded here exactly as loudly as the settlement itself.
 
+## 12. Tilla buys from THIRD-PARTY agents it does not own — PROVEN (2026-07-28)
+Entry #11 proves Tilla can spend, but discloses its own limit: Warden is operator-owned, so it is a
+proof of *mechanism*, not of third-party demand. This entry closes that gap in the other direction —
+Tilla paying **agents under different owners**, chosen by them, on endpoints it does not control.
+
+Three purchases, each x402 `exact` on `eip155:196`, **0.01 USDT0** apiece, payer
+`0xf4c9…fa51`, all settled and all delivering a real response:
+
+| ASP | Service | settle tx | Returned |
+|---|---|---|---|
+| **Argus** (agent 5246) | Wallet risk screening | `0xd0f6c2c3025d9ab14e914a089fb51d7e` + `a97586c997c6d1d8c35956d1c1524076` | `verdict: safe`, score 0, empty `flags`, plain-language recommendation |
+| **VigilOK** (agent 6032) | Aave V3 position health | `0x775b6002307f11860d528160505bf608` + `6533a48e384b9e85f6a2a4fabf23259c` | `hasPosition: false`, `healthFactor: null`, `riskLevel: NO_DEBT` |
+| **Oddsmith** (agent 9639) | Live quote + preview | `0xad0c76b1323d484f485ba6165e6a1512` + `1dac62a29ddb2c3c528302bc5c8131a0` | OKB quote 86.3605, `toAmount` 0.011579366577679355 |
+
+Wallet balance moved **39.790953 -> 39.760953 USDT0**, exactly -0.030000 for the three.
+
+- **One of the three is independently checkable, and checks out.** Oddsmith quoted OKB at
+  **86.3605**; OKX's own market feed returned **86.2412** at the same minute — 0.14% apart, normal
+  quote spread — and its arithmetic is exact ($1 / 86.3605 = 0.011579366577679355, matching
+  `toAmount` to the final digit). Verifying a counterparty's *correctness*, not merely its
+  liveness, is the point of this entry.
+- **The OKX task rail could not drive any of these.** Designating Argus through
+  `agent create-task --provider 5246` returned *"The x402 endpoint of the designated ASP is invalid
+  and cannot be used."* That claim is false: OKX's own `x402-check` returns `valid: true` on the
+  same endpoint, and a raw probe returns a well-formed 402 in 0.76s. The task was closed unpaid
+  (tx `0xe737292bf7f117cbaecc6b77953b59ed` + `fe8cda4cf282bdd21f56f93dd7a8a508`) and all three were
+  paid **directly over x402** instead — the A2MCP path. Recorded because it is a platform-side
+  defect, not a fault of the three ASPs, and none of it was held against them in the ratings.
+- **Honest limits of what this proves.** These are purchases Tilla chose to make, not demand that
+  found Tilla; and one of the three (VigilOK) could only be exercised in its empty state, because
+  no wallet with an open Aave V3 position was available to screen. Both stated in the reviews.
+
 ## Summary
 
 | Rail | Proof tx(s) | Block(s) | Status |

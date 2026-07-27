@@ -76,9 +76,11 @@ store, so a shop's look never drifts — verified stable across all 18 live stor
 ## Photography that matches what is being sold
 
 Describe a gym-wear brand and the store shows leggings on a person in a gym — not a headline over a
-gradient. Every generated store resolves real photographs at creation time and **self-hosts them in its
-own directory** ([`app/imagery.py`](app/imagery.py)), so pages stay fast, need no third-party image CDN,
-leak no buyer to anyone, and keep working forever.
+gradient. Every generated store resolves real photographs and **self-hosts them in its own directory**
+([`app/imagery.py`](app/imagery.py)), so pages stay fast, need no third-party image CDN, leak no buyer
+to anyone, and keep working forever. Resolution runs **in the background**: a paid `create-store`
+returns a live store in seconds and the photographs land on the page moments later, because a buyer —
+human or agent — should not wait on an image pipeline to find out whether their purchase worked.
 
 The hard part is not fetching a picture, it is fetching the *right* one, and that is enforced rather
 than hoped for:
@@ -95,6 +97,17 @@ than hoped for:
 - **Agents see them too.** `feed.json`, the OpenAI product feed and Google Merchant `g:image_link` all
   carry the photograph, and `schema.org/Product` uses the real product shot rather than the brand card —
   a catalog entry with a picture is worth more to a buying agent deciding what to purchase.
+
+- **A vision check before the photo ships.** Caption scoring cannot see what a caption never mentions,
+  so the chosen image is shown to a vision model and rejected if it does not depict the product or
+  carries someone else's branding — a maple-watch store was offered a flat-lay containing a Casio, a
+  Canon and AirPods with none of them named in the alt text, and a hot-sauce store a Tabasco bottle.
+  Both refused. Rejection hands the slot to the runner-up rather than emptying it.
+- **Stores with nothing photographable get drawn atmosphere, labelled as such.** Software, templates
+  and memberships correctly return no image query at all — a stock photo of a stranger's desk would be
+  a claim about goods that have no physical form. Those stores get a generated hero instead, which is
+  never sent to the stock provider, never used on a product card, held to the same branding rule, and
+  disclosed on the page as generated illustration.
 
 Photography is additive and fails open: with no provider key, an outage, or nothing relevant found, the
 store is created exactly as before. Photographs are credited to their photographer with a link back, as
@@ -167,19 +180,28 @@ The rail proofs above are self-funded arm's-length tests and are labeled as such
 distinguishes proven *mechanism* from customer *traction* throughout, so anything cited here holds up
 to being checked.
 
-Traction is tracked separately and to the same standard. Tilla's marketplace listing carries
-**public reviews from independent buyer wallets** — including a 0.05 USDT `create-store` purchase
-settled on-chain by an outside agent operator, who received a live store at
-`tilla.gudman.xyz/s/agentforge/` and left a 94/100 review noting an honest connector-side hiccup.
-Those are checkable on the listing for ASP #6961; no rating here was solicited in exchange for
-anything, and the marketplace's own self-feedback block prevents Tilla from reviewing itself.
+Traction is tracked separately and to the same standard. ASP #6961 carries **four public reviews
+from three independent buyer wallets** (all in the 5-star band, `securityRate` 5.0, `soldCount` 49)
+— including a 0.05 USDT `create-store` purchase settled on-chain by an outside agent operator, who
+received a live store at `tilla.gudman.xyz/s/agentforge/` and left a 94/100 review flagging an
+honest connector-side hiccup. Every one is checkable on the listing; none was solicited in exchange
+for anything, and the marketplace's own self-feedback block means Tilla cannot review itself.
+
+**Tilla also buys.** Most entries in an agent marketplace only sell. Tilla hires other agents and
+pays them over x402: a Warden security screen before every store goes live (0.1 USDT0 — but Warden
+is operator-owned, so that proves the mechanism, not third-party demand), and — closing exactly that
+gap — three purchases from agents under *different* owners: Argus (#5246), VigilOK (#6032) and
+Oddsmith (#9639), 0.01 USDT0 each, all settled on X Layer, all delivering real responses. One is
+independently verifiable and verifies: Oddsmith quoted OKB at 86.3605 against OKX's own feed at
+86.2412 the same minute, with exact conversion arithmetic. Receipts as
+[`docs/PROOF-onchain.md` §12](docs/PROOF-onchain.md).
 
 ## Development
 
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 1224 tests
+pytest -q                # 1228 tests
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target
@@ -204,6 +226,7 @@ Migrations: `alembic upgrade head`. The local repo is the source of truth; the V
 | [`docs/runbooks/`](docs/runbooks/) | Rail enablement, custom domains, photography, on-chain marketplace ops |
 | [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md) | Why no two stores look alike, and how it is enforced |
 | [`docs/VISION.md`](docs/VISION.md) | Forward "commerce OS" design + what's built (M15–M18) |
+| [`docs/ISSUES.md`](docs/ISSUES.md) | Known defects with reproductions — including the first customer-reported bug and its fix |
 
 ## Security & invariants
 
