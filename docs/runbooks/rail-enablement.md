@@ -81,7 +81,7 @@ themselves. There is no code path that moves funds — confirmed by a source-lev
 
 - **OKX agent-marketplace listing — already LIVE (not a to-do).** Tilla is registered on OKX as ASP /
   ERC-8004 agent **#6961** with the paid **"Create Storefront"** service — the first store-builder on the
-  OKX.AI marketplace (see `docs/SUBMISSION.md`) — settling in USDT0 on **X Layer (196)**. This is Tilla's
+  OKX.AI marketplace — settling in USDT0 on **X Layer (196)**. This is Tilla's
   home ecosystem and the base listing is done. `docs/runbooks/M10-onchain.md` covers only the OPTIONAL,
   approval-gated **expansions** on top of it: extra platform services (`upgrade-store`, `add-product`),
   per-store ASP delta-services (`onchainos agent update --agent-id 6961 …`), the per-store ASP-identity

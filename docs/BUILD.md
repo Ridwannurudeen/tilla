@@ -39,7 +39,7 @@ tilla/                      # git repo root (GITHUB-FILES/tilla)
   alembic/                  # migrations
   tests/                    # pytest suite
   scripts/deploy.sh         # file-by-file scp + restart + smoke
-  docs/                     # ROADMAP.md, BUILD.md, DEMO-SCRIPT.md, SUBMISSION.md
+  docs/                     # ROADMAP.md, BUILD.md, PROOF-onchain.md, VISION.md
 ```
 
 ## 2. Pinned toolchain (all versions verified on PyPI/npm 2026-07-20)
@@ -211,7 +211,7 @@ The full Phase 3–4 "commerce OS" (plugin ecosystem, cross-chain, B2B/federatio
 
 ## 6. Definition of done (per module and overall)
 
-Module: code + tests green in CI + deployed live + smoke-tested + committed + one-line CHANGELOG entry. Overall: ROADMAP Phases 1–3 fully live; every claim in SUBMISSION.md backed by a receipt, tx hash, or test run; zero known Sev-1 (security/fund-loss) issues; memory files updated.
+Module: code + tests green in CI + deployed live + smoke-tested + committed + one-line CHANGELOG entry. Overall: ROADMAP Phases 1–3 fully live; every public claim backed by a receipt, tx hash, or test run; zero known Sev-1 (security/fund-loss) issues; memory files updated.
 
 ## 7. Spikes (run before their dependent modules; log results in docs/spikes.md)
 

@@ -12,9 +12,11 @@ person can.
 - **Live:** https://tilla.gudman.xyz — example store: https://highland-roast.tilla.gudman.xyz
   (every store also answers at `tilla.gudman.xyz/s/<slug>/`, and a merchant can point their own
   domain at it — see [`docs/runbooks/custom-domains.md`](docs/runbooks/custom-domains.md))
-- **OKX marketplace:** listed as ASP **#6961** with **six services** — three platform endpoints
-  (x402-gated `create-store` 0.05, `upgrade-store` 0.03, `add-product` 0.01) plus three Tilla-built
-  storefronts listed as their own buyable services, so every store Tilla makes becomes marketplace supply
+- **OKX marketplace:** live and **listed** as ASP **#6961** with **seven services** — the x402-gated
+  `create-store` platform endpoint (0.05 USDT) plus **six Tilla-built storefronts listed as their own
+  buyable services**, so every store Tilla makes becomes marketplace supply. Every listed service
+  completes for an *unattended* agent buyer: a paid `create-store` with an empty body returns a
+  sample store rather than asking a human for parameters.
 - **Settlement:** X Layer mainnet (chainId 196), USDT0 `0x779ded0c9e1022225f8e0630b35a9b54be713736`
 
 ## Why it's different
@@ -161,16 +163,23 @@ each a single clean transaction — full receipts in [`docs/PROOF-onchain.md`](d
 - **aggr_deferred** — the facilitator relayer settles batched orders on-chain; Tilla's reconciler
   detects the transfer and finalizes the orders (settling → delivered) from on-chain evidence.
 
-Every settlement above is a self-funded arm's-length test and is labeled as one — the proof log
-distinguishes proven mechanism from customer traction throughout, so anything cited here holds up to
-being checked.
+The rail proofs above are self-funded arm's-length tests and are labeled as such — the proof log
+distinguishes proven *mechanism* from customer *traction* throughout, so anything cited here holds up
+to being checked.
+
+Traction is tracked separately and to the same standard. Tilla's marketplace listing carries
+**public reviews from independent buyer wallets** — including a 0.05 USDT `create-store` purchase
+settled on-chain by an outside agent operator, who received a live store at
+`tilla.gudman.xyz/s/agentforge/` and left a 94/100 review noting an honest connector-side hiccup.
+Those are checkable on the listing for ASP #6961; no rating here was solicited in exchange for
+anything, and the marketplace's own self-feedback block prevents Tilla from reviewing itself.
 
 ## Development
 
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 1164 tests
+pytest -q                # 1224 tests
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target

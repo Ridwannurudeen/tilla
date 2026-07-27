@@ -9,3 +9,7 @@ stores/
 tilla.db*
 .env
 node_modules/
+
+# Submission prep — personal working files, not product docs
+docs/SUBMISSION.md
+docs/DEMO-VIDEO.md
