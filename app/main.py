@@ -2300,6 +2300,18 @@ if os.getenv("OKX_API_KEY"):
         accepts=[build_payment_option(_rail)],
         description="Tilla — create a live crypto storefront on X Layer",
         mime_type="application/json",
+        unpaid_response_body=agentic.unpaid_schema_body(
+            CreateStoreBody.model_json_schema(),
+            "POST {description, theme} with an x402 payment to create a live "
+            "storefront. Every field is optional: an empty or absent body "
+            "creates a sample store.",
+            # The sample the agent card already publishes, kept identical so the
+            # card and the challenge cannot disagree.
+            {
+                "description": "single-origin coffee beans, roasted to order",
+                "theme": "original",
+            },
+        ),
     )
     # ':slug' compiles to [^/]+ (no cross-slash match). pay_to + price resolve
     # per request from the DB; a settle failure runs the compensating hook. The
@@ -2319,11 +2331,24 @@ if os.getenv("OKX_API_KEY"):
         accepts=[build_fee_payment_option(_rail, "30000")],
         description="Tilla — upgrade an existing storefront (0.03 USDT)",
         mime_type="application/json",
+        unpaid_response_body=agentic.unpaid_schema_body(
+            UpgradeStoreBody.model_json_schema(),
+            "Owner-only: requires the store's manage_key as "
+            "'Authorization: Bearer <manage_key>', minted to whoever paid to "
+            "create it. Omitting description regenerates from the store's "
+            "existing one.",
+        ),
     )
     _add_product_route = RouteConfig(
         accepts=[build_fee_payment_option(_rail, "10000")],
         description="Tilla — add a product to a storefront (0.01 USDT)",
         mime_type="application/json",
+        unpaid_response_body=agentic.unpaid_schema_body(
+            AddProductBody.model_json_schema(),
+            "Owner-only: requires the store's manage_key as "
+            "'Authorization: Bearer <manage_key>', minted to whoever paid to "
+            "create it.",
+        ),
     )
     _paid = {
         "POST /create-store": _route,

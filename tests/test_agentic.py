@@ -928,3 +928,38 @@ def test_root_mcp_unknown_tool_and_bad_args():
 
 def test_root_mcp_get_is_405():
     assert client.get("/mcp").status_code == 405
+
+
+def test_unpaid_schema_body_publishes_the_request_schema():
+    # Regression: the unpaid 402 body was an empty {} on every paid route, so a
+    # buyer following the plain x402 flow (POST -> 402 -> pay -> replay) never
+    # fetched the agent card and had no machine-readable way to learn the
+    # parameters before paying.
+    from app.agentic import unpaid_schema_body
+    from app.main import CreateStoreBody
+
+    hook = unpaid_schema_body(
+        CreateStoreBody.model_json_schema(),
+        "POST {description, theme}",
+        {"description": "coffee", "theme": "original"},
+    )
+    out = hook(object())
+    assert out.content_type == "application/json"
+    assert out.body["error"] == "payment_required"
+    assert out.body["summary"] == "POST {description, theme}"
+    assert out.body["sample_request"] == {"description": "coffee", "theme": "original"}
+    # Derived from the model the handler validates against, so it cannot drift.
+    assert "description" in out.body["input_schema"]["properties"]
+    assert "theme" in out.body["input_schema"]["properties"]
+
+
+def test_unpaid_schema_body_omits_sample_when_not_given():
+    from app.agentic import unpaid_schema_body
+    from app.main import AddProductBody
+
+    body = unpaid_schema_body(
+        AddProductBody.model_json_schema(), "Owner-only: manage_key required."
+    )(object()).body
+    assert "sample_request" not in body
+    assert "manage_key" in body["summary"]
+    assert set(body["input_schema"]["required"]) == {"slug", "name", "price_usdt"}

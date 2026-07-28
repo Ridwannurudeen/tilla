@@ -877,6 +877,31 @@ def _nonce_from_context(context) -> str | None:
         return None
 
 
+def unpaid_schema_body(schema: dict, summary: str, sample: dict | None = None):
+    """Build an x402 ``unpaid_response_body`` hook publishing a route's request
+    schema in its 402 body.
+
+    The agent card carries the same schemas, but a buyer following the plain x402
+    flow (POST -> 402 -> pay -> replay) never fetches the card: it saw an empty
+    ``{}`` and had to guess the parameters before paying. The SDK invokes this
+    hook ONLY when no payment was supplied, so the schema rides the unpaid
+    challenge alone and is never echoed into a payment payload. Callers pass the
+    same request models the handlers validate against, so a published schema
+    cannot drift from what the endpoint actually accepts."""
+    body: dict = {
+        "error": "payment_required",
+        "summary": summary,
+        "input_schema": schema,
+    }
+    if sample is not None:
+        body["sample_request"] = sample
+
+    def _hook(context) -> HTTPResponseBody:
+        return HTTPResponseBody(content_type="application/json", body=body)
+
+    return _hook
+
+
 async def store_settle_failed_hook(context, failure) -> HTTPResponseBody:
     """x402 ``settlement_failed_response_body`` hook (async → off-loop). Recovers
     the nonce from the PAYMENT-SIGNATURE header and voids/recovers the order."""
