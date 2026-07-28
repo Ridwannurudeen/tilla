@@ -152,3 +152,19 @@ def test_verify_evidence_route_roundtrip(make_store):
     bundle["paid_micro"] = 999_999_999  # a holder inflating the amount
     r = client.post("/api/verify-evidence", json={"bundle": bundle, "signature": sig})
     assert r.json()["valid"] is False
+
+
+def test_agent_card_advertises_the_evidence_service():
+    # Discovery is the whole point of shipping this unlisted: an agent that never
+    # sees it cannot buy it.
+    card = client.get("/.well-known/agent-card.json").json()
+    skill = next(s for s in card["skills"] if s["id"] == "verify-delivery")
+    assert skill["x402"]["endpoint"] == "/verify-delivery"
+    assert skill["x402"]["price"].startswith("0.01")
+    assert set(skill["input_schema"]["properties"]) == {
+        "order_id",
+        "tx_hash",
+        "attestation_uid",
+    }
+    # the free re-check must be advertised too, or the signature is unusable
+    assert any(a["endpoint"] == "/api/verify-evidence" for a in skill["nextActions"])

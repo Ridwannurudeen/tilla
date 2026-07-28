@@ -2199,6 +2199,52 @@ def agent_card(request: Request):
                     },
                 ],
             },
+            {
+                "id": "verify-delivery",
+                "name": "Verify a delivery",
+                "description": (
+                    "Signed evidence for one delivered order. The chain already "
+                    "proves the payment; this proves what was delivered against "
+                    "it — the content hash of the payload, whether the buyer "
+                    "accepted or disputed it, and any refund. On-chain anchors "
+                    "(settlement tx, EAS attestation) ride along so the verifiable "
+                    "half needs no trust in Tilla."
+                ),
+                "x402": {
+                    "endpoint": "/verify-delivery",
+                    "price": f"0.01 {CURRENCY}",
+                },
+                "input_schema": {
+                    "type": "object",
+                    "description": "supply exactly one handle",
+                    "properties": {
+                        "order_id": {"type": "string"},
+                        "tx_hash": {"type": "string"},
+                        "attestation_uid": {"type": "string"},
+                    },
+                },
+                "sample_request": {"tx_hash": "0x" + "ab" * 32},
+                "nextActions": [
+                    {
+                        "type": "x402_buy",
+                        "method": "POST",
+                        "endpoint": "/verify-delivery",
+                        "protocol": "x402-v2",
+                        "description": (
+                            "POST one of {order_id, tx_hash, attestation_uid} with "
+                            "an x402 payment to get the signed bundle."
+                        ),
+                    },
+                    {
+                        "type": "verify",
+                        "method": "POST",
+                        "endpoint": "/api/verify-evidence",
+                        "description": (
+                            "Re-check any bundle's signature. Free, no payment."
+                        ),
+                    },
+                ],
+            },
         ],
         "payment": {
             "protocol": "x402-v2",
