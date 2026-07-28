@@ -274,3 +274,11 @@ Migrations: `alembic upgrade head`. The local repo is the source of truth; the V
 - Secrets never in the repo (`.env` lives on the VPS, chmod 600); test fixtures use fake creds.
 - Autoescape is mandated in the theme loader, not the theme.
 - Every settlement transition is idempotent and requires a confirmed on-chain tx hash.
+
+## Licence
+
+[MIT](LICENSE) © 2026 Ridwan Nurudeen.
+
+The product photographs Tilla resolves at runtime are **not** part of this repository — they are
+fetched per store, self-hosted on the deployment, and credited to their photographer with a link
+back as their provider's licence requires. Only Tilla's own brand assets are committed here.
