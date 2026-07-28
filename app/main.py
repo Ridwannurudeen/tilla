@@ -46,6 +46,7 @@ from app import (
     delivery,
     embed,
     escrow,
+    evidence,
     external_feeds,
     federation,
     growth,
@@ -732,6 +733,59 @@ def create_store_get(request: Request):
         status_code=405,
         headers={"Allow": "POST"},
     )
+
+
+# ---------------- delivery evidence: what Tilla sold, portably provable ----------
+class VerifyDeliveryBody(BaseModel):
+    """One of the three handles a counterparty could plausibly be holding: the order
+    id from a receipt, the settlement tx from the chain, or the EAS UID."""
+
+    order_id: str | None = Field(default=None, max_length=32)
+    tx_hash: str | None = Field(default=None, max_length=66)
+    attestation_uid: str | None = Field(default=None, max_length=66)
+
+
+class VerifyEvidenceBody(BaseModel):
+    bundle: dict
+    signature: str = Field(min_length=1, max_length=200)
+
+
+@app.post("/verify-delivery")
+@limiter.limit("60/minute")
+def verify_delivery(
+    request: Request,
+    body: VerifyDeliveryBody | None = None,
+    session: Session = Depends(get_session),
+):
+    """Signed, portable evidence for one delivered order (x402-paid).
+
+    The chain already proves money moved; this proves WHAT moved against it — the
+    delivered payload's content hash, whether the buyer accepted or disputed it, and
+    any refund — none of which is derivable from the transfer alone. The on-chain
+    anchors ride along so a reader can check the verifiable half without trusting us
+    (see app/evidence.py for the trust model)."""
+    body = body or VerifyDeliveryBody()
+    bundle = evidence.build_bundle(
+        session,
+        order_id=body.order_id,
+        tx_hash=body.tx_hash,
+        attestation_uid=body.attestation_uid,
+    )
+    try:
+        signature = evidence.sign_bundle(bundle)
+    except evidence.EvidenceUnavailable:
+        # Fail closed: an unsigned bundle would still LOOK authoritative.
+        raise HTTPException(503, "evidence signing is not configured") from None
+    return {"bundle": bundle, "signature": signature}
+
+
+@app.post("/api/verify-evidence")
+@limiter.limit("120/minute")
+def verify_evidence(request: Request, body: VerifyEvidenceBody):
+    """Re-check a bundle someone else is holding. FREE and unauthenticated on
+    purpose: evidence nobody can afford to verify is not evidence, and this reveals
+    nothing the bundle's holder does not already have."""
+    return {"valid": evidence.verify_bundle(body.bundle, body.signature)}
 
 
 # ---------- M10 marketplace services: upgrade a store / add a product ----------
@@ -2353,6 +2407,22 @@ if os.getenv("OKX_API_KEY"):
             "existing one.",
         ),
     )
+    # 0.01 USDT — priced at the marketplace's clearing price for a single-call
+    # lookup rather than Tilla's create-store fee, because this is a per-check
+    # service an agent may run many times, not a one-off purchase.
+    _verify_route = RouteConfig(
+        accepts=[build_fee_payment_option(_rail, "10000")],
+        description="Tilla — verify a delivery: signed evidence of what was sold",
+        mime_type="application/json",
+        unpaid_response_body=agentic.unpaid_schema_body(
+            VerifyDeliveryBody.model_json_schema(),
+            "POST any one of {order_id, tx_hash, attestation_uid} to get signed "
+            "evidence for that delivered order: content hash, buyer accept/dispute "
+            "state, refunds, plus on-chain anchors you can verify yourself. "
+            "Re-check any bundle free at POST /api/verify-evidence.",
+            {"tx_hash": "0x" + "ab" * 32},
+        ),
+    )
     _add_product_route = RouteConfig(
         accepts=[build_fee_payment_option(_rail, "10000")],
         description="Tilla — add a product to a storefront (0.01 USDT)",
@@ -2371,6 +2441,10 @@ if os.getenv("OKX_API_KEY"):
         "GET /upgrade-store": _upgrade_route,
         "POST /add-product": _add_product_route,
         "GET /add-product": _add_product_route,
+        "POST /verify-delivery": _verify_route,
+        # GET registered for the same reason as the others: onchainos' x402-check
+        # probes GET and expects a challenge, and the handler is POST-only.
+        "GET /verify-delivery": _verify_route,
         "POST /s/:slug/buy": _store_route,
         # Register GET so an UNPAID GET on the buy path returns the 402 challenge
         # (listing-review robustness); a PAID GET reaches agentic.agent_buy_get and
