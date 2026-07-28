@@ -85,6 +85,20 @@ from app.models import (
 from app.screening import ScreeningBlocked, ScreeningUnavailable, screen
 
 logger = logging.getLogger("tilla")
+# The app never configured logging, so every logger.info() was silently dropped in
+# production — the per-store LLM token spend and the background loops' start lines
+# among them, which meant a deploy could not be confirmed from the journal. TWO
+# gates were closed: "tilla" sat at NOTSET inheriting root's WARNING, AND neither
+# it nor root had any handler, so records fell through to logging.lastResort, which
+# is hardwired at WARNING (uvicorn configures only its own uvicorn* loggers). Both
+# have to open, hence the handler as well as the level. Attached here rather than
+# via basicConfig so INFO is enabled for this app alone — a root handler would also
+# uncork httpx/sqlalchemy/web3 chatter onto a box shared with ~18 other projects.
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _log_handler = logging.StreamHandler()  # stderr -> journald under systemd
+    _log_handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+    logger.addHandler(_log_handler)
 
 _EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _TX_HASH = re.compile(r"^0x[0-9a-fA-F]{64}$")
