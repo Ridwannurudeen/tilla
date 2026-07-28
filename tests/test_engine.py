@@ -1,3 +1,4 @@
+import collections
 import json
 import re
 
@@ -502,6 +503,36 @@ def test_resolve_design_spreads_across_the_space():
     assert len(combos) >= 40, f"only {len(combos)} distinct looks across 300 slugs"
     assert themes == {"original", "bold", "editorial"}, themes
     assert heroes == {"stacked", "split", "offset"}, heroes
+
+
+def test_published_design_spread_figures_still_hold():
+    """README.md and docs/DESIGN-DNA.md publish these exact numbers. They were once
+    quoted from a run the code had moved past — 81 looks and 2.5% when the truth was
+    90 and 1.68% — and nothing caught it, because prose cannot fail. This test is the
+    guard: if it fails the code changed legitimately, and BOTH documents must be
+    updated to whatever it now reports rather than the assertion relaxed."""
+    n = 4000
+    combos = collections.Counter()
+    personas = collections.Counter()
+    for i in range(n):
+        dna, persona, _theme = resolve_design(f"store-{i}", {})
+        combos[tuple(sorted(dna.items()))] += 1
+        personas[persona] += 1
+
+    top_share = combos.most_common(1)[0][1] / n * 100
+    shares = sorted(c / n * 100 for c in personas.values())
+
+    assert len(combos) == 90, f"README says 90 distinct looks, got {len(combos)}"
+    assert round(top_share, 2) == 1.68, (
+        f"README says 1.68% modal share, got {top_share:.2f}%"
+    )
+    assert len(personas) == len(_PERSONAS) == 10
+    assert round(shares[0], 1) == 9.3, (
+        f"README says personas start at 9.3%, got {shares[0]:.2f}%"
+    )
+    assert round(shares[-1], 1) == 10.6, (
+        f"README says personas top out at 10.6%, got {shares[-1]:.2f}%"
+    )
 
 
 def test_resolve_design_honours_an_llm_named_persona():

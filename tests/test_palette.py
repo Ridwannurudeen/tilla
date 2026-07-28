@@ -30,8 +30,12 @@ COMBOS = [(h, m) for h in sorted(HARMONIES) for m in sorted(MOODS)]
 def test_every_hue_meets_every_floor(harmony, mood):
     """Text readable, brand colours findable, accent perceptibly its own colour —
     for all 360 degrees. A single failing hue means some merchant gets a storefront
-    with invisible body copy."""
-    for hue in range(0, 360, 3):
+    with invisible body copy.
+
+    Every hue, not every third: 360 x 4 harmonies x 4 moods = the 5760 combinations
+    README.md claims are verified. Sampling a third of them and publishing the whole
+    space as covered is the gap this closes."""
+    for hue in range(360):
         p = derive(hue, harmony, mood)
         assert contrast(p["text"], p["bg"]) >= MIN_TEXT_CONTRAST - 1e-9, (hue, p)
         assert contrast(p["primary"], p["bg"]) >= MIN_BRAND_CONTRAST - 1e-9, (hue, p)

@@ -241,7 +241,7 @@ independently verifiable and verifies: Oddsmith quoted OKB at 86.3605 against OK
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 1228 tests
+pytest -q                # 1229 tests
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target
