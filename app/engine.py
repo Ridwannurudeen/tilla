@@ -898,6 +898,11 @@ def generate(desc):
     # 0 would violate the Product price_micro>0 CHECK). Clamp every product up to a
     # sane floor, then re-mirror the primary product onto the scalar fields.
     for product in data["products"]:
+        # USDT0 settles at 6dp, so quantise BEFORE the check: store.json is written
+        # from this content before the Product row exists, and only a price already
+        # at micro precision can round-trip through price_micro unchanged. A
+        # sub-micro price is economically zero and falls into the clamp below.
+        product["price_usdt"] = round(float(product["price_usdt"]), 6)
         if product["price_usdt"] <= 0:
             logger.warning(
                 "generated product %r had no valid price; coercing to %.2f USDT",
@@ -1021,6 +1026,11 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     # owner by construction). Only its sha256 hash is persisted.
     manage_key, manage_key_hash = mint_manage_key()
 
+    # What the receipt quotes. resync_catalog rebuilds content from the persisted
+    # Product rows, so the live storefront can differ from the generation values
+    # this dict starts as; the live-store branch replaces it with the persisted
+    # catalog so a receipt can never promise a price checkout will not honour.
+    receipt_content = content
     # Resolve the slug and write everything slug-dependent inside a short retry
     # loop: stores.slug is UNIQUE, so a concurrent create that grabbed the same
     # candidate between our check and insert raises IntegrityError — we clean up,
@@ -1137,9 +1147,15 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                         Product(
                             store_id=store.id,
                             name=str(item.get("name", "")),
+                            # Guards the CHECK only. A stated sub-1-USDT price is
+                            # legitimate — the catalog schema allows ge=0, the
+                            # dashboard ge=0.01, and Tilla's own services sell at
+                            # 0.01-0.05 — so this must never silently reprice a
+                            # merchant's catalog; generate() has already coerced
+                            # any non-positive price to MIN_PRICE_USDT.
                             price_micro=max(
                                 int(round(float(item.get("price_usdt", 0)) * 1e6)),
-                                int(MIN_PRICE_USDT * 1e6),
+                                1,
                             ),
                             active=True,
                         )
@@ -1150,6 +1166,7 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                 # ids). Pending stores get this when resume_pending flips them live.
                 if not pending:
                     resync_catalog(session, store)
+                    receipt_content = dict(store.content or {})
                 # Record the screening receipt in the SAME txn as the store row. A
                 # pending (screening-unavailable) create has no verdict, so no
                 # receipt — one is written when resume_pending flips it live.
@@ -1197,10 +1214,10 @@ def create_store(desc, addr=None, delivery=None, theme=None):
         }
     return {
         "slug": slug,
-        "store_name": content.get("store_name", ""),
+        "store_name": receipt_content.get("store_name", ""),
         "url": f"https://tilla.gudman.xyz/s/{slug}/",
-        "product_name": content.get("product_name", ""),
-        "price_usdt": content.get("price_usdt", 0),
+        "product_name": receipt_content.get("product_name", ""),
+        "price_usdt": receipt_content.get("price_usdt", 0),
         "manage_key": manage_key,
     }
 

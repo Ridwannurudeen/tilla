@@ -185,6 +185,82 @@ def test_create_store_missing_price_never_goes_live_at_zero(tmp_path, monkeypatc
     assert meta["amount_usdt"] != 0
 
 
+@respx.mock
+def test_create_store_honours_a_stated_sub_one_usdt_price(tmp_path, monkeypatch):
+    # Regression: a merchant who states "0.5 USDT" was silently repriced to 1.0 by
+    # the persist-time floor, while the create receipt still quoted 0.5 — so the
+    # receipt promised half what checkout would charge. The receipt, the persisted
+    # Product row and store.json must all agree on the stated price.
+    import app.engine as engine
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Dossier",
+            "products": [
+                {"name": "Due Diligence Report", "price_usdt": 0.5, "cta_text": "Buy"}
+            ],
+        },
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("reports for 0.5 USDT")
+
+    assert result["price_usdt"] == 0.5
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == result["slug"]))
+        rows = s.scalars(
+            select(Product).where(Product.store_id == store.id).order_by(Product.id)
+        ).all()
+    assert [(r.name, r.price_micro) for r in rows] == [
+        ("Due Diligence Report", 500_000)
+    ]
+    meta = json.loads(
+        (tmp_path / result["slug"] / "store.json").read_text(encoding="utf-8")
+    )
+    assert meta["amount_usdt"] == 0.5
+
+
+@respx.mock
+def test_create_store_receipt_matches_persisted_catalog(tmp_path, monkeypatch):
+    # The receipt is built from the post-resync catalog, so whatever the persist
+    # path stores is what the caller is quoted — no divergence is possible.
+    import app.engine as engine
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Postcards",
+            "products": [
+                {"name": "Thank You Postcard", "price_usdt": 0.25, "cta_text": "Buy"}
+            ],
+        },
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("postcards")
+
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == result["slug"]))
+        primary = s.scalars(
+            select(Product).where(Product.store_id == store.id).order_by(Product.id)
+        ).first()
+    assert result["price_usdt"] == primary.price_micro / 1e6
+    assert result["product_name"] == primary.name
+
+
 def test_screening_text_includes_cta_and_emoji():
     content = {
         "store_name": "Store",
@@ -731,3 +807,33 @@ def test_prompt_makes_prices_belong_to_the_merchant(monkeypatch):
     prompt = sent["messages"][0]["content"]
     assert "use that EXACT number" in prompt
     assert "never invent a large headline figure" in prompt
+
+
+def test_generate_quantises_price_to_micro_precision(monkeypatch):
+    # store.json is written from generated content before the Product row exists,
+    # so a price finer than USDT0's 6dp would persist as a rounded price_micro the
+    # on-disk record never sees. A sub-micro price is economically zero and takes
+    # the same clamp a non-positive one does.
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Dust",
+            "products": [{"name": "Speck", "price_usdt": 0.0000004, "cta_text": "Buy"}],
+        },
+    )
+    import app.engine as engine
+
+    data = generate("dust-priced item")
+    assert data["products"][0]["price_usdt"] == engine.MIN_PRICE_USDT
+    assert data["price_usdt"] == engine.MIN_PRICE_USDT
+
+
+def test_generate_preserves_a_micro_precise_price(monkeypatch):
+    _fake_llm_response(
+        monkeypatch,
+        {
+            "store_name": "Fine",
+            "products": [{"name": "Bit", "price_usdt": 0.123456, "cta_text": "Buy"}],
+        },
+    )
+    assert generate("fine-priced item")["price_usdt"] == 0.123456
