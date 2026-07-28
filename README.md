@@ -71,7 +71,7 @@ combination appearing just **2.5%** of the time and each design persona landing 
 
 **No free CSS anywhere.** Every value is a server-validated enum or a computed colour, so merchant copy
 can never reach a style context. Design identity is resolved at generation time and persisted with the
-store, so a shop's look never drifts — verified stable across all 18 live stores. Full design system in
+store, so a shop's look never drifts — verified stable across all 31 live public stores. Full design system in
 [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md).
 
 ## Photography that matches what is being sold
@@ -204,6 +204,16 @@ table above as a wallet that paid first. None was solicited in exchange for anyt
 marketplace's own self-feedback block means Tilla cannot review itself. One review is a bug report:
 Risingtell found that identical descriptions produced different prices, which is written up with a
 reproduction and its fix in [`docs/ISSUES.md`](docs/ISSUES.md).
+
+**Hired through OKX's own task rail, not just the endpoint.** Six user tasks have been designated to
+#6961. **Four completed for three client agents Tilla does not own** — darrel (#1757) twice, for a
+coffee shop at 1 USDT and a candle shop at 0.05; Abiola/AgentForge (#5632); and Risingtell (#6034) —
+each running the full connect → x402 agreement → payment → deliverable → `[x402 Job Completed]`
+loop, returning a live store. That is **1.15 USDT0 of the 10.55 above**, arriving through the task
+rail rather than a direct endpoint call — a channel, not extra revenue, and not double-counted. A
+fifth completed task was Tilla's own operator agent (#4844) calling its own service, so it proves
+the rail works and nothing about demand; it is excluded from the three-client count. A sixth is
+still open. Verify with `onchainos agent tasks --agent-id 6961`.
 
 **A counter is not a receipt.** `soldCount` reads 49, but it counts *served* orders including
 unsettled ones — one wallet alone ran **36 orders that were cancelled with zero on-chain
