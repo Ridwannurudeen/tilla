@@ -28,6 +28,15 @@ WARDEN_SCREEN_TIMEOUT = float(os.environ.get("TILLA_SCREEN_TIMEOUT", "10"))
 WARDEN_PAID_SCAN_URL = os.environ.get(
     "TILLA_WARDEN_SCAN_URL", "https://warden.gudman.xyz/scan"
 )
+# /verify-delivery's fee, in micro-USDT0. ONE constant because the price is stated
+# in two places — the x402 challenge and the agent card — and a price stated twice
+# is a price that eventually disagrees with itself (that is exactly how a create
+# receipt came to quote 0.5 while checkout charged 1.0). Set below the 0.01 the
+# marketplace's evidence services charge: this is a DB read plus an HMAC, so its
+# marginal cost is effectively zero and volume matters more than margin. Unlike
+# create-store — which pays Warden 0.1 per call and therefore has a hard price
+# floor — this one can sit at the bottom of the market.
+VERIFY_DELIVERY_FEE_MICRO = 5000
 # The signing key for Tilla's payer wallet. VPS .env only, NEVER in the repo; when
 # unset the paid path is unreachable regardless of the flag.
 TILLA_WARDEN_PAYER_KEY = os.environ.get("TILLA_WARDEN_PAYER_KEY", "")

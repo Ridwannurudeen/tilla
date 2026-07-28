@@ -2407,11 +2407,13 @@ if os.getenv("OKX_API_KEY"):
             "existing one.",
         ),
     )
-    # 0.01 USDT — priced at the marketplace's clearing price for a single-call
-    # lookup rather than Tilla's create-store fee, because this is a per-check
-    # service an agent may run many times, not a one-off purchase.
+    # Priced from ONE constant (config.VERIFY_DELIVERY_FEE_MICRO) shared with the
+    # agent card, well under the 0.01 the marketplace's evidence services charge:
+    # this is a per-check lookup an agent may run many times, not a one-off purchase.
     _verify_route = RouteConfig(
-        accepts=[build_fee_payment_option(_rail, "10000")],
+        accepts=[
+            build_fee_payment_option(_rail, str(config.VERIFY_DELIVERY_FEE_MICRO))
+        ],
         description="Tilla — verify a delivery: signed evidence of what was sold",
         mime_type="application/json",
         unpaid_response_body=agentic.unpaid_schema_body(

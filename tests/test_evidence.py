@@ -160,7 +160,10 @@ def test_agent_card_advertises_the_evidence_service():
     card = client.get("/.well-known/agent-card.json").json()
     skill = next(s for s in card["skills"] if s["id"] == "verify-delivery")
     assert skill["x402"]["endpoint"] == "/verify-delivery"
-    assert skill["x402"]["price"].startswith("0.01")
+    assert skill["x402"]["price"].endswith(" USDT")
+    assert float(skill["x402"]["price"].split()[0]) == (
+        config.VERIFY_DELIVERY_FEE_MICRO / 1e6
+    )
     assert set(skill["input_schema"]["properties"]) == {
         "order_id",
         "tx_hash",
@@ -168,3 +171,19 @@ def test_agent_card_advertises_the_evidence_service():
     }
     # the free re-check must be advertised too, or the signature is unusable
     assert any(a["endpoint"] == "/api/verify-evidence" for a in skill["nextActions"])
+
+
+def test_card_price_is_derived_from_the_fee_constant(monkeypatch):
+    # The price appears in two places -- the 402 challenge and the agent card -- so
+    # it comes from one constant. A price stated twice eventually disagrees with
+    # itself, which is exactly how a receipt came to quote 0.5 while checkout
+    # charged 1.0.
+    monkeypatch.setattr(config, "VERIFY_DELIVERY_FEE_MICRO", 5000)
+    card = client.get("/.well-known/agent-card.json").json()
+    skill = next(s for s in card["skills"] if s["id"] == "verify-delivery")
+    assert skill["x402"]["price"] == "0.005 USDT"
+
+    monkeypatch.setattr(config, "VERIFY_DELIVERY_FEE_MICRO", 1000)
+    card = client.get("/.well-known/agent-card.json").json()
+    skill = next(s for s in card["skills"] if s["id"] == "verify-delivery")
+    assert skill["x402"]["price"] == "0.001 USDT"

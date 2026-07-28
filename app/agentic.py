@@ -2212,7 +2212,14 @@ def agent_card(request: Request):
                 ),
                 "x402": {
                     "endpoint": "/verify-delivery",
-                    "price": f"0.01 {CURRENCY}",
+                    # From the same constant the 402 challenge is built from, so the
+                    # advertised price cannot drift from the charged one.
+                    "price": (
+                        f"{config.VERIFY_DELIVERY_FEE_MICRO / 1e6:.6f}".rstrip(
+                            "0"
+                        ).rstrip(".")
+                        + f" {CURRENCY}"
+                    ),
                 },
                 "input_schema": {
                     "type": "object",
