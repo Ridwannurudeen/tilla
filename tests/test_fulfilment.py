@@ -230,3 +230,40 @@ def test_a_store_without_a_deliverable_still_sells(tmp_path, monkeypatch):
     assert row is not None and row.kind == "text"
     assert ent is None  # nothing to be entitled to
     assert "/files/" not in row.payload  # and no fabricated link
+
+
+@respx.mock
+def test_unconfigured_response_names_the_create_time_field(tmp_path, monkeypatch):
+    # A merchant reported never learning the create call can carry the goods
+    # itself: naming only the follow-up endpoint left them to discover the field,
+    # which is how a store ships empty twice.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setenv("TILLA_LLM_KEY", "k")
+    _fake_llm(monkeypatch, _content("Advertised"))
+    _allow()
+    r = client.post("/create-store", json={"description": "guides"})
+    assert r.status_code == 200, r.text
+    f = r.json()["fulfilment"]
+    assert f["configured"] is False
+    assert "deliverable" in f["next_time"]
+    assert "/deliverable" in f["note"]  # the follow-up endpoint is still named
+
+
+@respx.mock
+def test_configured_response_says_so(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setenv("TILLA_LLM_KEY", "k")
+    _fake_llm(monkeypatch, _content("Configured"))
+    _allow()
+    r = client.post(
+        "/create-store",
+        json={"description": "guides", "deliverable": {"kind": "license"}},
+    )
+    assert r.status_code == 200, r.text
+    f = r.json()["fulfilment"]
+    assert f["configured"] is True and f["kind"] == "license"
+    assert "next_time" not in f  # nothing to advise; they already did it

@@ -126,6 +126,35 @@ Photography is additive and fails open: with no provider key, an outage, or noth
 store is created exactly as before. Photographs are credited to their photographer with a link back, as
 their licence requires.
 
+## Buying from Tilla as an agent
+
+Two routes. Direct x402 needs nothing but the endpoint:
+
+```bash
+curl -sX POST https://tilla.gudman.xyz/create-store \
+  -H 'content-type: application/json' \
+  -d '{"description":"what you sell","deliverable":{"kind":"license"}}'
+# 402 + a PAYMENT-REQUIRED challenge; pay it and replay the same request
+```
+
+Passing `deliverable` is what makes the store sell **real goods** on day one: a delivered order mints
+an entitlement and the buyer receives a licence key (or a signed download URL, once a file is
+uploaded) instead of a delivery message. `kind` is `text` or `license` here; files go to
+`POST /api/stores/<slug>/deliverable` with the `manage_key` as a Bearer token, since multipart cannot
+ride a JSON create call. Omit it and the store still works — buyers just get the delivery message
+until fulfilment is configured.
+
+Via the OKX task rail, hire ASP **#6961** and pass the **`serviceId`**:
+
+```
+Create Storefront → serviceId d2039e5a-9e3c-472f-abcf-329138b3da1d
+```
+
+⚠️ `service-list` returns **two** identifiers on each service — `id` (numeric, `35929`) and
+`serviceId` (the UUID above). `create-task --service-id` wants the **UUID**. A buyer reported
+grabbing `id` because it is the more obvious field name, so read `serviceId` explicitly rather than
+the first identifier you see.
+
 ## Payment rails (x402)
 
 All four x402 schemes are built, tested, and **settled on-chain** — `exact` (including the agent buy

@@ -781,6 +781,14 @@ def create_store_post(request: Request, body: CreateStoreBody | None = None):
                     f"/api/stores/{result['slug']}/deliverable using the "
                     "manage_key as 'Authorization: Bearer <manage_key>'."
                 ),
+                # A merchant told us they never learned this call could carry the
+                # goods itself; naming only the follow-up endpoint left them to
+                # discover the field, which is how a store ships empty twice.
+                "next_time": (
+                    'pass it on the create call instead: {"description": "...", '
+                    '"deliverable": {"kind": "license"}} — kind is "text" or '
+                    '"license" here; files use the endpoint above.'
+                ),
             }
         )
     return result
