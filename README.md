@@ -9,6 +9,7 @@ is simultaneously a human web checkout and a machine-payable surface — feeds, 
 card, and x402 pay endpoints — so an autonomous agent can discover and buy from it the same way a
 person can.
 
+- **Demo video (81s):** https://youtu.be/mR4XXnKaY64
 - **Live:** https://tilla.gudman.xyz — example store: https://highland-roast.tilla.gudman.xyz
   (every store also answers at `tilla.gudman.xyz/s/<slug>/`, and a merchant can point their own
   domain at it — see [`docs/runbooks/custom-domains.md`](docs/runbooks/custom-domains.md))
