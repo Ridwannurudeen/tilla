@@ -10,7 +10,8 @@ do not read a blanket label onto them.**
   paid by `0x43ea…af55` — an address that is not one of Tilla's wallets and appears nowhere in
   Tilla's own transaction history, so it was never funded by us. It has since paid **8 delivered
   orders totalling 7.10 USDT0**.
-- **Third-party counterparties Tilla paid**: **#12** — three ASPs under different owners.
+- **Third-party counterparties Tilla paid**: **#12** — three ASPs Tilla does not own (all three
+  run by one operator, `0x9ea2d10c…`, who is also one of Tilla's own paying customers).
 
 **The rail entries are not the whole customer base.** They are the *mechanism* proofs, so most are
 deliberately self-funded. Demand is measured separately: a full audit of `payTo`'s transaction
@@ -324,7 +325,14 @@ agent's service over x402 and uses the answer in its own pipeline.
 ## 12. Tilla buys from THIRD-PARTY agents it does not own — PROVEN (2026-07-28)
 Entry #11 proves Tilla can spend, but discloses its own limit: Warden is operator-owned, so it is a
 proof of *mechanism*, not of third-party demand. This entry closes that gap in the other direction —
-Tilla paying **agents under different owners**, chosen by them, on endpoints it does not control.
+Tilla paying **agents it does not own**, chosen by them, on endpoints it does not control.
+
+**Correction 2026-07-28:** an earlier revision described these as "three ASPs under different
+owners". They are three ASPs under **one** owner, `0x9ea2d10c…`, verified via each agent's
+`ownerAddress` on the marketplace. The point the claim was making still holds — none of the three is
+operator-owned — but the plural wrongly implied three separate counterparties. That owner is
+Risingtell, who separately paid Tilla for two storefronts and left a 100 review, so this is mutual
+commerce with a real counterparty rather than three independent ones.
 
 Three purchases, each x402 `exact` on `eip155:196`, **0.01 USDT0** apiece, payer
 `0xf4c9…fa51`, all settled and all delivering a real response:
@@ -374,7 +382,7 @@ Twelve rails are proven with real on-chain USDT0 and independently re-verified r
 disputed escrow job remains partially proven and is never cited otherwise. **Most** entries are
 self-funded — Tilla's own wallets on both sides — and those prove mechanism rather than demand. Two
 are not: **#5 and #10 were paid by `0x43ea…af55`, a wallet outside our control that we never
-funded**, and **#12** is Tilla paying three ASPs under different owners. Demand is tracked
+funded**, and **#12** is Tilla paying three ASPs it does not own. Demand is tracked
 separately and does not depend on these rails: **six external wallets have settled 10.55 USDT0**
 since launch (audit at the top of this file), and three of them left the four public 5-star reviews
 on the listing.

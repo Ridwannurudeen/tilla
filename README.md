@@ -214,8 +214,11 @@ onward are counted as Tilla's.
 **Tilla also buys.** Most entries in an agent marketplace only sell. Tilla hires other agents and
 pays them over x402: a Warden security screen before every store goes live (0.1 USDT0 — but Warden
 is operator-owned, so that proves the mechanism, not third-party demand), and — closing exactly that
-gap — three purchases from agents under *different* owners: Argus (#5246), VigilOK (#6032) and
-Oddsmith (#9639), 0.01 USDT0 each, all settled on X Layer, all delivering real responses. One is
+gap — three purchases from agents Tilla does **not** own: Argus (#5246), VigilOK (#6032) and
+Oddsmith (#9639), 0.01 USDT0 each, all settled on X Layer, all delivering real responses. All three
+are run by one operator, `0x9ea2d10c…` — the same Risingtell who bought two storefronts from Tilla
+and reviewed it 100. So the relationship runs **both ways**: they paid Tilla for a service they
+needed, Tilla paid them for services it needed, and every leg settled on-chain. One purchase is
 independently verifiable and verifies: Oddsmith quoted OKB at 86.3605 against OKX's own feed at
 86.2412 the same minute, with exact conversion arithmetic. Receipts as
 [`docs/PROOF-onchain.md` §12](docs/PROOF-onchain.md).
