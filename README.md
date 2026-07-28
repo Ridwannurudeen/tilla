@@ -50,8 +50,9 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
 Two merchants can describe the same business and get visibly different shops. Layout, typography and
 colour are **derived per store** from its own identity — seeded by the store's slug through the same
 FNV-1a + mulberry32 construction the themes run for their generative texture, so one slug produces one
-coherent design. Across 4000 slugs that yields **81 distinct structural looks**, with the most common
-combination appearing just **2.5%** of the time and each design persona landing within 9.5–10.6%.
+coherent design. Across 4000 slugs that yields **90 distinct structural looks**, with the most common
+combination appearing just **1.68%** of the time and each of the ten design personas landing within
+9.3–10.6%. Re-measured against the current code on 2026-07-28, not quoted from an earlier run.
 
 - **Ten curated design personas** — `quiet-luxury`, `gallery`, `poster`, `zine`, `technical`,
   `warm-craft` and more. Each is a coherent bundle of scale, weight, rhythm, hero layout and texture,
@@ -64,7 +65,8 @@ combination appearing just **2.5%** of the time and each design persona landing 
   harmony and mood generate the whole palette, and nothing is emitted until it clears real floors:
   body text **≥ 7:1** contrast, brand colours **≥ 3:1**, and the accent held **≥ 22 ΔE** from both the
   primary and the body text — a perceptual measure, because two colours can share a contrast ratio and
-  still be impossible to tell apart. **2880 hue/harmony/mood combinations verified, zero failures.**
+  still be impossible to tell apart. **All 5760 hue/harmony/mood combinations verified — 360 hues x 4
+  harmonies x 4 moods — zero failures.**
   Every merchant gets a palette that is legible by construction.
 - **The model picks the hue that suits the product** — 25 for roasted coffee, 210 for a productivity
   tool, 45 for beeswax — and the engine turns that single judgement into a complete, accessible system.
@@ -153,9 +155,9 @@ app/
   federation.py   mirror-of-mirrors feed ingest
   growth.py       merchant growth kit (draft → approve → publish; publish is a user action)
 themes/           autoescaped Jinja2 store themes
-contracts/        StoreRegistry.sol (deployed on X Layer, 0x4507…BfCe6)
-sdk/python/       tilla-sdk (Python) — shipped
-sdk/typescript/   TypeScript SDK
+contracts/src/    StoreRegistry.sol (deployed on X Layer, 0x4507…BfCe6)
+sdk/python/       tilla-sdk (Python) — installable from source, not published to PyPI
+sdk/typescript/   tilla-sdk (TypeScript) — installable from source, not published to npm
 docs/             ROADMAP, BUILD, protocol spec, runbooks, on-chain proof
 ```
 

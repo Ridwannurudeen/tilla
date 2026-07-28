@@ -13,8 +13,11 @@
 > **1. The axes are seeded, not requested.** `resolve_design(slug, content)` derives
 > them from an FNV-1a + mulberry32 draw on the slug — the same construction the
 > mosaic already ran client-side, so one slug now seeds a store's whole identity.
-> Measured over 4000 slugs: each persona lands within 9.5–10.6% and the most common
-> full combination holds 2.5%. Three effective looks became 81.
+> Measured over 4000 slugs: each persona lands within 9.3–10.6% and the most common
+> full combination holds 1.68%. Three effective looks became 90. (Re-measured against
+> the current code 2026-07-28; an earlier revision quoted 81 / 2.5% / 9.5%, which the
+> code has since moved past. Reproduce by calling `resolve_design(f"store-{n}", {})`
+> over `range(4000)` and counting distinct `dna` tuples.)
 >
 > **2. Seeded picks are personas, not independent rolls.** Every axis value is
 > individually safe, but independence is not taste — `monumental` + `tight` + `dense`
@@ -35,7 +38,11 @@
 > one hue plus a named harmony and mood, and enforces text ≥ 7:1, brand ≥ 3:1, and —
 > perceptually, via CIE76 ΔE rather than a contrast ratio, because a red and a green
 > of equal luminance score 1.0 — an accent ≥ 22 ΔE from both the primary and the
-> text. Verified across 2880 hue/harmony/mood combinations with zero failures.
+> text. Verified across **all 5760** hue/harmony/mood combinations — 360 hues x 4
+> harmonies x 4 moods — with zero failures. (An earlier revision said 2880, which was
+> every second hue. Reproduce by calling `derive(hue, harmony, mood)` across
+> `range(360)` x `HARMONY_NAMES` x `MOOD_NAMES` and checking `contrast` / `delta_e`
+> against `MIN_TEXT_CONTRAST`, `MIN_BRAND_CONTRAST` and `MIN_ACCENT_SEPARATION`.)
 >
 > **What is unchanged, deliberately:** the renderer and the themes still read the
 > same five axis tokens plus the new type token, all still server-validated enums,
