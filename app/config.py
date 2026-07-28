@@ -52,6 +52,10 @@ WARDEN_PAID_PAYTO = os.environ.get(
 )
 
 MAX_DESCRIPTION_LEN = 2000
+# Fulfilment text a caller may attach at create time: the delivery message and a
+# text deliverable's payload. Same ceiling as a description — anything larger is a
+# file, which belongs on the multipart upload endpoint, not in a JSON create call.
+MAX_DELIVERY_LEN = 2000
 MAX_BODY_BYTES = 64 * 1024  # generous over MAX_DESCRIPTION_LEN, well under abuse range
 
 # ---------- M4 gated delivery: uploads, signed links, licenses ----------

@@ -26,6 +26,7 @@ from pydantic import (
     StrictInt,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -638,6 +639,22 @@ DEFAULT_STORE_DESCRIPTION = (
 )
 
 
+class DeliverableBody(BaseModel):
+    """Real goods, attached while the store is created. `file` is absent by design:
+    multipart cannot ride this JSON call, so files stay on the manage-key upload
+    endpoint (which also owns versioning and replacement)."""
+
+    kind: Literal["text", "license"]
+    payload: str | None = Field(default=None, max_length=config.MAX_DELIVERY_LEN)
+    max_activations: int | None = Field(default=None, ge=1, le=100000)
+
+    @model_validator(mode="after")
+    def _payload_required_for_text(self):
+        if self.kind == "text" and not (self.payload or "").strip():
+            raise ValueError("a text deliverable requires a non-empty payload")
+        return self
+
+
 class CreateStoreBody(BaseModel):
     # Optional since the empty-body fix: "" (or an absent body) means the caller
     # asked for a store without saying what it sells — they get the sample store.
@@ -645,6 +662,23 @@ class CreateStoreBody(BaseModel):
     receive_address: str | None = None
     # Optional theme choice; None lets the LLM pick. An unknown value is a 422.
     theme: str | None = None
+    # What the buyer actually receives. engine.create_store has always accepted
+    # this; it was simply unreachable from the API, which is why every store in
+    # production fell back to placeholder text. Screened with the store's copy on
+    # the same single Warden call.
+    delivery: str | None = Field(default=None, max_length=config.MAX_DELIVERY_LEN)
+    # Attaching one turns the store into a real fulfilment: a delivered order mints
+    # an Entitlement and the buy response carries a licence key (or, once a file is
+    # uploaded, a signed download URL) instead of a message.
+    deliverable: DeliverableBody | None = None
+
+    @field_validator("delivery")
+    @classmethod
+    def _validate_delivery(cls, v):
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
     @field_validator("receive_address")
     @classmethod
@@ -670,10 +704,20 @@ class CreateStoreBody(BaseModel):
 
 
 def _run_create_store(
-    description: str, receive_address: str | None, theme: str | None = None
+    description: str,
+    receive_address: str | None,
+    theme: str | None = None,
+    delivery: str | None = None,
+    deliverable: dict | None = None,
 ):
     try:
-        return gen_store(description, receive_address, theme=theme)
+        return gen_store(
+            description,
+            receive_address,
+            delivery=delivery,
+            theme=theme,
+            deliverable=deliverable,
+        )
     except ScreeningBlocked as exc:
         logger.warning(
             "store creation blocked by screening: risk_level=%s",
@@ -704,13 +748,40 @@ def create_store_post(request: Request, body: CreateStoreBody | None = None):
     defaulted = not description
     if defaulted:
         description = DEFAULT_STORE_DESCRIPTION
-    result = _run_create_store(description, body.receive_address, body.theme)
+    result = _run_create_store(
+        description,
+        body.receive_address,
+        body.theme,
+        delivery=body.delivery,
+        deliverable=body.deliverable.model_dump() if body.deliverable else None,
+    )
     if defaulted and isinstance(result, dict):
         # Additive: tell the (machine) caller what happened, so an agent that
         # meant to pass a description can see its input never arrived.
         result["note"] = (
             "no description provided; a sample store was generated — POST "
             '{"description": "what you sell"} to create a real one'
+        )
+    if isinstance(result, dict) and result.get("slug"):
+        # The activation gap this closes: a store was created, a manage key handed
+        # over, and nothing ever told the merchant that real goods can be attached.
+        # Every production store fell back to placeholder text as a result.
+        result["fulfilment"] = (
+            {
+                "configured": True,
+                "kind": body.deliverable.kind if body.deliverable else "text",
+                "note": "buyers receive this on delivery, not a placeholder message",
+            }
+            if body.deliverable
+            else {
+                "configured": False,
+                "note": (
+                    "no deliverable attached — buyers get the delivery message "
+                    "only. Attach real goods (file, licence or text) with POST "
+                    f"/api/stores/{result['slug']}/deliverable using the "
+                    "manage_key as 'Authorization: Bearer <manage_key>'."
+                ),
+            }
         )
     return result
 

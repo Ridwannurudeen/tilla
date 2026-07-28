@@ -39,6 +39,7 @@ from app.delivery import mint_manage_key
 # that name.
 from app.imagery import StoreImagery
 from app.models import (
+    Deliverable,
     Product,
     ScreeningReceipt,
     Store,
@@ -930,8 +931,15 @@ def generate(desc):
     return data
 
 
-def _screening_text(desc: str, content: dict) -> str:
+def _screening_text(desc: str, content: dict, *extra: str) -> str:
     """The text Warden screens, assembled BEFORE anything is rendered or fetched.
+
+    ``extra`` carries caller-SUPPLIED buyer-facing strings (the fulfilment text and
+    any deliverable payload). Model output is not the only thing a buyer reads: a
+    merchant's own delivery message reaches them verbatim after payment, so it is
+    screened on the SAME single call rather than a second paid hire. It rides here
+    instead of inside ``content`` so it can never be mistaken for generated copy and
+    persisted into the store's rendered content.
 
     The photography search text is included: it is model-generated, derived from the
     merchant's description, and it decides what images the store goes looking for —
@@ -976,6 +984,7 @@ def _screening_text(desc: str, content: dict) -> str:
             content.get("cta_text", ""),
             content.get("emoji", ""),
             *extra_text,
+            *(t for t in extra if t),
         ]
     )
 
@@ -999,7 +1008,7 @@ def _persist_receipt(session, store_id: int, receipt) -> None:
     )
 
 
-def create_store(desc, addr=None, delivery=None, theme=None):
+def create_store(desc, addr=None, delivery=None, theme=None, deliverable=None):
     """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
     Returns dict; a screening-unavailable outcome returns a pending_screening
@@ -1020,7 +1029,14 @@ def create_store(desc, addr=None, delivery=None, theme=None):
     llm_out = content.pop("_llm_out", 0)
     # theme_file is resolved inside the slug loop below, once the slug (and so the
     # seeded persona) is known.
-    outcome = screening.screen(_screening_text(desc, content))
+    # The caller's own fulfilment strings are screened on this SAME call — they are
+    # buyer-facing text, and a second hire would double the 0.1 USDT screening cost
+    # per create for no added safety.
+    outcome = screening.screen(
+        _screening_text(
+            desc, content, delivery or "", (deliverable or {}).get("payload") or ""
+        )
+    )
     pending = outcome.status == "pending"
     # Per-store capability secret returned ONCE to the paid caller (the store
     # owner by construction). Only its sha256 hash is persisted.
@@ -1050,9 +1066,22 @@ def create_store(desc, addr=None, delivery=None, theme=None):
         theme_file = _resolve_theme(theme or seeded_theme)
         store_delivery = delivery
         if store_delivery is None:
+            # The old default handed the buyer a fabricated
+            # https://tilla.gudman.xyz/files/<slug> link. That path is not a route
+            # and never was, so every unconfigured store promised a download that
+            # 404s — labelled "(demo delivery link)", but only AFTER payment. Say
+            # what is actually true instead, and name the endpoint that fixes it.
+            # A buy still settles on this text: refusing to sell without a
+            # deliverable would break every existing store, including the ones a
+            # marketplace reviewer buys from.
             store_delivery = (
-                f"✅ Thank you! Your {content.get('product_name', 'product')} is ready: "
-                f"https://tilla.gudman.xyz/files/{slug} (demo delivery link)"
+                f"Payment received — thank you. {content.get('product_name', 'your order')} "
+                "has no downloadable file attached yet: the merchant has not "
+                "configured fulfilment. If this is your store, attach the real "
+                "goods with POST /api/stores/"
+                f"{slug}/deliverable using your manage key, and buyers will "
+                "receive a signed download link or licence key instead of this "
+                "message."
             )
 
         d = STORES_DIR / slug
@@ -1157,6 +1186,32 @@ def create_store(desc, addr=None, delivery=None, theme=None):
                                 int(round(float(item.get("price_usdt", 0)) * 1e6)),
                                 1,
                             ),
+                            active=True,
+                        )
+                    )
+                # Real fulfilment, attached at birth. Without a Deliverable row a
+                # buy can only hand back `store.delivery` text; with one, the
+                # delivered order mints an Entitlement and the buy response carries
+                # a signed download_url or a licence key. A fresh store has no prior
+                # rows, so there is no version bump and nothing to deactivate — the
+                # multi-version path stays in the manage-key upload endpoint, which
+                # is also the only route that can accept a FILE (multipart cannot
+                # ride this JSON create call).
+                if deliverable:
+                    session.add(
+                        Deliverable(
+                            store_id=store.id,
+                            # NULL = the store-level default, which is what the
+                            # upload endpoint writes when no product is named and
+                            # what _active_deliverable falls back to. Binding this
+                            # to the primary product instead would serve nobody: an
+                            # order carrying no product_id would match no
+                            # deliverable and silently fall back to text.
+                            product_id=None,
+                            kind=deliverable["kind"],
+                            payload=deliverable.get("payload"),
+                            max_activations=deliverable.get("max_activations"),
+                            version=1,
                             active=True,
                         )
                     )
