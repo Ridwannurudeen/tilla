@@ -10,7 +10,9 @@ card, and x402 pay endpoints — so an autonomous agent can discover and buy fro
 person can.
 
 - **Demo video (81s):** https://youtu.be/mR4XXnKaY64
-- **Live:** https://tilla.gudman.xyz — example store: https://highland-roast.tilla.gudman.xyz
+- **Live:** https://tilla.gudman.xyz — example store: https://tilla.gudman.xyz/s/iron-built/
+  (photography showcase). A store that **actually fulfils** — pays out a minted licence key on
+  purchase rather than a message — is `tilla.gudman.xyz/s/layercheck/`
   (every store also answers at `tilla.gudman.xyz/s/<slug>/`, and a merchant can point their own
   domain at it — see [`docs/runbooks/custom-domains.md`](docs/runbooks/custom-domains.md))
 - **OKX marketplace:** live and **listed** as ASP **#6961** with **seven services** — the x402-gated
@@ -32,6 +34,13 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
 - **Dual-sided commerce.** A human uses wallet-connect checkout; an agent pays the same store over
   **x402** (EIP-3009 authorization) with no UI. Discovery is machine-native: `feed.json`, per-store MCP
   tools, an agent card, and a `/discovery` mirror.
+- **Stores deliver real goods, not a receipt.** A merchant attaches a file, a licence or text —
+  at create time or later with their manage key — and a delivered order mints an entitlement, so the
+  buyer gets a signed download URL or a minted licence key bound to that order. Replacing a
+  deliverable inserts a new version rather than mutating the old, so a buyer keeps the exact version
+  they paid for. Until 2026-07-28 this was the product's biggest gap and it is documented as such in
+  [`docs/PROOF-onchain.md`](docs/PROOF-onchain.md) §13, along with the first fulfilment Tilla was not
+  a party to: an independent merchant selling their own goods to a buyer, with Tilla taking nothing.
 - **One MCP endpoint to reach every store.** `POST https://tilla.gudman.xyz/mcp` is a live, public
   JSON-RPC server, so any MCP-compatible runtime is the shopfront and Tilla ships no concierge UI of
   its own. `browse_stores` and `search_stores` rank live stores and return, per result, the store page,
@@ -280,7 +289,7 @@ independently verifiable and verifies: Oddsmith quoted OKB at 86.3605 against OK
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 1229 tests
+pytest -q                # 1279 tests
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target
