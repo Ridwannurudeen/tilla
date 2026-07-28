@@ -361,6 +361,47 @@ Wallet balance moved **39.790953 -> 39.760953 USDT0**, exactly -0.030000 for the
   found Tilla; and one of the three (VigilOK) could only be exercised in its empty state, because
   no wallet with an open Aave V3 position was available to screen. Both stated in the reviews.
 
+## 13. An INDEPENDENT merchant fulfils an INDEPENDENT buyer — PROVEN (2026-07-28)
+Every prior entry has Tilla on one side of the trade. This one has Tilla on neither: a merchant it
+does not own sells goods it did not write to a buyer, over a storefront Tilla generated. It is the
+half of the two-sided market that had never once run in production, and it needed a defect fixed
+the same day to be possible at all.
+
+**The defect it depended on.** Until 2026-07-28 **no store could deliver anything**: `deliverables`
+held zero rows system-wide, so every store — Tilla's own and all seven belonging to external
+merchants — returned a delivery message containing a fabricated
+`https://tilla.gudman.xyz/files/<slug>` link. That path is not a route and returns 404. The
+fulfilment machinery (Deliverable -> Entitlement -> signed download URL or minted licence key) was
+complete and had never been invoked, because `engine.create_store` accepted a `delivery` argument
+the API never exposed. Fixed in `edbd724`; the honest default now names the endpoint that
+configures fulfilment instead of inventing a link.
+
+**The merchant.** Agent **6034** (Risingtell's buyer identity) paid 0.05 USDT0 for a storefront,
+receiving `tilla.gudman.xyz/s/rising-technology-fast/` with `pay_to` set to their own wallet
+`0xFAF50D…7e0f`, and rated it 100. They then attached a real deliverable with their manage key —
+a 1489-character consultation handoff stating what to send, a three-working-day turnaround, what
+comes back, and that there is no obligation to continue.
+
+**Two purchases of the same product, one hour apart, spanning that attachment:**
+
+| Order | Paid | settle tx | What the buyer received |
+|---|---|---|---|
+| `318b060576c5470c` (22:00) | 0.100000 | `0xe1745c4b3ec4cc5c9e46d0c5b3edfc31` + `202ec61b5141f31d11c36b35f6143a42` | the unconfigured message — no deliverable existed yet |
+| `5f00db249ea14247` (22:5x) | 0.100000 | `0xdb111c221ba61de3033bd7db446d58a4` + `51a782ca226ed09b68ce21be7cbccb07` | **the merchant's real 1489-char handoff**, Entitlement id 2 bound to the buyer |
+
+- **Tilla takes no cut.** Both orders record `paid_micro = 100000` against `amount_micro = 100000`,
+  payee `0xFAF50D…7e0f`. The platform fee is charged once at `create-store` and never again;
+  x402 store buys carry no offset and no commission. The merchant initially read the web
+  checkout's payment-matching offset as a platform cut — it is not, and it is paid **to** them.
+- **The first order is kept deliberately.** It is a genuine artifact of the pre-attachment state,
+  and it does not retroactively flip: a `deliveries` row records what was handed over at delivery
+  time, and replacing a deliverable inserts a new version rather than mutating the old, so a buyer
+  keeps the exact version they paid for. The merchant argued this property is what makes a
+  deliverable worth paying for at all, and declined the convenient alternative.
+- **Honest limits.** Tilla's operator was the buyer in both orders, so this proves an independent
+  merchant can fulfil — not that independent demand found them. As of this entry **2 of 37 live
+  stores can fulfil**, and 32 have never sold anything.
+
 ## Summary
 
 | Rail | Proof tx(s) | Block(s) | Status |
@@ -377,8 +418,9 @@ Wallet balance moved **39.790953 -> 39.760953 USDT0**, exactly -0.030000 for the
 | MPP metered channel (#10) | deposit `0x125c88d9…61441f`; closes `0xcecc3a1f…b8b5f8`, `0x40646e85…78f1be4` | 66035448, 66056578, 66056643 | proven (open → voucher → delivery → close; 0.1 to merchant, 3.9 refunded) |
 | Escrow job `1379aae00c6b4efd` | fund `0x486cc9cf…3da85b`; no release | 66054682 | **partially proven** — disputed, unreleased |
 | Tilla hires an agent, paid Warden scan (#11) | `0xf546da66…f403cc` | 66208040 | proven (Tilla as buyer) |
+| Independent merchant fulfils a buyer (#13) | `0xdb111c22…cbccb07` | — | proven (goods, not a message; Entitlement bound) |
 
-Twelve rails are proven with real on-chain USDT0 and independently re-verified receipts; one
+Thirteen rails are proven with real on-chain USDT0 and independently re-verified receipts; one
 disputed escrow job remains partially proven and is never cited otherwise. **Most** entries are
 self-funded — Tilla's own wallets on both sides — and those prove mechanism rather than demand. Two
 are not: **#5 and #10 were paid by `0x43ea…af55`, a wallet outside our control that we never
