@@ -178,17 +178,38 @@ source is stated **per entry** rather than blanket-labelled:
   detects the transfer and finalizes the orders (settling → delivered) from on-chain evidence.
 
 **Most** rail proofs are self-funded arm's-length tests — Tilla's own wallets on both sides — and
-those prove *mechanism*, not demand. Two are not: the batch rail and the MPP channel were both paid
-by `0x43ea…af55`, a wallet outside our control that appears nowhere in Tilla's own transaction
-history and has since paid 8 delivered orders totalling 7.10 USDT0. The proof log says which is
-which per entry, so anything cited here holds up to being checked.
+those prove *mechanism*, not demand. The batch rail and the MPP channel are not: both were paid by
+`0x43ea…af55`, a wallet outside our control that appears nowhere in Tilla's own transaction history.
+The proof log says which is which per entry, so anything cited here holds up to being checked.
 
-Traction is tracked separately and to the same standard. ASP #6961 carries **four public reviews
-from three independent buyer wallets** (all in the 5-star band, `securityRate` 5.0, `soldCount` 49)
-— including a 0.05 USDT `create-store` purchase settled on-chain by an outside agent operator, who
-received a live store at `tilla.gudman.xyz/s/agentforge/` and left a 94/100 review flagging an
-honest connector-side hiccup. Every one is checkable on the listing; none was solicited in exchange
-for anything, and the marketplace's own self-feedback block means Tilla cannot review itself.
+### Who has actually paid Tilla
+
+Strangers, not just us. Since launch on 2026-07-20, **six wallets outside our control have settled
+10.55 USDT0** for Tilla's services — five distinct buyers, since Risingtell paid from two wallets.
+Audited by paging the full transaction history of Tilla's `payTo` and cross-checking every order
+that settles to a Tilla-owned merchant address:
+
+| External payer | Settled | What they bought |
+|---|---|---|
+| `0xc385e2df…` (darrel) | 3.15 USDT0 / 6 txs | storefronts, incl. two 1-USDT buys during OKX's listing review; **2 public reviews** |
+| `0x43eab1fd…` | 7.10 USDT0 / 8 orders | store products over the batch + metered rails — three settlements batched 2 orders per tx |
+| `0xe5581690…` | 0.15 USDT0 / 3 txs | three storefronts (`jersey-fc`, `kit`, `iron`) |
+| `0xfc9b58e8…` (AgentForge) | 0.05 USDT0 | `create-store` → `tilla.gudman.xyz/s/agentforge/`; **review 94/100** |
+| `0x9f67a13c…`, `0x9ea2d10c…` (Risingtell) | 0.10 USDT0 / 2 txs | two storefronts, paid from two wallets 8 minutes apart; **review 100** |
+
+Reputation follows the money. ASP #6961 carries **four public reviews from three independent buyer
+wallets**, every one in the 5-star band (`securityRate` 5.0) — and each reviewer appears in the
+table above as a wallet that paid first. None was solicited in exchange for anything, and the
+marketplace's own self-feedback block means Tilla cannot review itself. One review is a bug report:
+Risingtell found that identical descriptions produced different prices, which is written up with a
+reproduction and its fix in [`docs/ISSUES.md`](docs/ISSUES.md).
+
+**A counter is not a receipt.** `soldCount` reads 49, but it counts *served* orders including
+unsettled ones — one wallet alone ran **36 orders that were cancelled with zero on-chain
+settlement**, probing the rails without ever paying. Tilla's revenue claims cite settlement
+receipts, never the counter, and the 10.55 USDT0 above excludes every unpaid probe. It also excludes
+pre-launch traffic: `payTo` is shared with an earlier project, so only transfers from 2026-07-20
+onward are counted as Tilla's.
 
 **Tilla also buys.** Most entries in an agent marketplace only sell. Tilla hires other agents and
 pays them over x402: a Warden security screen before every store goes live (0.1 USDT0 — but Warden

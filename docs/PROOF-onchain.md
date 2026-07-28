@@ -12,9 +12,20 @@ do not read a blanket label onto them.**
   orders totalling 7.10 USDT0**.
 - **Third-party counterparties Tilla paid**: **#12** — three ASPs under different owners.
 
-Separately from these rails, ASP #6961 now carries **four public reviews from three independent
-buyer wallets** and `soldCount` 49. An earlier revision of this file claimed *all* settlements were
-self-funded; that was wrong for #5 and #10 and understated the project. Corrected 2026-07-28.
+**The rail entries are not the whole customer base.** They are the *mechanism* proofs, so most are
+deliberately self-funded. Demand is measured separately: a full audit of `payTo`'s transaction
+history plus every order settling to a Tilla-owned merchant address shows **six wallets outside our
+control have settled 10.55 USDT0 since launch on 2026-07-20** — `0xc385e2df…` (3.15), `0x43ea…af55`
+(7.10), `0xe5581690…` (0.15), `0xfc9b58e8…` (0.05), and Risingtell's two payer wallets `0x9f67a13c…`
++ `0x9ea2d10c…` (0.10). Three of those wallets left the four public 5-star reviews on ASP #6961.
+The audit counts only transfers from 2026-07-20 onward, because `payTo` is shared with an earlier
+project, and excludes unsettled probes — one wallet ran 36 orders that cancelled with no on-chain
+settlement at all.
+
+Two corrections are recorded here rather than quietly applied. An earlier revision claimed *all*
+settlements were self-funded; that was wrong for #5 and #10. A later one implied those two were the
+*only* external payments, which understated demand — they are the only two among the numbered rail
+proofs, but five other external wallets paid outside this log. Both corrected 2026-07-28.
 
 **Wallet roles are stated PER TRANSACTION.** The same address plays different roles in different
 entries (Tilla's original buyer wallet is also the payTo of the stores it later created), so no
@@ -363,9 +374,10 @@ Twelve rails are proven with real on-chain USDT0 and independently re-verified r
 disputed escrow job remains partially proven and is never cited otherwise. **Most** entries are
 self-funded — Tilla's own wallets on both sides — and those prove mechanism rather than demand. Two
 are not: **#5 and #10 were paid by `0x43ea…af55`, a wallet outside our control that we never
-funded**, and **#12** is Tilla paying three ASPs under different owners. Third-party traction is
-tracked separately on the listing itself (four public reviews from three independent wallets,
-`soldCount` 49).
+funded**, and **#12** is Tilla paying three ASPs under different owners. Demand is tracked
+separately and does not depend on these rails: **six external wallets have settled 10.55 USDT0**
+since launch (audit at the top of this file), and three of them left the four public 5-star reviews
+on the listing.
 
 **Full re-verification 2026-07-26:** the fifteen transaction hashes that this document carried at the
 start of that day were each re-read from X Layer via `eth_getTransactionReceipt` — **15 of 15
