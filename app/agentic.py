@@ -2223,22 +2223,39 @@ def agent_card(request: Request):
 # Graduation-style trust ladder (Phase 1.5). Thresholds sit below Virtuals' 10-sale
 # graduation, matched to Tilla's volume. It is computed ONLY from terminal,
 # un-fakeable outcomes: delivered count = earned volume; success_rate (delivered vs
-# refunded) = quality. A refund-heavy store is demoted to 'watch' regardless of
-# volume — the auto-demote. Checkout expiries are deliberately NOT an input: an
-# expired checkout is buyer abandonment, not store fault (the same reason they are
-# excluded from success_rate), so they can never unfairly demote a store.
+# refunded) = quality; unique buyers = independence, so the upper tiers cannot be
+# reached by one wallet buying repeatedly (see _trust_tier). A refund-heavy store is
+# demoted to 'watch' regardless of volume — the auto-demote. Checkout expiries are
+# deliberately NOT an input: an expired checkout is buyer abandonment, not store
+# fault (the same reason they are excluded from success_rate), so they can never
+# unfairly demote a store.
 TRUST_TIERS = ("new", "watch", "emerging", "established", "trusted")
 
 
-def _trust_tier(sold: int, success_rate: float | None) -> str:
+def _trust_tier(sold: int, success_rate: float | None, buyers: int = 0) -> str:
+    """The graduation ladder. Volume and quality are necessary but not sufficient:
+    the upper tiers also require the sales to come from SEVERAL buyers.
+
+    Without that, repeat purchases by one wallet read as demand. They are not — and
+    the wallet doing the repeating can be the store's own operator, which is how
+    `invoice-flow` sat in discovery as 'established' on four orders Tilla paid
+    itself. A tier an agent buyer ranks on must not be reachable by a merchant
+    buying from themselves.
+
+    Buyer diversity is used rather than an allowlist of Tilla-owned wallets on
+    purpose: an allowlist is a constant that goes stale silently, and the payer
+    census has been mislabelled in both directions before. RESIDUAL LIMITATION,
+    stated plainly: one party controlling several wallets can still manufacture
+    diversity. This ladder makes that harder, not impossible — the external/self
+    split lives in scripts/merchant_funnel.py, which prints every buyer raw."""
     if sold == 0:
         return "new"
     # sold >= 1 => at least one delivery => success_rate is a real float here.
     if success_rate is not None and success_rate < 0.5:
         return "watch"
-    if sold >= 8 and success_rate is not None and success_rate >= 0.95:
+    if sold >= 8 and buyers >= 3 and success_rate is not None and success_rate >= 0.95:
         return "trusted"
-    if sold >= 3 and success_rate is not None and success_rate >= 0.9:
+    if sold >= 3 and buyers >= 2 and success_rate is not None and success_rate >= 0.9:
         return "established"
     return "emerging"
 
@@ -2290,7 +2307,7 @@ def _discovery_row(
         "last_sale_at": (last_sale.isoformat() + "Z") if last_sale else None,
         "pending_eval_count": pending,
         "disputed_count": rejected,
-        "trust_tier": _trust_tier(good, success_rate),
+        "trust_tier": _trust_tier(good, success_rate, buyers or 0),
         "review_avg": round(float(review_avg), 2) if review_avg is not None else None,
         "review_count": review_count or 0,
         "created_at": store.created_at.isoformat() + "Z",

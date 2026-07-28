@@ -963,3 +963,42 @@ def test_unpaid_schema_body_omits_sample_when_not_given():
     assert "sample_request" not in body
     assert "manage_key" in body["summary"]
     assert set(body["input_schema"]["required"]) == {"slug", "name", "price_usdt"}
+
+
+def test_discovery_trust_tier_requires_independent_buyers():
+    # Regression: `invoice-flow` was published as 'established' on four delivered
+    # orders that all came from Tilla's own wallet. Volume from a single buyer is
+    # not demand, and a tier an agent ranks on must not be reachable by a merchant
+    # buying from themselves.
+    def deliver_one_buyer(sid, n, addr):
+        for i in range(n):
+            _order(sid, "delivered", from_addr=addr, oid=f"{sid}s{i}")
+
+    solo = _seed(slug="tier-solo")
+    deliver_one_buyer(solo, 8, "0x" + "7" * 40)  # volume + perfect rate, ONE buyer
+    two = _seed(slug="tier-two")
+    for i in range(3):
+        _order(two, "delivered", from_addr="0x" + str(i % 2) * 40, oid=f"{two}d{i}")
+
+    rows = {
+        r["slug"]: r for r in client.get("/discovery/resources").json()["resources"]
+    }
+    # eight clean sales, but one wallet -> capped below 'established'
+    assert rows["tier-solo"]["sold_count"] == 8
+    assert rows["tier-solo"]["unique_buyer_count"] == 1
+    assert rows["tier-solo"]["trust_tier"] == "emerging"
+    # three sales across two distinct buyers -> graduates
+    assert rows["tier-two"]["unique_buyer_count"] == 2
+    assert rows["tier-two"]["trust_tier"] == "established"
+
+
+def test_trust_tier_thresholds_directly():
+    from app.agentic import _trust_tier
+
+    assert _trust_tier(0, None, 0) == "new"
+    assert _trust_tier(9, 0.4, 9) == "watch"  # refund-heavy demotes at any volume
+    assert _trust_tier(8, 1.0, 1) == "emerging"  # volume, no independence
+    assert _trust_tier(8, 1.0, 2) == "established"  # not yet 3 buyers
+    assert _trust_tier(8, 1.0, 3) == "trusted"
+    assert _trust_tier(3, 0.95, 2) == "established"
+    assert _trust_tier(3, 0.95, 1) == "emerging"
