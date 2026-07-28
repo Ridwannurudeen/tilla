@@ -1930,6 +1930,63 @@ async def create_deliverable(
     return resp
 
 
+@app.get("/api/stores/{slug}/deliverable")
+@limiter.limit("60/minute")
+def get_deliverable(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """Read back the store's active deliverable. Same manage-key gate as the POST.
+
+    Added because a merchant who attached one had no way to confirm it: the POST
+    response was the only evidence, and checking the state meant buying from your
+    own store. Mirrors the POST's response shape so the two are comparable.
+
+    A ``file`` returns metadata only — the bytes are reachable solely through a
+    signed, entitlement-bound download token, and that must stay true for the owner
+    as well. ``text`` returns its payload (the merchant's own goods, and they are
+    authenticated as the owner); ``license`` has none, since keys are minted per
+    order rather than stored."""
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None:
+        raise HTTPException(404, "store not found")
+    _require_store_key(request, store, session)
+    d = session.scalar(
+        select(Deliverable)
+        .where(Deliverable.store_id == store.id, Deliverable.active.is_(True))
+        .order_by(Deliverable.id.desc())
+    )
+    if d is None:
+        return {
+            "configured": False,
+            "note": (
+                "no active deliverable — buyers receive the store's delivery "
+                "message. POST to this same path to attach one."
+            ),
+        }
+    resp = {
+        "configured": True,
+        "id": d.id,
+        "product_id": d.product_id,
+        "kind": d.kind,
+        "version": d.version,
+        "active": d.active,
+    }
+    if d.kind == "file":
+        resp.update(
+            file_name=d.file_name,
+            file_size=d.file_size,
+            max_downloads=d.max_downloads,
+            link_ttl_seconds=d.link_ttl_seconds,
+        )
+    elif d.kind == "license":
+        resp["max_activations"] = d.max_activations
+    else:
+        resp["payload"] = d.payload
+    return resp
+
+
 @app.get("/api/download/{token}")
 @limiter.limit("30/minute")
 def download(request: Request, token: str, session: Session = Depends(get_session)):

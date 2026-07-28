@@ -267,3 +267,86 @@ def test_configured_response_says_so(tmp_path, monkeypatch):
     f = r.json()["fulfilment"]
     assert f["configured"] is True and f["kind"] == "license"
     assert "next_time" not in f  # nothing to advise; they already did it
+
+
+# ------------------------------------------ reading back what is attached (GET)
+def _manage_key(monkeypatch, tmp_path, slug, **kw):
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm(monkeypatch, _content(slug))
+    _allow()
+    r = engine.create_store("guides", **kw)
+    return r["slug"], r["manage_key"]
+
+
+@respx.mock
+def test_get_deliverable_reads_back_a_text_payload(tmp_path, monkeypatch):
+    # A merchant who attached one had no way to confirm it: the POST response was
+    # the only evidence, and checking meant buying from your own store.
+    slug, key = _manage_key(
+        monkeypatch,
+        tmp_path,
+        "Readback",
+        deliverable={"kind": "text", "payload": "the real handoff"},
+    )
+    r = client.get(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    )
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["configured"] is True and b["kind"] == "text"
+    assert b["payload"] == "the real handoff"
+
+
+@respx.mock
+def test_get_deliverable_reports_unconfigured(tmp_path, monkeypatch):
+    slug, key = _manage_key(monkeypatch, tmp_path, "Empty")
+    b = client.get(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    ).json()
+    assert b["configured"] is False
+    assert "POST to this same path" in b["note"]
+
+
+@respx.mock
+def test_get_deliverable_requires_the_manage_key(tmp_path, monkeypatch):
+    slug, _key = _manage_key(
+        monkeypatch,
+        tmp_path,
+        "Guarded",
+        deliverable={"kind": "text", "payload": "secret goods"},
+    )
+    assert client.get(f"/api/stores/{slug}/deliverable").status_code in (401, 403)
+    r = client.get(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": "Bearer wrong"}
+    )
+    assert r.status_code in (401, 403)
+
+
+@respx.mock
+def test_get_deliverable_never_returns_file_bytes(tmp_path, monkeypatch):
+    # Bytes stay behind a signed, entitlement-bound token even for the owner.
+    from app.db import SessionLocal as SL
+    from app.models import Deliverable as D, Store as S
+
+    slug, key = _manage_key(monkeypatch, tmp_path, "Filed")
+    with SL() as s:
+        sid = s.scalar(select(S.id).where(S.slug == slug))
+        s.add(
+            D(
+                store_id=sid,
+                kind="file",
+                file_name="a.pdf",
+                file_size=12,
+                file_sha256="0" * 64,
+                version=1,
+                active=True,
+            )
+        )
+        s.commit()
+    b = client.get(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    ).json()
+    assert b["kind"] == "file" and b["file_name"] == "a.pdf"
+    assert "payload" not in b
