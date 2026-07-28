@@ -1687,8 +1687,12 @@ async def mcp_get(
 # Root MCP: a Tilla-wide JSON-RPC server so any agent runtime is the concierge —
 # browse/search across every live store and route to the right one. Buying then
 # happens on the per-store endpoints each result advertises (its `mcp` / `buy`).
-# NOTE (deploy): a new root path needs an nginx proxy location, like /ready —
-# see deploy/nginx-m15.snippet. Until then it is reachable in-app / via tests.
+# DEPLOYED AND PUBLIC since the deploy/nginx-m15.snippet location landed: POST
+# https://tilla.gudman.xyz/mcp answers tools/list from the open internet. The note
+# that used to sit here ("until then it is reachable in-app / via tests") outlived
+# the deploy and led an external reviewer to report the surface as unreachable —
+# a stale caveat reads as a live limitation, so re-check this line when the route
+# moves rather than leaving it to rot.
 # ============================================================================
 class _BrowseArgs(BaseModel):
     sort: str = "sold"

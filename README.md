@@ -32,6 +32,16 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
 - **Dual-sided commerce.** A human uses wallet-connect checkout; an agent pays the same store over
   **x402** (EIP-3009 authorization) with no UI. Discovery is machine-native: `feed.json`, per-store MCP
   tools, an agent card, and a `/discovery` mirror.
+- **One MCP endpoint to reach every store.** `POST https://tilla.gudman.xyz/mcp` is a live, public
+  JSON-RPC server, so any MCP-compatible runtime is the shopfront and Tilla ships no concierge UI of
+  its own. `browse_stores` and `search_stores` rank live stores and return, per result, the store page,
+  its per-store MCP and x402 buy endpoints, and its reputation (sold count, success rate, unique
+  buyers, last sale) — enough for a buyer agent to choose and pay without a human reading a storefront:
+
+  ```bash
+  curl -sX POST https://tilla.gudman.xyz/mcp -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  ```
 - **Screened content.** Every LLM-generated store and marketing asset passes Warden content screening
   before it goes live, and themes render through an autoescaped loader (a third-party theme can never
   opt out of escaping).
