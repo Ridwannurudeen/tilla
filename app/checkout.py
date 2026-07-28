@@ -298,8 +298,21 @@ def create_order(
         if price_micro_override is not None
         else product.price_micro
     )
+    # Scale the matching offset to the price. It exists so two concurrent payments
+    # to one wallet are distinguishable on-chain by amount alone, which needs an
+    # absolute span — but a flat span is a punitive surcharge on a cheap product
+    # (see config.AMOUNT_OFFSET_MAX_PCT). Cap it at a fraction of the base, keep a
+    # floor so the allocator still has room, and leave anything at or above
+    # ~0.5 USDT on exactly the span it had before.
+    offset_span = min(
+        config.AMOUNT_OFFSET_MAX,
+        max(
+            config.AMOUNT_OFFSET_FLOOR,
+            base_price * config.AMOUNT_OFFSET_MAX_PCT // 100,
+        ),
+    )
     for _ in range(config.AMOUNT_ALLOC_RETRIES):
-        offset = random.randint(config.AMOUNT_OFFSET_MIN, config.AMOUNT_OFFSET_MAX)
+        offset = random.randint(config.AMOUNT_OFFSET_MIN, offset_span)
         expected = base_price + offset
         if _amount_taken(session, store.pay_to, expected, now):
             continue

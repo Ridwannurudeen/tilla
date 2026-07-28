@@ -164,6 +164,14 @@ SWEEP_ENABLED = os.environ.get("TILLA_SWEEP_ENABLED", "1").strip().lower() in (
 AMOUNT_OFFSET_MIN = 1
 AMOUNT_OFFSET_MAX = 4999
 AMOUNT_ALLOC_RETRIES = 10
+# The offset above is ABSOLUTE, so as a fraction of price it explodes when the
+# price is small: a merchant measured 10.6% / 32.1% / 45.5% surcharges on a 0.01
+# product against 0.4% on a 1.0 one, i.e. a buyer told "0.01 USDT0" could be billed
+# 0.0146. Cap the span at a percentage of the base so the surcharge stays bounded,
+# with a floor that keeps enough distinct amounts for the allocator to find a free
+# one (a starved span only ever yields "checkout busy", never a wrong charge).
+AMOUNT_OFFSET_MAX_PCT = 1
+AMOUNT_OFFSET_FLOOR = 50
 
 # ---------- M12 readiness heartbeats (/ready freshness thresholds) ----------
 # /ready reports the sweeper stale if no tick started within this many seconds. The

@@ -960,3 +960,46 @@ def test_payer_address_is_stored_lowercased(make_store):
             select(ProcessedTransfer.from_addr).where(ProcessedTransfer.order_id == cid)
         )
         assert stored == "0x" + "a" * 40
+
+
+# ------------------------------------------- matching offset is price-scaled
+def test_cheap_product_surcharge_is_bounded(make_store):
+    # Regression: the offset was a flat 1-4999 micro, so on a 0.01 product a buyer
+    # told "0.01 USDT0" could be billed 0.0146. A merchant measured 10.6%, 32.1%
+    # and 45.5% surcharges against 0.4% on a 1.0 product. The span now scales.
+    base = 10_000  # 0.01 USDT0
+    _mk(make_store, "cheap-surcharge", "0x" + "d" * 40, price=base)
+    for i in range(12):
+        _cid, expected = _order("cheap-surcharge")
+        surcharge = expected - base
+        assert 0 < surcharge <= base * config.AMOUNT_OFFSET_MAX_PCT / 100, (
+            f"draw {i}: {surcharge} micro on a {base} base is more than "
+            f"{config.AMOUNT_OFFSET_MAX_PCT}%"
+        )
+
+
+def test_expensive_product_keeps_the_original_span(make_store):
+    # No regression for real-money products: at 1.0 USDT the 1% cap (10000) is
+    # above AMOUNT_OFFSET_MAX, so the span is exactly what it always was.
+    base = 1_000_000
+    _mk(make_store, "dear-surcharge", "0x" + "e" * 40, price=base)
+    for _ in range(8):
+        _cid, expected = _order("dear-surcharge")
+        surcharge = expected - base
+        assert config.AMOUNT_OFFSET_MIN <= surcharge <= config.AMOUNT_OFFSET_MAX
+
+
+def test_floor_keeps_the_allocator_viable_on_dust_prices(make_store):
+    # 1% of a 0.001 product is 10 micro -- too few amounts for the retry loop, so
+    # a floor applies. The surcharge is larger in percentage terms and that is the
+    # accepted trade: a starved span can only ever yield "checkout busy", never a
+    # wrong charge.
+    base = 1_000  # 0.001 USDT0
+    _mk(make_store, "dust-surcharge", "0x" + "f" * 40, price=base)
+    seen = set()
+    for _ in range(6):
+        _cid, expected = _order("dust-surcharge")
+        surcharge = expected - base
+        assert 0 < surcharge <= config.AMOUNT_OFFSET_FLOOR
+        seen.add(expected)
+    assert len(seen) == 6  # distinct amounts still allocated
