@@ -22,11 +22,17 @@ cd "$(dirname "$0")/.."
 # repo-owned paths, so `git ls-files` is exactly the ship set; stores/,
 # tilla.db*, .env and everything else server-owned is untracked by design.
 # deploy.sh itself is excluded (nothing on the server executes it).
+#
+# scripts/ ships BOTH halves. 'scripts/*.sh' alone was the same hand-picked-glob
+# bug this comment already describes: the ops scripts meant to be RUN on the box
+# (backfill, remediations, the delivery-text repair) are python, so they silently
+# never arrived and `python -m scripts.x` failed with "No module named" on a host
+# where the file was tracked, reviewed and merged.
 mapfile -t FILES < <(git ls-files \
   'app/*.py' \
   'assets/embed.js' \
   'alembic.ini' 'alembic/env.py' 'alembic/script.py.mako' 'alembic/versions/*.py' \
-  'scripts/*.sh' \
+  'scripts/*.sh' 'scripts/*.py' \
   'themes/*' \
   'www/*' | grep -v '^scripts/deploy\.sh$')
 

@@ -39,10 +39,13 @@ from app.models import Deliverable, Store
 
 
 def _repairable(session) -> list[Store]:
-    """Live stores still carrying the fabricated link and unable to fulfil."""
-    stores = session.scalars(
-        select(Store).where(Store.status == "live").order_by(Store.id)
-    ).all()
+    """Stores still carrying the fabricated link and unable to fulfil.
+
+    Status is deliberately NOT filtered. A blocked store 404s before any 402
+    (`agentic._guard_store_status`), so its text is unreachable today — but
+    leaving the fabricated link in the row means unblocking one silently
+    restores the defect. Reachability is not a reason to keep bad data."""
+    stores = session.scalars(select(Store).order_by(Store.id)).all()
     out = []
     for store in stores:
         if engine.LEGACY_DELIVERY_MARKER not in (store.delivery or ""):
