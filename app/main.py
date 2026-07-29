@@ -2631,6 +2631,9 @@ if os.getenv("OKX_API_KEY"):
                 "theme": "original",
             },
         ),
+        extensions=agentic.challenge_input_extension(
+            CreateStoreBody.model_json_schema()
+        ),
     )
     # ':slug' compiles to [^/]+ (no cross-slash match). pay_to + price resolve
     # per request from the DB; a settle failure runs the compensating hook. The
@@ -2657,6 +2660,9 @@ if os.getenv("OKX_API_KEY"):
             "create it. Omitting description regenerates from the store's "
             "existing one.",
         ),
+        extensions=agentic.challenge_input_extension(
+            UpgradeStoreBody.model_json_schema()
+        ),
     )
     # Priced from ONE constant (config.VERIFY_DELIVERY_FEE_MICRO) shared with the
     # agent card, well under the 0.01 the marketplace's evidence services charge:
@@ -2675,6 +2681,9 @@ if os.getenv("OKX_API_KEY"):
             "Re-check any bundle free at POST /api/verify-evidence.",
             {"tx_hash": "0x" + "ab" * 32},
         ),
+        extensions=agentic.challenge_input_extension(
+            VerifyDeliveryBody.model_json_schema()
+        ),
     )
     _add_product_route = RouteConfig(
         accepts=[build_fee_payment_option(_rail, "10000")],
@@ -2685,6 +2694,9 @@ if os.getenv("OKX_API_KEY"):
             "Owner-only: requires the store's manage_key as "
             "'Authorization: Bearer <manage_key>', minted to whoever paid to "
             "create it.",
+        ),
+        extensions=agentic.challenge_input_extension(
+            AddProductBody.model_json_schema()
         ),
     )
     _paid = {

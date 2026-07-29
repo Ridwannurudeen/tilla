@@ -965,6 +965,139 @@ def test_unpaid_schema_body_omits_sample_when_not_given():
     assert set(body["input_schema"]["required"]) == {"slug", "name", "price_usdt"}
 
 
+# ------------------------------- the input contract inside the x402 challenge
+# A buyer (Rouma Desk) reported that our 402 BODY publishes the full input_schema
+# but the base64 challenge does not — so an agent driving a stock x402 client,
+# which reads the header and never the body, still had to probe for parameters.
+def test_challenge_input_extension_names_the_fields_from_the_model():
+    from app.agentic import challenge_input_extension
+    from app.main import AddProductBody, CreateStoreBody
+
+    create = challenge_input_extension(CreateStoreBody.model_json_schema())[
+        "tilla.input"
+    ]
+    # create-store takes no required field at all — an empty body makes a sample
+    # store — and saying so in the challenge is the whole point for a cold caller.
+    assert create["required"] == []
+    assert set(create["optional"]) == {
+        "description",
+        "receive_address",
+        "theme",
+        "delivery",
+        "deliverable",
+    }
+    assert create["full_schema"] == "input_schema in this response body"
+
+    # Derived from the model the handler validates against, so it cannot drift.
+    add = challenge_input_extension(AddProductBody.model_json_schema())["tilla.input"]
+    assert set(add["required"]) == {"slug", "name", "price_usdt"}
+    assert "price_usdt" not in add["optional"]
+
+
+def test_challenge_input_extension_leaves_the_signing_struct_untouched():
+    """The contract rides ``extensions``, never ``accepts[].extra``.
+
+    ``extra`` is what the client reads to build the EIP-712 domain it signs
+    against; documentation put there is how a payment becomes unsignable on a
+    stricter client than the one we run. Round-trips a real challenge through the
+    SDK codec and pins that every payment-bearing field survives byte-identical."""
+    from x402.http.utils import (
+        decode_payment_required_header,
+        encode_payment_required_header,
+    )
+    from x402.schemas import PaymentRequired, PaymentRequirements
+    from x402.schemas.payments import ResourceInfo
+
+    from app.agentic import challenge_input_extension
+    from app.main import CreateStoreBody
+
+    pr = PaymentRequired(
+        error="Payment required",
+        resource=ResourceInfo(
+            url="https://tilla.gudman.xyz/create-store", mime_type="application/json"
+        ),
+        accepts=[
+            PaymentRequirements(
+                scheme="exact",
+                network="eip155:196",
+                asset="0x779ded0c9e1022225f8e0630b35a9b54be713736",
+                amount="50000",
+                pay_to="0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51",
+                max_timeout_seconds=300,
+                extra={"name": "USD₮0", "version": "1"},
+            )
+        ],
+    )
+    before = encode_payment_required_header(pr)
+    assert decode_payment_required_header(before).extensions is None
+
+    pr.extensions = challenge_input_extension(CreateStoreBody.model_json_schema())
+    after = decode_payment_required_header(encode_payment_required_header(pr))
+
+    assert after.accepts[0].extra == {"name": "USD₮0", "version": "1"}
+    assert (
+        after.accepts[0].model_dump()
+        == decode_payment_required_header(before).accepts[0].model_dump()
+    )
+    assert after.extensions["tilla.input"]["required"] == []
+
+
+def test_challenge_stays_far_below_the_proxy_header_buffer():
+    """A PAYMENT-REQUIRED header that outgrows nginx's buffer (4k by default, and
+    we set no override) fails as a 502 on EVERY 402 rather than degrading — the
+    whole paid surface, not one field. This is why the challenge carries field
+    names and not the schema inline: the full CreateStoreBody schema is ~1.3kB of
+    JSON on its own. Guards the margin, not the exact size."""
+    from x402.http.utils import encode_payment_required_header
+    from x402.schemas import PaymentRequired, PaymentRequirements
+
+    from app.agentic import challenge_input_extension
+    from app.main import CreateStoreBody
+
+    schema = CreateStoreBody.model_json_schema()
+    pr = PaymentRequired(
+        error="Payment required",
+        accepts=[
+            PaymentRequirements(
+                scheme="exact",
+                network="eip155:196",
+                asset="0x779ded0c9e1022225f8e0630b35a9b54be713736",
+                amount="50000",
+                pay_to="0xf4c9fa07f3bb852547fdc4df7c1d9fd9991cfa51",
+                max_timeout_seconds=300,
+                extra={"name": "USD₮0", "version": "1"},
+            )
+        ],
+        extensions=challenge_input_extension(schema),
+    )
+    assert len(encode_payment_required_header(pr)) < 2048
+    # The reason the schema is not inlined, pinned so a "just put it all in"
+    # refactor has to argue with a number.
+    assert len(json.dumps(schema)) > 1000
+
+
+def test_every_schema_publishing_route_also_publishes_its_challenge_contract():
+    """Each ``RouteConfig`` that publishes ``unpaid_schema_body`` must also pass
+    ``extensions``. The paid routes are built under ``if os.getenv("OKX_API_KEY")``
+    and conftest pops that key, so they do not exist at test time — read the source
+    instead, so a fifth paid route cannot be added with the gap this test closed."""
+    import ast
+
+    tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+    routes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "RouteConfig"
+    ]
+    publishing = [
+        r for r in routes if any(k.arg == "unpaid_response_body" for k in r.keywords)
+    ]
+    assert len(publishing) == 4, "expected create-store, upgrade, verify, add-product"
+    for route in publishing:
+        assert any(k.arg == "extensions" for k in route.keywords)
+
+
 def test_discovery_trust_tier_requires_independent_buyers():
     # Regression: `invoice-flow` was published as 'established' on four delivered
     # orders that all came from Tilla's own wallet. Volume from a single buyer is

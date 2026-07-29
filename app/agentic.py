@@ -902,6 +902,35 @@ def unpaid_schema_body(schema: dict, summary: str, sample: dict | None = None):
     return _hook
 
 
+def challenge_input_extension(schema: dict) -> dict:
+    """The route's input contract, small enough to ride the PAYMENT-REQUIRED header.
+
+    ``unpaid_schema_body`` puts the full JSON Schema in the 402 BODY, but a buyer
+    reported that an agent driving a stock x402 client reads the base64 CHALLENGE
+    and never looks at the body — so it still had to probe for the parameters. This
+    names the fields in the challenge itself and says where the full schema is.
+
+    Field names rather than the schema inline, deliberately: the challenge is a
+    response HEADER, and one that outgrows the proxy's buffer fails as a 502 on
+    every 402 rather than degrading. Documentation is not worth putting the paid
+    surface on that cliff.
+
+    Goes in ``extensions`` -- the top-level field the v2 402 structure has for
+    exactly this -- and never in ``accepts[].extra``, which is the EIP-712 domain
+    the client reads to sign. Overloading the struct a signer consumes is how a
+    payment becomes unsignable on a stricter client than the one we happen to run.
+    """
+    props = schema.get("properties") or {}
+    required = list(schema.get("required") or ())
+    return {
+        "tilla.input": {
+            "required": required,
+            "optional": [k for k in props if k not in required],
+            "full_schema": "input_schema in this response body",
+        }
+    }
+
+
 async def store_settle_failed_hook(context, failure) -> HTTPResponseBody:
     """x402 ``settlement_failed_response_body`` hook (async → off-loop). Recovers
     the nonce from the PAYMENT-SIGNATURE header and voids/recovers the order."""
