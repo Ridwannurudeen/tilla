@@ -75,6 +75,35 @@ IMAGERY_ASYNC = True
 # an image generator and a half-sentence draws a half-scene.
 ART_PROMPT_MAX = 200
 
+# The fabricated URL this text replaced. Stores created before the fix persisted
+# it into stores.delivery, so it is also the marker the repair script matches on.
+LEGACY_DELIVERY_MARKER = "/files/"
+
+
+def default_delivery_text(slug: str, product_name: str) -> str:
+    """What a buyer receives from a store with no deliverable attached.
+
+    The old default handed them a fabricated ``https://tilla.gudman.xyz/files/<slug>``
+    link. That path is not a route and never was, so every unconfigured store
+    promised a download that 404s — labelled "(demo delivery link)", but only AFTER
+    payment. Say what is actually true instead, and name the endpoint that fixes it.
+
+    A buy still settles on this text: refusing to sell without a deliverable would
+    break every existing store, including the ones a marketplace reviewer buys from.
+
+    Lives here as one function rather than inline because ``scripts/repair_delivery_text``
+    rewrites the stores that predate the fix and must produce byte-identical text —
+    two copies of a user-facing string that have to agree is exactly how the receipt
+    and the persisted price came to disagree."""
+    return (
+        f"Payment received — thank you. {product_name} "
+        "has no downloadable file attached yet: the merchant has not "
+        "configured fulfilment. If this is your store, attach the real "
+        f"goods with POST /api/stores/{slug}/deliverable using your manage "
+        "key, and buyers will receive a signed download link or licence key "
+        "instead of this message."
+    )
+
 
 def clip_words(text: object, limit: int) -> str:
     """`text` truncated to at most `limit` characters, never mid-word.
@@ -1066,22 +1095,8 @@ def create_store(desc, addr=None, delivery=None, theme=None, deliverable=None):
         theme_file = _resolve_theme(theme or seeded_theme)
         store_delivery = delivery
         if store_delivery is None:
-            # The old default handed the buyer a fabricated
-            # https://tilla.gudman.xyz/files/<slug> link. That path is not a route
-            # and never was, so every unconfigured store promised a download that
-            # 404s — labelled "(demo delivery link)", but only AFTER payment. Say
-            # what is actually true instead, and name the endpoint that fixes it.
-            # A buy still settles on this text: refusing to sell without a
-            # deliverable would break every existing store, including the ones a
-            # marketplace reviewer buys from.
-            store_delivery = (
-                f"Payment received — thank you. {content.get('product_name', 'your order')} "
-                "has no downloadable file attached yet: the merchant has not "
-                "configured fulfilment. If this is your store, attach the real "
-                "goods with POST /api/stores/"
-                f"{slug}/deliverable using your manage key, and buyers will "
-                "receive a signed download link or licence key instead of this "
-                "message."
+            store_delivery = default_delivery_text(
+                slug, content.get("product_name", "your order")
             )
 
         d = STORES_DIR / slug
