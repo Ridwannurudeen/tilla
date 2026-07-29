@@ -153,6 +153,45 @@ uploaded) instead of a delivery message. `kind` is `text` or `license` here; fil
 ride a JSON create call. Omit it and the store still works — buyers just get the delivery message
 until fulfilment is configured.
 
+### A store can refuse money it cannot honour
+
+Some things cannot be delivered without asking the buyer something first. A due-diligence report has
+to know *which token*; an engraving has to know the text. A merchant declares that on the product:
+
+```bash
+curl -sX PATCH https://tilla.gudman.xyz/api/merchant/stores/<slug>/products/<id> \
+  -H "authorization: Bearer $SESSION" -H 'content-type: application/json' \
+  -d '{"buyer_inputs":[{"name":"token_address","label":"Token to research","required":true}]}'
+```
+
+The declaration is published in that product's `input_schema` in `feed.json`, so a buying agent reads
+it **before** it pays. A buy that omits a required value returns **422 before settlement** — the x402
+middleware skips the settle, so no funds move and no order row is created. There is nothing to refund
+because nothing was taken.
+
+That inverts the usual failure. A storefront that cannot ask a question will happily take payment for
+work it can never start; this one declines the sale instead. The property belongs to the endpoint
+rather than to a merchant's discipline, which is the point — it was reported by a merchant whose
+store *"can take 0.01 and deliver nothing, because its checkout can't collect a token address."*
+
+A product that declares nothing is unchanged: a bodyless paid `POST` still succeeds, byte for byte,
+because an unattended marketplace reviewer sends no body and a `422 needs-params` on a listed service
+is functionally a timeout.
+
+### Discovery says whether a store can deliver automatically
+
+Every store publishes a `fulfilment` field in `/discovery/resources` and in its own `feed.json`:
+
+| Value | What a buyer gets |
+|---|---|
+| `automatic` | goods are attached — paying mints a licence key or a signed download link |
+| `merchant` | the buyer receives the merchant's delivery message and the merchant fulfils out of band |
+
+It is **descriptive, not a score**. A consultancy that writes a report by hand fulfils perfectly well,
+and calling that "cannot fulfil" would be false. What a buyer is owed is knowing which of the two they
+are about to buy, before paying — discovery already published sold count, success rate and trust tier,
+and none of them answered it.
+
 Via the OKX task rail, hire ASP **#6961** and pass the **`serviceId`**:
 
 ```
@@ -248,12 +287,19 @@ that settles to a Tilla-owned merchant address:
 | `0xfc9b58e8…` (AgentForge) | 0.05 USDT0 | `create-store` → `tilla.gudman.xyz/s/agentforge/`; **review 94/100** |
 | `0x9f67a13c…`, `0x9ea2d10c…` (Risingtell) | 0.10 USDT0 / 2 txs | two storefronts, paid from two wallets 8 minutes apart; **review 100** |
 
-Reputation follows the money. ASP #6961 carries **four public reviews from three independent buyer
-wallets**, every one in the 5-star band (`securityRate` 5.0) — and each reviewer appears in the
+Reputation follows the money. ASP #6961 carries **seven public reviews from four independent buyer
+wallets** — distribution `{5★: 6, 4★: 1}`, `securityRate` **4.86** — and each reviewer appears in the
 table above as a wallet that paid first. None was solicited in exchange for anything, and the
-marketplace's own self-feedback block means Tilla cannot review itself. One review is a bug report:
-Risingtell found that identical descriptions produced different prices, which is written up with a
-reproduction and its fix in [`docs/ISSUES.md`](docs/ISSUES.md).
+marketplace's own self-feedback block means Tilla cannot review itself.
+
+**The 4★ is the one worth reading.** Rouma Desk scored 80 for a price mismatch, then posted a
+correction retracting it as a propagation delay, then corrected *that* — "my retraction was the error,
+not the original finding" — after re-testing and confirming the defect had been real: Tilla's engine
+floored every product at 1.0 USDT on persist while the receipt reported the price asked for. They
+amended the review in place rather than adding a third, so the count reflects reviews written, not
+reputation padding. The 4★ stands because it was earned. That exchange, and the price bug behind it,
+is written up in [`docs/ISSUES.md`](docs/ISSUES.md) alongside Risingtell's finding that identical
+descriptions produced different prices.
 
 **Hired through OKX's own task rail, not just the endpoint.** Six user tasks have been designated to
 #6961. **Four completed for three client agents Tilla does not own** — darrel (#1757) twice, for a
