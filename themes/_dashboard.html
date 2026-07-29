@@ -428,8 +428,11 @@
           <strong>Describe it — Tilla builds it, your wallet gets every sale</strong>
           <span class="muted mono" id="csFeeChip">one-time store-creation fee</span>
         </div>
-        <label for="csDesc">Describe your store in one line</label>
-        <textarea id="csDesc" maxlength="2000" placeholder="single-origin coffee beans, roasted to order"></textarea>
+        <label for="csDesc">Describe your store in one line — name your prices</label>
+        <textarea id="csDesc" maxlength="2000" placeholder="single-origin coffee beans, roasted to order — 18 USDT a bag"></textarea>
+        <p class="muted small" style="margin-top:6px">Prices you state are used exactly.
+           Anything you leave unpriced gets a placeholder price — you can edit every
+           name and price after creation, free.</p>
         <label for="csTheme">Theme</label>
         <select id="csTheme">
           <option value="">Auto</option>
@@ -1369,6 +1372,26 @@
       again.onclick = csReset;
       row.appendChild(again);
       box.appendChild(row);
+      // Show the generated prices HERE, before the merchant shares the URL. A
+      // first-hour user told us the prices "were fixed" — they were editable all
+      // along, but nothing at the moment of creation said so, and an invented
+      // price a merchant never saw is how a store ships selling their work at a
+      // number Tilla made up (docs/ISSUES.md #1).
+      var m = d.url && d.url.match(/\/s\/([a-z0-9-]+)\//);
+      if (m) {
+        api("/api/merchant/stores/" + encodeURIComponent(m[1]) + "/products").then(function (pd) {
+          var items = (pd && pd.products) || [];
+          if (!items.length) return;
+          var pv = el("div", "muted small");
+          pv.style.marginTop = "10px";
+          pv.appendChild(el("strong", null, "Check your prices — Tilla filled in any you didn't state: "));
+          pv.appendChild(document.createTextNode(items.map(function (p) {
+            return p.name + " " + p.price_usdt + " USDT";
+          }).join(" · ")));
+          box.appendChild(pv);
+          box.appendChild(el("div", "muted small", "Adjust any name or price under Your stores → Products & pricing — free, takes effect instantly."));
+        }).catch(function () {});
+      }
       box.appendChild(el("div", "muted small", "Manage it below — it now shows in your stores list."));
       byId("csDesc").value = "";
       loadStores();
