@@ -626,6 +626,14 @@ def resync_catalog(session, store, extras_override=None) -> None:
         content["product_blurb"] = primary["blurb"]
         content["cta_text"] = primary["cta_text"]
         content["price_usdt"] = primary["price_usdt"]
+    else:
+        # No active product: the scalar primary MUST go too. render._catalog falls
+        # back to these fields when the list is empty (that fallback is what makes
+        # pre-multi-product stores render), so leaving them would rebuild a working
+        # buy button for the product just deactivated — a storefront selling
+        # something the checkout would then refuse.
+        for key in ("product_name", "product_blurb", "cta_text", "price_usdt"):
+            content.pop(key, None)
     store.content = content
     flag_modified(store, "content")
     d = STORES_DIR / store.slug

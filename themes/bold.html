@@ -389,6 +389,12 @@
 
   <section class="shop" id="buy">
     <div class="wrap">
+      {# Paused store: no active product, so nothing is purchasable. #}
+      {% if not PRODUCTS %}
+      <div class="card">
+        <p>Not currently on sale — this shop has paused its catalog.</p>
+      </div>
+      {% endif %}
       <div class="card">
         <div class="blocks" aria-hidden="true"><span></span><span></span><span></span></div>
         {# With a single product the plate IS that product's shot. With several, each

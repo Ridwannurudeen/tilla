@@ -447,6 +447,10 @@
     </section>
 
     <section class="section purchase" id="buy">
+      {# Paused store: no active product, so nothing is purchasable. #}
+      {% if not PRODUCTS %}
+      <p class="mono">Not currently on sale — this shop has paused its catalog.</p>
+      {% endif %}
       <div class="index" aria-hidden="true">
         <span class="num mono">03</span>
         <span class="label">The Purchase</span>

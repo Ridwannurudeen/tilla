@@ -777,7 +777,9 @@ def test_merchant_deactivate_hides_product_and_guards_last(
     assert r.status_code == 200 and r.json()["active"] is False
     html = (tmp_path / "cat3" / "index.html").read_text(encoding="utf-8")
     assert "Second" not in html and html.count('class="buy"') == 1
-    # cannot deactivate the last active product
+    # The LAST active product can be deactivated too. This used to 409, and a
+    # merchant reported the cost: a store that could not fulfil had no way to stop
+    # selling short of deleting the store, which also destroys its review history.
     primary = next(
         p
         for p in client.get(
@@ -790,7 +792,16 @@ def test_merchant_deactivate_hides_product_and_guards_last(
         headers=_auth(tok),
         json={"active": False},
     )
-    assert r2.status_code == 409
+    assert r2.status_code == 200 and r2.json()["active"] is False
+    # …and the storefront must stop offering anything. render._catalog falls back to
+    # the scalar product_* fields on an empty list, so without resync clearing them
+    # this page would show a working buy button for the product just deactivated.
+    paused = (tmp_path / "cat3" / "index.html").read_text(encoding="utf-8")
+    assert paused.count('class="buy"') == 0
+    assert primary["name"] not in paused
+    assert "paused its catalog" in paused
+    # and the money path refuses it before any funds move
+    assert client.post("/api/checkout/cat3", json={}).status_code == 409
 
 
 @respx.mock

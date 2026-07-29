@@ -289,7 +289,14 @@ def _products_ctx(content: Mapping) -> dict:
     hands to checkout to select the Nth active product (by id) — the catalog is
     rendered in the same order the Product rows were created."""
     raw = content.get("products")
-    if not isinstance(raw, list) or not raw:
+    # An empty LIST and an ABSENT list mean different things, and conflating them
+    # was a live hazard. Absent = pre-multi-product content, so coerce the scalar
+    # primary into a one-item catalog (that is what this fallback is for). Empty =
+    # the store has no active product on purpose, and rebuilding a card from stale
+    # scalars would render a buy button the checkout refuses.
+    if isinstance(raw, list) and not raw:
+        return {"PRODUCTS": []}
+    if not isinstance(raw, list):
         raw = [
             {
                 "name": content.get("product_name", ""),

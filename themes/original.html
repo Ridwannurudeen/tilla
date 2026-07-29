@@ -468,6 +468,14 @@
 
   <section class="shop reveal" id="buy">
     <div class="wrap">
+      {# A store with no active product is a legitimate state: the merchant has
+         paused selling. Say so, rather than showing an empty catalog. #}
+      {% if not PRODUCTS %}
+      <div class="card">
+        <p class="cat-eyebrow mono">Not currently on sale</p>
+        <p>This shop has paused its catalog. Nothing can be purchased right now.</p>
+      </div>
+      {% endif %}
       {% if PRODUCTS|length == 1 %}
       {% for p in PRODUCTS %}
       <div class="card">

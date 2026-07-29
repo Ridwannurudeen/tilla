@@ -1572,16 +1572,20 @@ def merchant_edit_product(
             _screen_name(field.label)
         product.buyer_inputs = [f.model_dump() for f in body.buyer_inputs] or None
     if body.active is not None and body.active != product.active:
-        if not body.active:
-            # never leave a live store with zero active products — checkout would
-            # 409 and the storefront would render an empty catalog.
-            active_count = session.scalar(
-                select(func.count())
-                .select_from(Product)
-                .where(Product.store_id == store.id, Product.active.is_(True))
-            )
-            if active_count <= 1:
-                raise HTTPException(409, "cannot deactivate the last active product")
+        # The last active product CAN be deactivated. This used to 409, to avoid a
+        # store rendering an empty catalog — but a merchant reported the real cost:
+        # a store that cannot fulfil right now had no way to stop selling short of
+        # deleting the store, which also destroys the review history that is the
+        # whole reason to keep it. "Not selling at the moment" is a legitimate state
+        # and refusing to represent it forced them to keep taking money instead.
+        #
+        # Safe because both money paths already refuse a store with no active
+        # product BEFORE any funds move: the web checkout 409s (main.py) and the
+        # x402 buy 409s before settle (agentic._do_agent_buy). What was NOT safe is
+        # the storefront — render._catalog falls back to the scalar product_* fields
+        # when the list is empty, so a paused store would have rendered a working
+        # buy button for the product just deactivated. resync_catalog clears those
+        # scalars for exactly this reason.
         product.active = body.active
     # blurb/cta live only in content; override just the provided field, keeping the
     # other from the current catalog entry.
