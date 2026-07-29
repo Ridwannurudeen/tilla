@@ -391,6 +391,15 @@ def test_manage_index_answers_the_price_question(tmp_path, monkeypatch):
     assert "/api/merchant/stores/" in cp["recommended"]["path"]
     assert cp["recommended"]["cost"] == "free"
     assert any("add-product" in a for a in cp["alternatives"])
+    # The example price must READ as a placeholder, like <product_id> beside it.
+    # It was a bare 0.01 — which happened to be the reporting merchant's own
+    # price — and they flagged that an agent parsing this field could take it for
+    # the required value rather than an illustration.
+    body_price = cp["recommended"]["body"]["price_usdt"]
+    assert isinstance(body_price, str), "a literal number reads as the value to send"
+    assert body_price.startswith("<") and body_price.endswith(">")
+    # And the fee for an alternative must not read as a price to set.
+    assert any("the call costs 0.01 USDT" in a for a in cp["alternatives"])
 
 
 @respx.mock

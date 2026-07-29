@@ -2029,7 +2029,12 @@ def manage_index(
             "recommended": {
                 "method": "PATCH",
                 "path": f"/api/merchant/stores/{store.slug}/products/<product_id>",
-                "body": {"price_usdt": 0.01},
+                # A placeholder, matching <product_id> beside it, rather than a
+                # number. This read as a literal: the merchant who used this block
+                # noted an agent parsing it could take the example price as the
+                # required value. One field teaching substitution while its
+                # neighbour shows a real-looking value is a trap.
+                "body": {"price_usdt": "<new price in USDT, e.g. 2.50>"},
                 "auth": (
                     "sign in at POST /api/merchant/auth/nonce then "
                     "/api/merchant/auth/verify with the pay_to wallet"
@@ -2037,9 +2042,12 @@ def manage_index(
                 "cost": "free",
             },
             "alternatives": [
-                "POST /add-product with an explicit price_usdt (0.01 USDT)",
+                # "0.01 USDT" here is what the CALL costs, not a price to set —
+                # three lines from an example price it would otherwise echo.
+                "POST /add-product with an explicit price_usdt of your choosing "
+                "(the call costs 0.01 USDT)",
                 "POST /upgrade-store with a description stating the new price "
-                "(0.03 USDT, regenerates the catalogue)",
+                "(the call costs 0.03 USDT, regenerates the catalogue)",
             ],
         },
     }
