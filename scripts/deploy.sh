@@ -87,40 +87,53 @@ ssh "$VPS" "systemctl restart tilla-api"
 # Smoke: health is up, both live stores still render (nginx serves them
 # statically — unaffected by the restart), and an unpaid create-store is still
 # x402-gated.
-# The restart (and any watchdog bounce while uvicorn boots + rerender_stores runs)
-# briefly 502s at the edge, so poll /health rather than a single shot that would
-# abort the whole deploy on a transient bad gateway.
+#
+# A failing check RECORDS and continues rather than exiting on the spot. The old
+# script aborted at the first hard failure, so a slow boot did not just report
+# "smoke failed" — it also skipped the store renders, /ready, the 402 gate and
+# every growth check below it. That is the worst outcome available: a scary
+# message AND less verification than a passing run. Failures are summarised at
+# the end and the script still exits non-zero.
+SMOKE_FAILURES=()
+fail() { echo "smoke FAILED: $*" >&2; SMOKE_FAILURES+=("$1"); }
+
+# Poll rather than single-shot: the restart (and any watchdog bounce while uvicorn
+# boots and rerender_stores runs) briefly 502s at the edge.
+#
+# The budget was 40s against a boot measured at 38s and 61s on the same day — a
+# coin flip that failed a perfectly healthy deploy. Boot is roughly process start
+# plus rerender_stores, and rerender scales with the store count, so the budget
+# has to have real headroom rather than track today's number. Elapsed time is
+# printed on success so the creep is visible while it is still cheap.
+health_start=$SECONDS
 health_ok=0
-for _ in $(seq 1 20); do
+for _ in $(seq 1 90); do
   if curl -fsS "$BASE/health" >/dev/null 2>&1; then health_ok=1; break; fi
   sleep 2
 done
-if [ "$health_ok" != 1 ]; then
-  echo "smoke failed: /health did not reach 200 within ~40s" >&2
-  exit 1
+if [ "$health_ok" = 1 ]; then
+  echo "smoke: /health up after $((SECONDS - health_start))s"
+else
+  fail "/health did not reach 200 within ~180s"
 fi
 for slug in invoice-flow billable; do
-  curl -fsS "$BASE/s/$slug/" >/dev/null
+  curl -fsS "$BASE/s/$slug/" >/dev/null || fail "store /s/$slug/ did not render"
 done
 
 # /ready may briefly 503 right after restart until the first sweeper tick stamps its
-# heartbeats, so poll for up to ~30s before treating it as a failure.
+# heartbeats, so poll before treating it as a failure.
 ready_ok=0
-for _ in $(seq 1 15); do
+for _ in $(seq 1 30); do
   if curl -fsS "$BASE/ready" >/dev/null 2>&1; then ready_ok=1; break; fi
   sleep 2
 done
 if [ "$ready_ok" != 1 ]; then
-  echo "smoke failed: /ready did not reach 200 within ~30s" >&2
   curl -s "$BASE/ready" >&2 || true
-  exit 1
+  fail "/ready did not reach 200 within ~60s"
 fi
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/create-store" \
   -H 'content-type: application/json' -d '{"description":"deploy smoke"}')
-if [ "$code" != "402" ]; then
-  echo "smoke failed: unpaid POST /create-store returned $code, expected 402" >&2
-  exit 1
-fi
+[ "$code" = "402" ] || fail "unpaid POST /create-store returned $code, expected 402"
 
 # M13 growth smoke. External feeds + embed.js are read-only/static and must 200
 # (these routes require the nginx-growth.snippet locations to be applied first —
@@ -173,5 +186,14 @@ mpp=$(smoke_code -X POST "$BASE/s/invoice-flow/mpp/open" -H 'content-type: appli
 [ "$mpp" != "404" ] || echo "smoke WARN: POST /s/…/mpp/open returned 404 (nginx not exposing mpp/*)" >&2
 sub=$(smoke_code -X POST "$BASE/s/invoice-flow/subscribe" -H 'content-type: application/json' -d '{}')
 [ "$sub" != "404" ] || echo "smoke WARN: POST /s/…/subscribe returned 404 (nginx not exposing subscribe*)" >&2
+
+if [ ${#SMOKE_FAILURES[@]} -ne 0 ]; then
+  echo "" >&2
+  echo "deploy FAILED ${#SMOKE_FAILURES[@]} smoke check(s):" >&2
+  for f in "${SMOKE_FAILURES[@]}"; do echo "  - $f" >&2; done
+  echo "Every check above still ran; the files are already deployed and the" >&2
+  echo "service restarted, so this reports what is broken, not what was skipped." >&2
+  exit 1
+fi
 
 echo "deploy ok: health up, ready 200, live stores render, create-store gated (402)"

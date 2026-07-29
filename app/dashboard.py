@@ -32,6 +32,7 @@ from starlette.responses import HTMLResponse, StreamingResponse
 
 from app import (
     affiliates,
+    b2b,
     chain,
     checkout,
     config,
@@ -828,6 +829,10 @@ def merchant_order_detail(
     detail = _order_row(order, store)
     detail["product_name"] = product.name if product else None
     detail["buyer_email"] = order.buyer_email
+    # The brief. For a service order this is the whole job — without it the merchant
+    # has payment and no idea what was bought, which is the state a store selling a
+    # due-diligence report was stuck in before products could demand inputs.
+    detail["buyer_inputs"] = order.buyer_inputs or {}
     detail["tx_url"] = config.OKLINK_TX_BASE + order.tx_hash if order.tx_hash else None
     # M11 on-chain receipt (additive, NULL until an attestation exists).
     detail["attest_status"] = order.attest_status
@@ -1324,6 +1329,54 @@ def export_subscribers_csv(
 
 
 # ------------------------------------------------------------------- webhooks
+class ContactBody(BaseModel):
+    """The agent id to reach this merchant on. Send null to clear."""
+
+    notify_agent_id: str | None = Field(default=None, max_length=40)
+
+
+@router.get("/api/merchant/contact")
+@limiter.limit("60/minute")
+def get_contact(request: Request, session: Session = Depends(get_session)):
+    merchant = _require_merchant(request, session)
+    return {"notify_agent_id": merchant.contact_agent_id}
+
+
+@router.post("/api/merchant/contact")
+@limiter.limit("10/minute")
+def set_contact(
+    request: Request,
+    body: ContactBody,
+    session: Session = Depends(get_session),
+):
+    """Set or clear where this merchant hears from us.
+
+    `create-store` can carry it now, but every store that already exists was made
+    before the field did — this is the only route by which those merchants become
+    reachable at all. Unlike the create path (where a malformed value is dropped so
+    a paid create never fails over a preference), an explicit call that cannot be
+    parsed is a 422: the caller is doing exactly one thing and deserves to know it
+    did not happen."""
+    merchant = _require_merchant(request, session)
+    if body.notify_agent_id is None:
+        merchant.contact_agent_id = None
+    else:
+        parsed = b2b.parse_agent_id(body.notify_agent_id)
+        if parsed is None:
+            raise HTTPException(
+                422, "notify_agent_id must be a numeric id or erc8004:<id>"
+            )
+        merchant.contact_agent_id = parsed
+    log_event(
+        session,
+        "merchant",
+        "contact.set",
+        data={"merchant_id": merchant.id, "cleared": body.notify_agent_id is None},
+    )
+    session.commit()
+    return {"notify_agent_id": merchant.contact_agent_id}
+
+
 class WebhookBody(BaseModel):
     url: str = Field(min_length=1, max_length=500)
 
@@ -1380,12 +1433,26 @@ class ProductAddBody(BaseModel):
     cta_text: str = Field(default="Buy now", max_length=40)
 
 
+class BuyerInputField(BaseModel):
+    """One thing the merchant needs from a buyer before they can fulfil."""
+
+    name: str = Field(max_length=40, pattern=r"^[a-z][a-z0-9_]*$")
+    label: str = Field(max_length=120)
+    required: bool = True
+
+
 class ProductPatchBody(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     price_usdt: float | None = Field(default=None, ge=0.01, le=10000)
     blurb: str | None = Field(default=None, max_length=400)
     cta_text: str | None = Field(default=None, max_length=40)
     active: bool | None = None
+    # What the buyer must supply for this product. Send [] to clear. A store
+    # selling a service had no way to ask, so it could take payment and be unable
+    # to start the work; a required input here is refused BEFORE settlement.
+    buyer_inputs: list[BuyerInputField] | None = Field(
+        default=None, max_length=config.MAX_BUYER_INPUT_FIELDS
+    )
 
 
 def _screen_name(name: str) -> None:
@@ -1497,6 +1564,13 @@ def merchant_edit_product(
         product.name = name
     if body.price_usdt is not None:
         product.price_micro = int(round(body.price_usdt * 1e6))
+    if body.buyer_inputs is not None:
+        # Labels are merchant prose shown to a buyer at checkout, so they go through
+        # the same fail-closed screening as a product name rather than straight to
+        # the storefront.
+        for field in body.buyer_inputs:
+            _screen_name(field.label)
+        product.buyer_inputs = [f.model_dump() for f in body.buyer_inputs] or None
     if body.active is not None and body.active != product.active:
         if not body.active:
             # never leave a live store with zero active products — checkout would
@@ -1542,6 +1616,10 @@ def merchant_edit_product(
         "name": product.name,
         "price_usdt": product.price_micro / 1e6,
         "active": product.active,
+        # Echoed from the PERSISTED row, not from the request: a receipt that
+        # reported what was asked for rather than what was stored is exactly how
+        # the price bug hid for 99 products.
+        "buyer_inputs": product.buyer_inputs or [],
     }
 
 

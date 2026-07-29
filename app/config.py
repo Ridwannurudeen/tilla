@@ -56,6 +56,14 @@ MAX_DESCRIPTION_LEN = 2000
 # text deliverable's payload. Same ceiling as a description — anything larger is a
 # file, which belongs on the multipart upload endpoint, not in a JSON create call.
 MAX_DELIVERY_LEN = 2000
+# One buyer-supplied answer (a token address, a domain, a name to engrave). Sized
+# for an identifier or a short line, not prose: it is echoed back to the merchant
+# and rendered on the storefront, so an unbounded value is both a UI hazard and a
+# cheap way to bloat every order row.
+MAX_BUYER_INPUT_LEN = 500
+# How many inputs one product may demand of a buyer. A checkout that asks twelve
+# questions is not a checkout, and each one is a place a sale can fail.
+MAX_BUYER_INPUT_FIELDS = 6
 MAX_BODY_BYTES = 64 * 1024  # generous over MAX_DESCRIPTION_LEN, well under abuse range
 
 # ---------- M4 gated delivery: uploads, signed links, licenses ----------

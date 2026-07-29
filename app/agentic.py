@@ -212,6 +212,24 @@ def _deferred_deliverable_ok(session: Session, store_id: int) -> bool:
     return active is not None and active.kind == "file"
 
 
+def _has_active_deliverable(session: Session, store_id: int) -> bool:
+    """Whether this store has ANY active deliverable, of any kind.
+
+    Deliberately broader than :func:`checkout._active_deliverable`, which resolves
+    the ONE row to serve an order and so returns only the store-level default.
+    ``fulfilment`` is a store-level statement, and the discovery query answers it
+    with a joined COUNT over the same set — the two have to agree or a store reads
+    'automatic' in one surface and 'merchant' in the other."""
+    return (
+        session.scalar(
+            select(func.count(Deliverable.id)).where(
+                Deliverable.store_id == store_id, Deliverable.active.is_(True)
+            )
+        )
+        or 0
+    ) > 0
+
+
 def _is_batch_path(path: str) -> bool:
     """True iff the product THIS /buy path targets declares pricing_model='batch'
     AND the store's deliverable is revocable (see :func:`_deferred_deliverable_ok`).
@@ -546,6 +564,11 @@ def _agent_buy_body(
         "delivery": delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY,
         "tx": order.tx_hash or "pending",
     }
+    # Echo the brief back so the buyer can see what the merchant received, and so a
+    # mistyped token address is visible in the receipt rather than only in a report
+    # that comes back about the wrong thing.
+    if order.buyer_inputs:
+        body["buyer_inputs"] = order.buyer_inputs
     _augment_agent_gated(session, order, body)
     return body
 
@@ -574,6 +597,7 @@ def fulfill_agent_order(
     referrer_addr: str | None = None,
     agent_id: int | None = None,
     signed_micro: int | None = None,
+    buyer_inputs: dict | None = None,
 ) -> tuple[Order, dict]:
     """Idempotently create + deliver an agent order. The (store, payer, nonce)
     triple is the idempotency key (see :func:`_assert_nonce_owner`): an existing
@@ -622,6 +646,9 @@ def fulfill_agent_order(
         referrer_addr=referrer_addr,
         created_block=checkout._current_head(),
         paid_at=checkout._now(),
+        # The job ticket. Written with the order rather than after settle, so an
+        # order that exists always carries the brief its product demanded.
+        buyer_inputs=buyer_inputs or None,
     )
     session.add(order)
     try:
@@ -662,6 +689,7 @@ def _do_agent_buy(
     slug: str,
     ref: str | None,
     agent_id: str | None,
+    body: "BuyBody | None" = None,
 ) -> JSONResponse:
     """Shared body for POST /s/{slug}/buy and /s/{slug}/buy/{product_id}. The
     product is resolved from the request PATH (bare /buy = primary; /buy/{id} =
@@ -710,6 +738,12 @@ def _do_agent_buy(
                 "aggr_deferred requires a file deliverable: text is released in the "
                 "response body, before a deferred settle confirms on-chain",
             )
+    # A product that demands buyer input cannot be sold without it. 422 here is
+    # BEFORE settle, so the middleware skips settlement and zero funds move: the
+    # merchant never receives money for a job with no brief. Products declaring
+    # nothing return {} and this is a no-op — every existing store is unchanged,
+    # including the bodyless POST an unattended reviewer sends.
+    buyer_inputs = validate_buyer_inputs(product, body.inputs if body else None)
     auth = (
         payload.payload.get("authorization")
         if isinstance(payload.payload, dict)
@@ -727,7 +761,7 @@ def _do_agent_buy(
         signed_micro = int(auth.get("value"))
     except (TypeError, ValueError):
         signed_micro = None
-    order, body = fulfill_agent_order(
+    order, resp_body = fulfill_agent_order(
         session,
         store,
         product,
@@ -736,13 +770,25 @@ def _do_agent_buy(
         referrer_addr,
         aid,
         signed_micro,
+        buyer_inputs,
     )
     session.commit()
     # Shared scope["state"] hands the order id (and the presented agent id) to the
     # outer agent-guard middleware for settle-success bookkeeping + tier re-verify.
     request.state.agent_order_id = order.id
     request.state.agent_buy_agent_id = aid
-    return JSONResponse(body)
+    return JSONResponse(resp_body)
+
+
+class BuyBody(BaseModel):
+    """Optional body on a paid buy, carrying the merchant's declared buyer inputs.
+
+    Optional in the strongest sense: a product that declares nothing accepts a
+    bodyless POST exactly as before. An unattended marketplace reviewer sends no
+    body at all, and that has to keep working — a 422-needs-params on a listed
+    service is functionally a timeout, which is what got us rejected once already."""
+
+    inputs: dict[str, str] | None = None
 
 
 @router.post("/s/{slug}/buy")
@@ -753,8 +799,9 @@ def agent_buy(
     session: Session = Depends(get_session),
     ref: str | None = None,
     agent_id: str | None = None,
+    body: BuyBody | None = None,
 ):
-    return _do_agent_buy(request, session, slug, ref, agent_id)
+    return _do_agent_buy(request, session, slug, ref, agent_id, body)
 
 
 @router.post("/s/{slug}/buy/{product_id}")
@@ -766,8 +813,9 @@ def agent_buy_product(
     session: Session = Depends(get_session),
     ref: str | None = None,
     agent_id: str | None = None,
+    body: BuyBody | None = None,
 ):
-    return _do_agent_buy(request, session, slug, ref, agent_id)
+    return _do_agent_buy(request, session, slug, ref, agent_id, body)
 
 
 @router.get("/s/{slug}/buy")
@@ -1918,6 +1966,54 @@ def product_image_url(store: Store, product: Product, store_url: str) -> str | N
     return None
 
 
+def _buy_input_schema(product: Product | None) -> dict:
+    """The typed contract for POST /s/{slug}/buy/{id}, including merchant demands.
+
+    ``ref`` and ``agent_id`` are optional query params. The merchant's declared
+    buyer inputs live under ``inputs`` and the required ones are listed in
+    ``required`` — an agent that omits one gets a 422 before settlement, so this is
+    a contract it must read rather than documentation it may skim."""
+    declared = declared_buyer_inputs(product)
+    schema: dict = {
+        "type": "object",
+        "properties": {
+            "ref": {
+                "type": "string",
+                "description": "optional 0x affiliate wallet to attribute the sale to",
+            },
+            "agent_id": {
+                "type": "string",
+                "description": (
+                    "optional ERC-8004 agent id to price a wholesale tier; "
+                    "granted at settle only if the payer wallet is its owner"
+                ),
+            },
+        },
+    }
+    if not declared:
+        return schema
+    required = [f["name"] for f in declared if f["required"]]
+    schema["properties"]["inputs"] = {
+        "type": "object",
+        "description": (
+            "what the merchant needs from you to fulfil this order; "
+            "a missing required value is refused before payment settles"
+        ),
+        "properties": {
+            f["name"]: {
+                "type": "string",
+                "description": f["label"],
+                "maxLength": config.MAX_BUYER_INPUT_LEN,
+            }
+            for f in declared
+        },
+        **({"required": required} if required else {}),
+    }
+    if required:
+        schema["required"] = ["inputs"]
+    return schema
+
+
 def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> dict:
     image_url = product_image_url(store, product, store_url)
     return {
@@ -1941,26 +2037,11 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
         **_offering_envelope(store, slug, product),
         # Phase 1.2: the typed contract an agent supplies to the x402 buy endpoint.
         # The product is fixed by the x402 endpoint path and payment rides the x402
-        # header, so the only request-shaping inputs are the buy route's two optional
-        # query params (ref/agent_id) — mirrors the agent-card 'buy' input_schema.
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "ref": {
-                    "type": "string",
-                    "description": (
-                        "optional 0x affiliate wallet to attribute the sale to"
-                    ),
-                },
-                "agent_id": {
-                    "type": "string",
-                    "description": (
-                        "optional ERC-8004 agent id to price a wholesale tier; "
-                        "granted at settle only if the payer wallet is its owner"
-                    ),
-                },
-            },
-        },
+        # header, so the request-shaping inputs are the buy route's two optional
+        # query params (ref/agent_id) plus anything the MERCHANT declares the buyer
+        # must supply — the latter is not optional: without it the buy is refused
+        # before settle, so an agent that ignores this field cannot buy.
+        "input_schema": _buy_input_schema(product),
     }
 
 
@@ -2022,6 +2103,10 @@ def feed_json(
             "name": _store_name(store),
             "description": _store_description(store),
             "url": store_url,
+            # Discovery carries this too; an agent that came straight to a store's
+            # feed never saw the discovery row, and this is the one thing it cannot
+            # infer from the catalog.
+            "fulfilment": fulfilment_mode(_has_active_deliverable(session, store.id)),
         },
         "products": [_feed_product(store, slug, p, store_url) for p in products],
     }
@@ -2342,6 +2427,86 @@ def _trust_tier(sold: int, success_rate: float | None, buyers: int = 0) -> str:
     return "emerging"
 
 
+def declared_buyer_inputs(product: Product | None) -> list[dict]:
+    """The merchant's declared buyer inputs for a product, normalised and safe.
+
+    Tolerant of anything already in the column: the JSON is merchant-supplied, so a
+    malformed entry is skipped rather than raising on a read path that feeds
+    discovery, the storefront and the buy gate alike."""
+    raw = getattr(product, "buyer_inputs", None)
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        out.append(
+            {
+                "name": name,
+                "label": str(item.get("label") or name).strip(),
+                "required": bool(item.get("required", True)),
+            }
+        )
+    return out
+
+
+def validate_buyer_inputs(product: Product | None, supplied: dict | None) -> dict:
+    """The supplied inputs, or raise 422 BEFORE settlement.
+
+    This is the whole point of the feature. A >=400 here makes the x402 middleware
+    skip settlement, so a buy that cannot be fulfilled never moves funds: the
+    merchant is not left holding money for a job with no brief, and the buyer is
+    not left with a receipt for nothing. A merchant reported exactly that shape —
+    a store that "can take 0.01 and deliver nothing" because checkout could not ask
+    which token to research.
+
+    Undeclared keys are dropped rather than rejected: an agent that sends extra
+    context should not have its payment refused over it."""
+    declared = declared_buyer_inputs(product)
+    if not declared:
+        return {}
+    supplied = supplied or {}
+    kept, missing = {}, []
+    for field in declared:
+        value = supplied.get(field["name"])
+        value = value.strip() if isinstance(value, str) else value
+        if value in (None, ""):
+            if field["required"]:
+                missing.append(field["name"])
+            continue
+        kept[field["name"]] = str(value)[: config.MAX_BUYER_INPUT_LEN]
+    if missing:
+        raise HTTPException(
+            422,
+            "this product requires buyer input before it can be sold: "
+            + ", ".join(missing)
+            + '. POST {"inputs": {"'
+            + missing[0]
+            + '": "…"}} with the payment.',
+        )
+    return kept
+
+
+def fulfilment_mode(has_deliverable: bool) -> str:
+    """How a buyer receives the goods once they have paid.
+
+    ``automatic`` — the store has goods attached, so paying mints an entitlement
+    and the buy response carries a licence key or a signed download link.
+    ``merchant`` — the buyer receives the merchant's delivery message and the
+    merchant fulfils out of band.
+
+    DESCRIPTIVE, not a quality score, and deliberately not phrased as "can/cannot
+    fulfil". A consultancy that writes a report by hand, or a shop that posts a
+    candle, fulfils perfectly well and would be defamed by the other framing. What
+    a buyer is owed is knowing which of the two they are about to buy, BEFORE they
+    pay — discovery published sold_count, success_rate and trust_tier but nothing
+    that answered it."""
+    return "automatic" if has_deliverable else "merchant"
+
+
 def _discovery_row(
     store: Store,
     pmin,
@@ -2354,6 +2519,7 @@ def _discovery_row(
     pending,
     review_avg,
     review_count,
+    deliverables=None,
 ) -> dict:
     # Reputation signals an agent buyer can rank on, computed from terminal orders:
     # sold_count = delivered count; success_rate = good / (good + rejected + refunded)
@@ -2390,6 +2556,8 @@ def _discovery_row(
         "pending_eval_count": pending,
         "disputed_count": rejected,
         "trust_tier": _trust_tier(good, success_rate, buyers or 0),
+        # What the buyer actually receives on payment. See fulfilment_mode.
+        "fulfilment": fulfilment_mode(bool(deliverables)),
         "review_avg": round(float(review_avg), 2) if review_avg is not None else None,
         "review_count": review_count or 0,
         "created_at": store.created_at.isoformat() + "Z",
@@ -2492,6 +2660,18 @@ def _discovery_rows(
         .group_by(Review.store_id)
         .subquery()
     )
+    # Whether the store has goods attached, joined rather than looked up per row:
+    # discovery returns a page of stores and a per-store query here would be N+1 on
+    # the hottest read an agent buyer makes.
+    fulfil_sq = (
+        select(
+            Deliverable.store_id.label("sid"),
+            func.count(Deliverable.id).label("ndeliv"),
+        )
+        .where(Deliverable.active.is_(True))
+        .group_by(Deliverable.store_id)
+        .subquery()
+    )
     sold_c = func.coalesce(metrics_sq.c.sold, 0)
     rejected_c = func.coalesce(metrics_sq.c.rejected, 0)
     pending_c = func.coalesce(metrics_sq.c.pending, 0)
@@ -2527,10 +2707,12 @@ def _discovery_rows(
             metrics_sq.c.pending,
             reviews_sq.c.ravg,
             reviews_sq.c.rcount,
+            fulfil_sq.c.ndeliv,
         )
         .outerjoin(price_sq, price_sq.c.sid == Store.id)
         .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
         .outerjoin(reviews_sq, reviews_sq.c.sid == Store.id)
+        .outerjoin(fulfil_sq, fulfil_sq.c.sid == Store.id)
         # Phase 1.7: hidden (sandbox) stores stay out of bulk discovery.
         .where(Store.status == "live", Store.visibility == "public", *where_clauses)
         .order_by(*order_by)

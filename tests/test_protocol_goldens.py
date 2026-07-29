@@ -17,7 +17,7 @@ from sqlalchemy import select
 import app.main as main
 from app import agentic, b2b, config, delivery
 from app.db import SessionLocal
-from app.models import Store
+from app.models import Product, Store
 from fastapi.testclient import TestClient
 
 client = TestClient(main.app)
@@ -95,12 +95,16 @@ def test_agent_card_validates_against_pinned_schema():
 
 
 def _buy_query_fields() -> set[str]:
-    """The x402 buy endpoint's REAL accepted request-shaping fields: the buy route's
-    optional query params (slug/product_id are path-fixed, payment rides the x402
-    header). Read from the live signature so the feed input_schema can't drift from
-    what the endpoint actually accepts."""
+    """The x402 buy endpoint's REAL accepted request-shaping QUERY fields: the buy
+    route's optional query params (slug/product_id are path-fixed, payment rides the
+    x402 header). Read from the live signature so the feed input_schema can't drift
+    from what the endpoint actually accepts.
+
+    ``body`` is excluded because it is not a query field — it carries the merchant's
+    declared buyer inputs and surfaces in the schema as ``inputs``, asserted
+    separately below because it appears only when a product declares any."""
     sig = inspect.signature(agentic.agent_buy_product)
-    skip = {"request", "session", "slug", "product_id"}
+    skip = {"request", "session", "slug", "product_id", "body"}
     return {n for n, p in sig.parameters.items() if n not in skip and p.default is None}
 
 
@@ -117,6 +121,34 @@ def test_feed_validates_against_pinned_schema(make_store):
     isch = prod["input_schema"]
     assert isch["type"] == "object"
     assert set(isch["properties"]) == _buy_query_fields() == {"ref", "agent_id"}
+    # A product demanding nothing must not advertise `inputs`: telling an agent to
+    # send a field the merchant never asked for is the same discoverability noise
+    # as hiding one they did.
+    assert "inputs" not in isch["properties"]
+    assert "required" not in isch
+
+
+def test_feed_input_schema_advertises_what_the_merchant_demands(make_store):
+    # A store selling a service could take payment with no way to ask what to work
+    # on. The declaration has to reach the agent BEFORE it pays, or the 422 that
+    # protects the buyer just looks like a broken endpoint.
+    make_store(slug="pg-inputs", price_micro=1_000_000)
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "pg-inputs"))
+        product = s.scalar(select(Product).where(Product.store_id == store.id))
+        product.buyer_inputs = [
+            {"name": "token_address", "label": "Token to research", "required": True},
+            {"name": "notes", "label": "Anything else", "required": False},
+        ]
+        s.commit()
+    prod = client.get("/s/pg-inputs/feed.json").json()["products"][0]
+    isch = prod["input_schema"]
+    jsonschema.validate(client.get("/s/pg-inputs/feed.json").json(), FEED_SCHEMA)
+    assert set(isch["properties"]) == {"ref", "agent_id", "inputs"}
+    assert set(isch["properties"]["inputs"]["properties"]) == {"token_address", "notes"}
+    # only the required one is required, and the buy body itself becomes required
+    assert isch["properties"]["inputs"]["required"] == ["token_address"]
+    assert isch["required"] == ["inputs"]
 
 
 def test_quote_base_only_validates(make_store):

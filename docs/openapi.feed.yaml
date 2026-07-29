@@ -25,6 +25,16 @@ properties:
       url:
         type: string
         format: uri
+      # How a buyer receives the goods once paid. "automatic" = the store has goods
+      # attached, so paying mints a licence key or a signed download link;
+      # "merchant" = the buyer receives the merchant's delivery message and the
+      # merchant fulfils out of band. Descriptive, not a quality score — a
+      # consultancy delivering by hand fulfils perfectly well. NOT in `required`:
+      # this schema also validates INBOUND federated peer feeds, which will not
+      # emit a Tilla-specific key.
+      fulfilment:
+        type: string
+        enum: [automatic, merchant]
   products:
     type: array
     items:

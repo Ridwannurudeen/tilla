@@ -75,33 +75,59 @@ IMAGERY_ASYNC = True
 # an image generator and a half-sentence draws a half-scene.
 ART_PROMPT_MAX = 200
 
-# The fabricated URL this text replaced. Stores created before the fix persisted
-# it into stores.delivery, so it is also the marker the repair script matches on.
+# The fabricated URL the first honest default replaced. Stores created before that
+# fix persisted it into stores.delivery, so it is also a marker the repair matches.
 LEGACY_DELIVERY_MARKER = "/files/"
 
 
 def default_delivery_text(slug: str, product_name: str) -> str:
     """What a buyer receives from a store with no deliverable attached.
 
-    The old default handed them a fabricated ``https://tilla.gudman.xyz/files/<slug>``
-    link. That path is not a route and never was, so every unconfigured store
-    promised a download that 404s — labelled "(demo delivery link)", but only AFTER
-    payment. Say what is actually true instead, and name the endpoint that fixes it.
+    The original default handed them a fabricated
+    ``https://tilla.gudman.xyz/files/<slug>`` link. That path is not a route and
+    never was, so every unconfigured store promised a download that 404s —
+    labelled "(demo delivery link)", but only AFTER payment.
 
     A buy still settles on this text: refusing to sell without a deliverable would
     break every existing store, including the ones a marketplace reviewer buys from.
 
-    Lives here as one function rather than inline because ``scripts/repair_delivery_text``
-    rewrites the stores that predate the fix and must produce byte-identical text —
-    two copies of a user-facing string that have to agree is exactly how the receipt
-    and the persisted price came to disagree."""
+    Lives here as one function rather than inline because
+    ``scripts/repair_delivery_text`` rewrites older stores and must produce
+    byte-identical text — two copies of a user-facing string that have to agree is
+    exactly how the receipt and the persisted price came to disagree."""
     return (
-        f"Payment received — thank you. {product_name} "
-        "has no downloadable file attached yet: the merchant has not "
-        "configured fulfilment. If this is your store, attach the real "
-        f"goods with POST /api/stores/{slug}/deliverable using your manage "
-        "key, and buyers will receive a signed download link or licence key "
-        "instead of this message."
+        f"Payment received — thank you. {product_name} has nothing attached for "
+        "automatic delivery. If it is a physical item or a service, the merchant "
+        "delivers it directly and will follow up. If you expected a file or a "
+        "licence key, the merchant has not configured fulfilment yet. If this is "
+        f"your store, attach the goods with POST /api/stores/{slug}/deliverable "
+        "using your manage key and buyers will receive a signed download link or "
+        "licence key instead of this message."
+    )
+
+
+def superseded_delivery_texts(slug: str, product_name: str) -> tuple[str, ...]:
+    """Every earlier wording of :func:`default_delivery_text`, rendered for a store.
+
+    The repair rewrites text TILLA generated and must never touch text a merchant
+    wrote. Matching on an exact render of a previous default is what proves
+    authorship: a merchant's own words cannot collide with one of these, and a
+    store repaired under an older wording is still recognised rather than frozen
+    at whatever the default said the day it was created.
+
+    Append here when the wording changes; never edit an entry, or the stores
+    holding that exact text stop being repairable."""
+    return (
+        # v1, 2026-07-28. Said "no downloadable file", which is right for a report
+        # and wrong for the watch, jersey and candle stores that also carried it.
+        (
+            f"Payment received — thank you. {product_name} "
+            "has no downloadable file attached yet: the merchant has not "
+            "configured fulfilment. If this is your store, attach the real "
+            f"goods with POST /api/stores/{slug}/deliverable using your manage "
+            "key, and buyers will receive a signed download link or licence key "
+            "instead of this message."
+        ),
     )
 
 
@@ -1037,7 +1063,9 @@ def _persist_receipt(session, store_id: int, receipt) -> None:
     )
 
 
-def create_store(desc, addr=None, delivery=None, theme=None, deliverable=None):
+def create_store(
+    desc, addr=None, delivery=None, theme=None, deliverable=None, notify_agent_id=None
+):
     """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
     Returns dict; a screening-unavailable outcome returns a pending_screening
@@ -1161,6 +1189,11 @@ def create_store(desc, addr=None, delivery=None, theme=None, deliverable=None):
         try:
             with SessionLocal() as session:
                 merchant = get_or_create_merchant(session, addr)
+                # First write wins. A merchant with several stores set this once;
+                # a later create that omits it must not silently clear the only
+                # channel we have to reach them.
+                if notify_agent_id and merchant.contact_agent_id is None:
+                    merchant.contact_agent_id = notify_agent_id
                 store = Store(
                     slug=slug,
                     merchant_id=merchant.id,

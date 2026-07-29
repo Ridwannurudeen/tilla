@@ -62,6 +62,38 @@ def test_default_delivery_no_longer_fabricates_a_download_link(tmp_path, monkeyp
     assert "deliverable" in store.delivery
 
 
+def test_default_delivery_does_not_assume_the_goods_are_digital():
+    # The first honest wording said "no downloadable file". Right for a report,
+    # wrong for the watch, jersey and candle stores that also carried it — a
+    # merchant who ships a physical object had not failed to configure anything.
+    import app.engine as engine
+
+    text = engine.default_delivery_text("timber-time", "Classic Walnut Watch")
+    assert "no downloadable file" not in text
+    assert "physical item or a service" in text
+    # and it must still tell a digital seller what to do
+    assert "licence key" in text and "/api/stores/timber-time/deliverable" in text
+
+
+def test_superseded_delivery_texts_are_kept_verbatim_for_the_repair():
+    # The repair recognises text WE wrote by exact render. Editing an entry here
+    # (rather than appending) strands every store still holding that exact string:
+    # it stops matching, so it is never brought forward again.
+    import app.engine as engine
+
+    old = engine.superseded_delivery_texts("dossier", "Token Due Diligence Report")
+    assert len(old) >= 1
+    v1 = old[0]
+    assert v1.startswith("Payment received — thank you. Token Due Diligence Report")
+    assert "no downloadable file attached yet" in v1
+    assert "/api/stores/dossier/deliverable" in v1
+    # a superseded text must never equal the current one, or the repair would
+    # treat an up-to-date store as stale and rewrite it on every run
+    assert (
+        engine.default_delivery_text("dossier", "Token Due Diligence Report") not in old
+    )
+
+
 # ------------------------------------------- caller-supplied delivery (phase 1)
 @respx.mock
 def test_caller_supplied_delivery_is_persisted(tmp_path, monkeypatch):
@@ -403,9 +435,77 @@ def test_manage_index_answers_the_price_question(tmp_path, monkeypatch):
 
 
 @respx.mock
+def test_manage_index_names_the_consequence_of_having_no_deliverable(
+    tmp_path, monkeypatch
+):
+    # `deliverable: null` is a fact the holder still has to interpret. 36 of 38 live
+    # stores were in this state and their merchants had no way to learn it once the
+    # create response had scrolled past.
+    slug, key = _manage_key(monkeypatch, tmp_path, "Bare")
+    b = client.get(
+        f"/api/stores/{slug}/manage", headers={"Authorization": f"Bearer {key}"}
+    ).json()
+    assert b["deliverable"] is None
+    f = b["fulfilment"]
+    assert f["mode"] == "merchant"
+    assert "you fulfil each sale yourself" in f["means"]
+    # and it must name the endpoint that changes the answer
+    assert f"/api/stores/{slug}/deliverable" in f["to_automate"]
+    # products carry their own input demands, [] when they ask nothing
+    assert b["products"] and b["products"][0]["buyer_inputs"] == []
+
+
+@respx.mock
 def test_manage_index_requires_the_key(tmp_path, monkeypatch):
     slug, _key = _manage_key(monkeypatch, tmp_path, "Shut")
     assert client.get(f"/api/stores/{slug}/manage").status_code in (401, 403)
     assert client.get(
         f"/api/stores/{slug}/manage", headers={"Authorization": "Bearer nope"}
     ).status_code in (401, 403)
+
+
+# --------------------------------------------- merchant contact (who to tell)
+@respx.mock
+def test_create_store_captures_a_notify_agent_id(tmp_path, monkeypatch):
+    # Tilla captured no contact of any kind, so when 36 live stores were found
+    # serving a 404 link, one of six external merchants could be reached.
+    import app.engine as engine
+    from app.models import Merchant
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm(monkeypatch, _content("Reachable"))
+    _allow()
+    addr = "0x" + "c1" * 20
+    engine.create_store("i sell guides", addr, notify_agent_id=7012)
+    with SessionLocal() as s:
+        m = s.scalar(select(Merchant).where(Merchant.wallet_address == addr.lower()))
+        assert m.contact_agent_id == 7012
+
+
+@respx.mock
+def test_a_later_create_never_clears_an_existing_contact(tmp_path, monkeypatch):
+    # First write wins: a merchant with several stores sets this once, and a later
+    # create that omits it must not silently drop the only channel we have.
+    import app.engine as engine
+    from app.models import Merchant
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow()
+    addr = "0x" + "c2" * 20
+    _fake_llm(monkeypatch, _content("First"))
+    engine.create_store("first shop", addr, notify_agent_id=6961)
+    _fake_llm(monkeypatch, _content("Second"))
+    engine.create_store("second shop", addr)
+    with SessionLocal() as s:
+        m = s.scalar(select(Merchant).where(Merchant.wallet_address == addr.lower()))
+        assert m.contact_agent_id == 6961
+
+
+@respx.mock
+def test_a_malformed_notify_agent_id_never_fails_the_paid_create(tmp_path, monkeypatch):
+    # Refusing a PAID create over a notification preference trades a real sale for
+    # a nicety. The create path drops it; the explicit endpoint 422s instead.
+    import app.main as main_mod
+
+    body = main_mod.CreateStoreBody(description="x", notify_agent_id="not-an-id")
+    assert main_mod.b2b.parse_agent_id(body.notify_agent_id) is None

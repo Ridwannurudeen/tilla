@@ -41,6 +41,18 @@ class Merchant(Base):
     # and it is never logged or exported. NULL until the merchant registers a URL.
     webhook_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     webhook_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The ERC-8004 agent id to reach this merchant on, supplied at create time.
+    # Tilla captured NO contact of any kind, so of six external merchants exactly
+    # one could be reached — and only because their store wallet happened to equal
+    # their agent wallet. A store cannot be told its own catalogue is broken by a
+    # platform that never asked who to tell.
+    #
+    # Stored as CLAIMED, not verified: checking ownership on-chain would put a
+    # network call in the paid create path, which is what made creates time out at
+    # 30s and cost a marketplace review. Used only to send this merchant news about
+    # their own store, so a false claim leaks the claimant's data to someone else,
+    # never the reverse.
+    contact_agent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -144,6 +156,13 @@ class Product(Base):
     # the agent surfaces fall back to the platform default DELIVERY_SLA_MINUTES;
     # every pre-1.3 product is NULL, an unchanged instant-delivery promise.
     sla_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # What the BUYER must tell the merchant for this product to be deliverable —
+    # a list of {name, label, required}. A due-diligence report needs to know which
+    # token; an engraving needs the text. Until this existed a store could take
+    # payment and have no way to ask, so the merchant was left holding money for a
+    # job they could not start. NULL (every existing product) = no inputs, and the
+    # buy path is byte-identical to before.
+    buyer_inputs: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )
@@ -250,6 +269,11 @@ class Order(Base):
     # Optional exchange-custody fallback: buyer supplies an email so delivery can
     # be re-sent via a magic link when the on-chain payer isn't reachable.
     buyer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The values the buyer supplied against Product.buyer_inputs, {name: value}.
+    # This is the job ticket: without it a merchant selling a service has payment
+    # and no brief. Captured before settlement, so an order that exists always
+    # carries the inputs its product demanded.
+    buyer_inputs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=_utcnow
     )

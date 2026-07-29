@@ -18,7 +18,7 @@ from x402.http.x402_http_server_base import x402HTTPServerBase
 from x402.schemas import AssetAmount, SettleResponse
 
 import app.main as main
-from app import agentic, checkout, delivery
+from app import agentic, checkout, config, delivery
 from app.db import SessionLocal
 from app.models import (
     Deliverable,
@@ -625,3 +625,100 @@ def test_settled_agent_order_is_refundable(make_store):
         assert o.status == "delivered"
         assert o.paid_micro == want, "a settled order paid exactly expected_micro"
         assert refunds._amount_due(o, "full") == want
+
+
+# ------------------------------------------- buyer inputs: the job ticket
+# A merchant reported their store "can take 0.01 and deliver nothing, because its
+# checkout can't collect a token address". Payment worked; the brief had nowhere to
+# go. These pin the contract that fixes it.
+def test_declared_buyer_input_is_required_before_any_settlement(make_store):
+    sid = make_store(slug="bi-req", price_micro=1_000_000)
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        product = s.merge(product)
+        product.buyer_inputs = [
+            {"name": "token_address", "label": "Token to research", "required": True}
+        ]
+        s.commit()
+        product = s.merge(product)
+        # The 422 is what makes the middleware skip settlement: no funds move, and
+        # crucially NO Order row is created, so there is nothing to refund.
+        with pytest.raises(HTTPException) as exc:
+            agentic.validate_buyer_inputs(product, None)
+        assert exc.value.status_code == 422
+        assert "token_address" in exc.value.detail
+        with pytest.raises(HTTPException):
+            agentic.validate_buyer_inputs(product, {"token_address": "   "})
+
+
+def test_optional_buyer_input_may_be_omitted(make_store):
+    sid = make_store(slug="bi-opt", price_micro=1_000_000)
+    _store, product = _store_product(sid)
+    with SessionLocal() as s:
+        product = s.merge(product)
+        product.buyer_inputs = [
+            {"name": "notes", "label": "Anything else", "required": False}
+        ]
+        s.commit()
+        assert agentic.validate_buyer_inputs(s.merge(product), None) == {}
+
+
+def test_product_without_declared_inputs_accepts_a_bodyless_buy(make_store):
+    # The compatibility guarantee. An unattended marketplace reviewer POSTs no body;
+    # a 422-needs-params on a listed service is functionally a timeout, which is
+    # exactly what got the listing rejected once already.
+    sid = make_store(slug="bi-none", price_micro=1_000_000)
+    _store, product = _store_product(sid)
+    assert agentic.validate_buyer_inputs(product, None) == {}
+    assert agentic.validate_buyer_inputs(product, {"anything": "ignored"}) == {}
+
+
+def test_supplied_inputs_are_persisted_on_the_order_and_echoed(make_store):
+    sid = make_store(slug="bi-keep", price_micro=1_000_000, delivery="T")
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        store, product = s.merge(store), s.merge(product)
+        product.buyer_inputs = [
+            {"name": "token_address", "label": "Token", "required": True},
+            {"name": "notes", "label": "Notes", "required": False},
+        ]
+        s.commit()
+        store, product = s.merge(store), s.merge(product)
+        kept = agentic.validate_buyer_inputs(
+            product, {"token_address": "0xabc", "unasked": "dropped"}
+        )
+        # undeclared keys are dropped, never a reason to refuse a payment
+        assert kept == {"token_address": "0xabc"}
+        order, body = agentic.fulfill_agent_order(
+            s, store, product, PAYER, NONCE, buyer_inputs=kept
+        )
+        s.commit()
+        assert order.buyer_inputs == {"token_address": "0xabc"}
+        # echoed so a mistyped address is visible in the receipt, not only in a
+        # report that comes back about the wrong token
+        assert body["buyer_inputs"] == {"token_address": "0xabc"}
+
+
+def test_buyer_input_value_is_length_capped(make_store):
+    sid = make_store(slug="bi-cap", price_micro=1_000_000)
+    _store, product = _store_product(sid)
+    with SessionLocal() as s:
+        product = s.merge(product)
+        product.buyer_inputs = [{"name": "note", "label": "Note", "required": True}]
+        s.commit()
+        kept = agentic.validate_buyer_inputs(s.merge(product), {"note": "x" * 5000})
+        assert len(kept["note"]) == config.MAX_BUYER_INPUT_LEN
+
+
+def test_malformed_declaration_is_ignored_not_fatal(make_store):
+    # The column is merchant-supplied JSON and it feeds discovery, the storefront
+    # and the buy gate. A junk entry must not 500 a read path.
+    sid = make_store(slug="bi-junk", price_micro=1_000_000)
+    _store, product = _store_product(sid)
+    with SessionLocal() as s:
+        product = s.merge(product)
+        product.buyer_inputs = ["nonsense", {"label": "no name"}, {"name": "ok"}]
+        s.commit()
+        declared = agentic.declared_buyer_inputs(s.merge(product))
+    assert [f["name"] for f in declared] == ["ok"]
+    assert declared[0]["label"] == "ok"  # label defaults to the name

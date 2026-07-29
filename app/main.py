@@ -40,6 +40,7 @@ from app import (
     affiliates,
     agentic,
     attest,
+    b2b,
     chain,
     checkout,
     config,
@@ -671,6 +672,10 @@ class CreateStoreBody(BaseModel):
     # an Entitlement and the buy response carries a licence key (or, once a file is
     # uploaded, a signed download URL) instead of a message.
     deliverable: DeliverableBody | None = None
+    # Who to tell when something happens to this store. Optional, and an unknown
+    # value is dropped rather than rejected: a create must never fail over a
+    # notification preference. Accepts a bare id or the erc8004:<id> form.
+    notify_agent_id: str | None = Field(default=None, max_length=40)
 
     @field_validator("delivery")
     @classmethod
@@ -709,6 +714,7 @@ def _run_create_store(
     theme: str | None = None,
     delivery: str | None = None,
     deliverable: dict | None = None,
+    notify_agent_id: int | None = None,
 ):
     try:
         return gen_store(
@@ -717,6 +723,7 @@ def _run_create_store(
             delivery=delivery,
             theme=theme,
             deliverable=deliverable,
+            notify_agent_id=notify_agent_id,
         )
     except ScreeningBlocked as exc:
         logger.warning(
@@ -748,12 +755,20 @@ def create_store_post(request: Request, body: CreateStoreBody | None = None):
     defaulted = not description
     if defaulted:
         description = DEFAULT_STORE_DESCRIPTION
+    # Parsed, never validated on-chain: an ownership check here is a network call in
+    # the paid path, and slow creates are what timed a marketplace reviewer out at
+    # 30s. A malformed value is DROPPED, not a 422 — refusing a paid create over a
+    # notification preference would trade a real sale for a nicety.
+    notify_agent_id = (
+        b2b.parse_agent_id(body.notify_agent_id) if body.notify_agent_id else None
+    )
     result = _run_create_store(
         description,
         body.receive_address,
         body.theme,
         delivery=body.delivery,
         deliverable=body.deliverable.model_dump() if body.deliverable else None,
+        notify_agent_id=notify_agent_id,
     )
     if defaulted and isinstance(result, dict):
         # Additive: tell the (machine) caller what happened, so an agent that
@@ -1970,6 +1985,10 @@ def manage_index(
                 "name": p.name,
                 "price_usdt": p.price_micro / 1e6,
                 "active": p.active,
+                # What this product demands of a buyer before it can be sold. []
+                # means a bodyless buy succeeds, which is right for a file but wrong
+                # for a service that needs to know what to work on.
+                "buyer_inputs": agentic.declared_buyer_inputs(p),
             }
             for p in products
         ],
@@ -1977,6 +1996,30 @@ def manage_index(
             {"id": active.id, "kind": active.kind, "version": active.version}
             if active
             else None
+        ),
+        # `deliverable: null` is a fact the holder still has to interpret. State the
+        # consequence instead: 36 of 38 live stores were in this position and their
+        # merchants had no way to learn it after the create response scrolled past.
+        "fulfilment": (
+            {
+                "mode": agentic.fulfilment_mode(active is not None),
+                "means": (
+                    "buyers receive a licence key or a signed download link "
+                    "automatically when they pay"
+                ),
+            }
+            if active is not None
+            else {
+                "mode": agentic.fulfilment_mode(False),
+                "means": (
+                    "buyers receive your delivery message and nothing else — "
+                    "Tilla hands over no goods, so you fulfil each sale yourself"
+                ),
+                "to_automate": (
+                    f"POST /api/stores/{store.slug}/deliverable with this key "
+                    "(file, licence or text) and buyers get the real thing instead"
+                ),
+            }
         ),
         "manage_key_endpoints": [
             {
