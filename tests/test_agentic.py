@@ -1105,6 +1105,8 @@ def test_challenge_input_extension_names_the_fields_from_the_model():
         # Who to tell when something happens to this store. Optional like the rest:
         # a create must never fail over a notification preference.
         "notify_agent_id",
+        # The merchant's brand colour; absent = the model picks a suitable hue.
+        "brand_color",
     }
     assert create["full_schema"] == "input_schema in this response body"
 

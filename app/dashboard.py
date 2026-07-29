@@ -22,12 +22,22 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    UploadFile,
+)
 from itsdangerous import BadSignature, SignatureExpired
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from starlette.responses import HTMLResponse, StreamingResponse
 
 from app import (
@@ -39,6 +49,7 @@ from app import (
     delivery,
     domains,
     engine,
+    imagery,
     payment,
     refunds,
     render,
@@ -461,6 +472,11 @@ class StoreCopyBody(BaseModel):
 
     tagline: str | None = Field(default=None, max_length=120)
     hero_subcopy: str | None = Field(default=None, max_length=280)
+    # The store's display name. The model invents one at create time; it is the
+    # merchant's brand and must be theirs to change. The SLUG (URL) deliberately
+    # stays fixed — renaming it would break every published link, feed and
+    # marketplace card pointing at the store.
+    store_name: str | None = Field(default=None, max_length=60)
 
 
 def _screen_copy(text: str) -> None:
@@ -489,6 +505,7 @@ def merchant_get_store_copy(
     content = store.content if isinstance(store.content, dict) else {}
     return {
         "slug": store.slug,
+        "store_name": str(content.get("store_name", "")),
         "tagline": str(content.get("tagline", "")),
         "hero_subcopy": str(content.get("hero_subcopy", "")),
     }
@@ -517,8 +534,16 @@ def merchant_set_store_copy(
         updates["tagline"] = body.tagline.strip()
     if body.hero_subcopy is not None:
         updates["hero_subcopy"] = body.hero_subcopy.strip()
+    if body.store_name is not None:
+        name = body.store_name.strip()
+        # An empty display name would render a nameless storefront and an empty
+        # OG card; unlike tagline/hero (where clearing is legitimate), blanking
+        # the name is only ever a mistake.
+        if not name:
+            raise HTTPException(422, "store_name cannot be empty")
+        updates["store_name"] = name
     if not any(updates.values()):
-        raise HTTPException(422, "provide a tagline or one-liner to update")
+        raise HTTPException(422, "provide a store name, tagline or one-liner to update")
     _screen_copy("\n".join(v for v in updates.values() if v))
     engine.update_store_copy(session, store, updates)
     log_event(
@@ -532,6 +557,7 @@ def merchant_set_store_copy(
     content = store.content or {}
     return {
         "slug": store.slug,
+        "store_name": str(content.get("store_name", "")),
         "tagline": str(content.get("tagline", "")),
         "hero_subcopy": str(content.get("hero_subcopy", "")),
     }
@@ -1638,6 +1664,120 @@ def merchant_edit_product(
     }
 
 
+@router.post("/api/merchant/stores/{slug}/products/{pid}/image")
+@limiter.limit("10/minute")
+async def merchant_set_product_image(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    pid: int = Path(..., ge=1),
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+):
+    """The merchant's OWN photograph of their product — auto photography was the
+    only mode, so a roaster selling their beans showed a stock photo of someone
+    else's beans forever.
+
+    The upload passes the SAME vision gate as the automatic pipeline
+    (imagery._verify): the photo must verifiably depict this product and carry no
+    third-party branding, fail-closed on any API uncertainty. One bar for both
+    sources — a merchant photo that wouldn't be accepted from the provider isn't
+    accepted from the merchant either, which is what keeps a public page under
+    our domain screened no matter who supplied the pixels.
+
+    JPEG only: dimensions and re-encoding need an image library this deliberately
+    dependency-light service doesn't carry, and the render layer only trusts
+    ``img/<hex>.jpg`` paths. Note the bytes are stored verbatim — strip EXIF/GPS
+    before uploading if the camera wrote it."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    product = session.scalar(
+        select(Product).where(Product.id == pid, Product.store_id == store.id)
+    )
+    if product is None:
+        raise HTTPException(404, "product not found")
+    blob = await file.read()
+    if len(blob) > imagery.MAX_IMAGE_BYTES:
+        raise HTTPException(413, "photo too large — 2 MB max")
+    # Magic bytes, not the client's content-type header: FFD8FF is JPEG.
+    if len(blob) < 4 or blob[:3] != b"\xff\xd8\xff":
+        raise HTTPException(422, "photo must be a JPEG")
+    if not imagery._verify(blob, product.name):
+        raise HTTPException(
+            422,
+            "the photo could not be verified as depicting this product without "
+            "third-party branding — same bar the automatic photography passes",
+        )
+    digest = hashlib.sha256(blob).hexdigest()[:16]
+    rel = f"img/{digest}.jpg"
+    target = config.STORES_DIR / store.slug / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(blob)
+    width, height = 940, 650  # the product-card display geometry
+    # Normalize FIRST: content that predates per-item ids has none until resync
+    # backfills them positionally, and an id-match against such content silently
+    # sets nothing — which is exactly how this endpoint failed its own first test.
+    engine.resync_catalog(session, store)
+    content = dict(store.content or {})
+    for item in content.get("products") or []:
+        if isinstance(item, dict) and item.get("id") == product.id:
+            item["image"] = {
+                "path": rel,
+                "width": width,
+                "height": height,
+                "alt": product.name[: imagery.MAX_ALT_LEN],
+                "credit": "",
+                "credit_url": "",
+                "source_url": "",
+            }
+            # The pipeline re-resolves photography from these on upgrade; a
+            # merchant-supplied photo must not be silently replaced by a search.
+            item.pop("image_query", None)
+            item.pop("image_subject", None)
+    store.content = content
+    flag_modified(store, "content")
+    engine.resync_catalog(session, store)
+    log_event(
+        session,
+        "merchant",
+        "product.image_set",
+        store_id=store.id,
+        data={"merchant_id": merchant.id, "product_id": product.id, "path": rel},
+    )
+    session.commit()
+    return {"product_id": product.id, "image": rel}
+
+
+@router.delete("/api/merchant/stores/{slug}/products/{pid}/image")
+@limiter.limit("10/minute")
+def merchant_remove_product_image(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    pid: int = Path(..., ge=1),
+    session: Session = Depends(get_session),
+):
+    """Back to no photo (the theme's generative plate). The bytes stay on disk —
+    content-addressed, shared across slots, and possibly still referenced by
+    another product's card — only the reference is dropped."""
+    merchant = _require_merchant(request, session)
+    store = _owned_store(session, merchant, slug)
+    product = session.scalar(
+        select(Product).where(Product.id == pid, Product.store_id == store.id)
+    )
+    if product is None:
+        raise HTTPException(404, "product not found")
+    engine.resync_catalog(session, store)  # normalize ids before matching (see POST)
+    content = dict(store.content or {})
+    removed = False
+    for item in content.get("products") or []:
+        if isinstance(item, dict) and item.get("id") == product.id:
+            removed = item.pop("image", None) is not None
+    store.content = content
+    flag_modified(store, "content")
+    engine.resync_catalog(session, store)
+    session.commit()
+    return {"product_id": product.id, "image": None, "removed": removed}
+
+
 @router.get("/api/merchant/stores/{slug}/deliverables")
 @limiter.limit("30/minute")
 def merchant_list_deliverables(
@@ -1675,6 +1815,19 @@ def merchant_list_deliverables(
 class SelfServeCreateBody(BaseModel):
     description: str = Field(min_length=1, max_length=config.MAX_DESCRIPTION_LEN)
     theme: str | None = None
+    # "#RRGGBB" or absent for auto — same contract as the agent create: the HUE
+    # feeds the palette, the contrast floors stay derived (engine.hue_from_hex).
+    brand_color: str | None = Field(default=None, max_length=8)
+
+    @field_validator("brand_color")
+    @classmethod
+    def _validate_brand_color(cls, v):
+        if v is None or v == "":
+            return None
+        raw = v.strip().lstrip("#")
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", raw):
+            raise ValueError("brand_color must be a hex colour like #1A7F5C")
+        return "#" + raw.upper()
 
     @field_validator("theme")
     @classmethod
@@ -1747,7 +1900,11 @@ def merchant_create_store(
     merchant = _require_merchant(request, session)
     try:
         creation = self_serve.create_intent(
-            session, merchant.wallet_address, body.description.strip(), body.theme
+            session,
+            merchant.wallet_address,
+            body.description.strip(),
+            body.theme,
+            brand_color=body.brand_color,
         )
     except self_serve.CreationError as exc:
         raise HTTPException(exc.status, exc.message) from exc

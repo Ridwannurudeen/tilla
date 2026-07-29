@@ -57,7 +57,7 @@ def _stub_create_store(monkeypatch, slug="cool-beans", pending=False):
     # Mirror engine.create_store's REAL return shape and signature: the success dict
     # carries NO 'status' key; only the screening-queued path sets 'pending_screening'.
     # A stub inventing status='live' hid _generate marking every success as 'failed'.
-    def _fake(desc, addr=None, delivery=None, theme=None):
+    def _fake(desc, addr=None, delivery=None, theme=None, brand_color=None):
         if pending:
             return {
                 "slug": slug,

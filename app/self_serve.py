@@ -44,7 +44,11 @@ def _tilla_pay_to() -> str:
 
 
 def create_intent(
-    session: Session, merchant_addr: str, description: str, theme: str | None
+    session: Session,
+    merchant_addr: str,
+    description: str,
+    theme: str | None,
+    brand_color: str | None = None,
 ) -> StoreCreation:
     """Screen the description, then create a pending payment intent. Fail-closed:
     a BLOCK or any non-clear verdict raises CreationError(422) and no payment is
@@ -62,6 +66,7 @@ def create_intent(
         merchant_addr=merchant_addr.lower(),
         description=description,
         theme=theme,
+        brand_color=brand_color,
         expected_micro=int(PAYMENT_AMOUNT),
         pay_to=_tilla_pay_to(),
         status="pending",
@@ -233,7 +238,10 @@ def _generate(creation: StoreCreation) -> StoreCreation:
         return creation
     try:
         result = engine.create_store(
-            creation.description, creation.merchant_addr, theme=creation.theme
+            creation.description,
+            creation.merchant_addr,
+            theme=creation.theme,
+            brand_color=creation.brand_color,
         )
     except engine.GenerationUnavailable:
         return creation  # stays 'paid' — retry when the model is back, no recharge

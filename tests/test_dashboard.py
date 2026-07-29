@@ -1085,3 +1085,174 @@ def test_store_copy_get_returns_current(make_store, tmp_path, monkeypatch):
         "/api/merchant/stores/getcopy/description", headers=_auth(tok)
     ).json()
     assert c["tagline"] == "Hello" and c["hero_subcopy"] == "World"
+
+
+# --------------------------------------------------- merchant taste: store name
+@respx.mock
+def test_merchant_renames_their_store_and_the_slug_survives(
+    make_store, tmp_path, monkeypatch
+):
+    # The model invents the store name at create time; it is the merchant's brand
+    # and must be theirs to change. The slug (URL) deliberately stays fixed.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "namedstore", make_store)
+    tok = _merchant_token(acct)
+    r = client.post(
+        "/api/merchant/stores/namedstore/description",
+        headers=_auth(tok),
+        json={"store_name": "Ember & Oak Roasters"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["store_name"] == "Ember & Oak Roasters"
+    html = (tmp_path / "namedstore" / "index.html").read_text(encoding="utf-8")
+    assert "Ember &amp; Oak Roasters" in html
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "namedstore"))
+        assert store.content["store_name"] == "Ember & Oak Roasters"
+        assert store.slug == "namedstore"  # the URL never moves
+
+
+def test_blanking_the_store_name_is_refused(make_store):
+    acct = Account.create()
+    _owned_store(acct, "noblank", make_store)
+    tok = _merchant_token(acct)
+    r = client.post(
+        "/api/merchant/stores/noblank/description",
+        headers=_auth(tok),
+        json={"store_name": "   "},
+    )
+    assert r.status_code == 422
+
+
+# ------------------------------------------------ merchant taste: product photo
+def _jpeg_bytes() -> bytes:
+    # A minimal JPEG: SOI + APP0 header + EOI. Not decodable as a picture, but it
+    # carries the FFD8FF magic the endpoint checks — the vision gate is mocked, so
+    # bytes only need to be shaped, not photographic.
+    return bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffd9")
+
+
+@respx.mock
+def test_merchant_uploads_their_own_product_photo(make_store, tmp_path, monkeypatch):
+    import app.dashboard as dashboard
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(dashboard.config, "STORES_DIR", tmp_path)
+    # Same gate as the automatic pipeline; here it says yes.
+    monkeypatch.setattr(dashboard.imagery, "_verify", lambda blob, desc: True)
+    acct = Account.create()
+    _owned_store(acct, "photostore", make_store)
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "photostore"))
+        pid = s.scalar(select(Product.id).where(Product.store_id == store.id))
+    r = client.post(
+        f"/api/merchant/stores/photostore/products/{pid}/image",
+        headers=_auth(tok),
+        files={"file": ("beans.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 200, r.text
+    rel = r.json()["image"]
+    assert rel.startswith("img/") and rel.endswith(".jpg")
+    # bytes on disk, content-addressed
+    assert (tmp_path / "photostore" / rel).exists()
+    # persisted into content on the RIGHT product, and the search hints dropped so
+    # a later upgrade cannot silently replace the merchant's own photo
+    with SessionLocal() as s:
+        content = s.scalar(select(Store.content).where(Store.slug == "photostore"))
+        entry = next(p for p in content["products"] if p.get("id") == pid)
+        assert entry["image"]["path"] == rel
+        assert "image_query" not in entry
+    # and the storefront now serves it
+    html = (tmp_path / "photostore" / "index.html").read_text(encoding="utf-8")
+    assert rel in html
+
+
+@respx.mock
+def test_product_photo_that_fails_the_vision_gate_is_refused(
+    make_store, tmp_path, monkeypatch
+):
+    import app.dashboard as dashboard
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(dashboard.config, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(dashboard.imagery, "_verify", lambda blob, desc: False)
+    acct = Account.create()
+    _owned_store(acct, "vetoed", make_store)
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "vetoed"))
+        pid = s.scalar(select(Product.id).where(Product.store_id == store.id))
+    r = client.post(
+        f"/api/merchant/stores/vetoed/products/{pid}/image",
+        headers=_auth(tok),
+        files={"file": ("x.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 422
+    assert "verified" in r.json()["detail"]
+    # nothing was written
+    assert (
+        not list((tmp_path / "vetoed").glob("img/*"))
+        if (tmp_path / "vetoed").exists()
+        else True
+    )
+
+
+def test_non_jpeg_upload_is_refused_by_magic_bytes(make_store, monkeypatch):
+    import app.dashboard as dashboard
+
+    monkeypatch.setattr(
+        dashboard.imagery,
+        "_verify",
+        lambda blob, desc: (_ for _ in ()).throw(
+            AssertionError("verify must not run on a non-JPEG")
+        ),
+    )
+    acct = Account.create()
+    _owned_store(acct, "notjpeg", make_store)
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "notjpeg"))
+        pid = s.scalar(select(Product.id).where(Product.store_id == store.id))
+    r = client.post(
+        f"/api/merchant/stores/notjpeg/products/{pid}/image",
+        headers=_auth(tok),
+        # PNG magic, jpeg-claiming content type: the header lies, the bytes decide
+        files={"file": ("fake.jpg", b"\x89PNG\r\n\x1a\n" + b"0" * 20, "image/jpeg")},
+    )
+    assert r.status_code == 422
+
+
+@respx.mock
+def test_removing_the_photo_falls_back_to_the_plate(make_store, tmp_path, monkeypatch):
+    import app.dashboard as dashboard
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(dashboard.config, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(dashboard.imagery, "_verify", lambda blob, desc: True)
+    acct = Account.create()
+    _owned_store(acct, "unphoto", make_store)
+    tok = _merchant_token(acct)
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "unphoto"))
+        pid = s.scalar(select(Product.id).where(Product.store_id == store.id))
+    client.post(
+        f"/api/merchant/stores/unphoto/products/{pid}/image",
+        headers=_auth(tok),
+        files={"file": ("b.jpg", _jpeg_bytes(), "image/jpeg")},
+    )
+    r = client.delete(
+        f"/api/merchant/stores/unphoto/products/{pid}/image", headers=_auth(tok)
+    )
+    assert r.status_code == 200 and r.json()["removed"] is True
+    with SessionLocal() as s:
+        content = s.scalar(select(Store.content).where(Store.slug == "unphoto"))
+        entry = next(p for p in content["products"] if p.get("id") == pid)
+        assert "image" not in entry

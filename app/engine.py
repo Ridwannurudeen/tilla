@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import colorsys
 import shutil
 import subprocess
 import sys
@@ -1071,6 +1072,21 @@ def _persist_receipt(session, store_id: int, receipt) -> None:
     )
 
 
+def hue_from_hex(hex_color: str) -> float:
+    """The HSL hue (0-360) of a ``#RRGGBB`` colour.
+
+    The merchant's brand colour enters the palette as ONE number because that is
+    the whole design of :mod:`app.palette`: a single hue plus a named harmony and
+    mood derive the complete palette, with contrast floors enforced. Taking the
+    hex verbatim into CSS would bypass every one of those guarantees; taking its
+    hue keeps them all — the merchant picks the colour, the system keeps it
+    legible."""
+    raw = hex_color.lstrip("#")
+    r, g, b = (int(raw[i : i + 2], 16) / 255 for i in (0, 2, 4))
+    h, _l, _s = colorsys.rgb_to_hls(r, g, b)
+    return (h * 360.0) % 360.0
+
+
 def create_store(
     desc,
     addr=None,
@@ -1078,6 +1094,7 @@ def create_store(
     theme=None,
     deliverable=None,
     notify_agent_id=None,
+    brand_color=None,
     *,
     sandbox=False,
 ):
@@ -1101,6 +1118,16 @@ def create_store(
     # historical demo address while its persisted state gates every checkout path.
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
+    # The merchant's stated brand colour beats the model's guess — same contract
+    # as prices: what the merchant says is used exactly, auto fills the silence.
+    # Only the HUE is taken (see hue_from_hex); harmony, mood and every contrast
+    # floor still come from the palette system, so a merchant cannot pick a
+    # colour that renders their own store illegible.
+    if brand_color:
+        brand = content.get("brand")
+        brand = dict(brand) if isinstance(brand, Mapping) else {}
+        brand["hue"] = hue_from_hex(brand_color)
+        content["brand"] = brand
     # Strip the token-usage sidecar keys before content is persisted/rendered; they
     # go into the store.created event instead so spend stays queryable from event_log.
     llm_in = content.pop("_llm_in", 0)

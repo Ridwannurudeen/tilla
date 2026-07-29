@@ -679,6 +679,22 @@ class CreateStoreBody(BaseModel):
     # value is dropped rather than rejected: a create must never fail over a
     # notification preference. Accepts a bare id or the erc8004:<id> form.
     notify_agent_id: str | None = Field(default=None, max_length=40)
+    # The merchant's brand colour, "#RRGGBB". Optional — absent, the model picks a
+    # hue that suits the product, which is the auto default. Only the HUE is used
+    # (engine.hue_from_hex): harmony, mood and the contrast floors stay derived,
+    # so a stated colour can never make the store illegible. Present-but-invalid
+    # is a 422 BEFORE settle, same convention as a malformed receive_address.
+    brand_color: str | None = Field(default=None, max_length=8)
+
+    @field_validator("brand_color")
+    @classmethod
+    def _validate_brand_color(cls, v):
+        if v is None or v == "":
+            return None
+        raw = v.strip().lstrip("#")
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", raw):
+            raise ValueError("brand_color must be a hex colour like #1A7F5C")
+        return "#" + raw.upper()
 
     @field_validator("delivery")
     @classmethod
@@ -718,6 +734,7 @@ def _run_create_store(
     delivery: str | None = None,
     deliverable: dict | None = None,
     notify_agent_id: int | None = None,
+    brand_color: str | None = None,
 ):
     try:
         return gen_store(
@@ -727,6 +744,7 @@ def _run_create_store(
             theme=theme,
             deliverable=deliverable,
             notify_agent_id=notify_agent_id,
+            brand_color=brand_color,
             sandbox=receive_address is None,
         )
     except ScreeningBlocked as exc:

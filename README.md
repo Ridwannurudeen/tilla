@@ -56,6 +56,12 @@ Most storefront builders sell to people. Tilla sells to **people and agents** fr
   opt out of escaping).
 - **No two stores look alike.** Layout, typography and colour are derived per store, so two merchants
   describing the same business do not get the same shop — see below.
+- **Auto by default, the merchant's taste wins when stated.** A price named in the description is
+  used exactly; a `brand_color` sets the palette's hue (contrast floors stay derived, so a stated
+  colour can never make the store illegible); the store's display name is the merchant's to change;
+  and a merchant can upload their **own product photographs**, which pass the same vision gate as
+  the automatic pipeline — depicts the product, no third-party branding — before they render.
+  Everything left unstated is generated, which is the auto option working as intended.
 - **Real photography, verified against the product.** A store is not a wall of text: the hero, every
   product card and a lifestyle band carry actual photographs, self-hosted per store. A photo is only
   used when the provider's own description of it contains the concrete nouns the product requires, so

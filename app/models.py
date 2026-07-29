@@ -1034,6 +1034,11 @@ class StoreCreation(Base):
     merchant_addr: Mapped[str] = mapped_column(String(42), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     theme: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # "#RRGGBB" the merchant chose on the create form, or NULL for auto. Persisted
+    # on the intent because the store is built AFTER payment (possibly on a retry
+    # days later) — a choice that lived only in the browser would silently vanish
+    # on exactly the retries that most need to reproduce the original request.
+    brand_color: Mapped[str | None] = mapped_column(String(7), nullable=True)
     expected_micro: Mapped[int] = mapped_column(Integer, nullable=False)
     pay_to: Mapped[str] = mapped_column(String(42), nullable=False)
     # pending -> paid (payment verified) -> live (store generated); 'paid' with a

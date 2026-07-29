@@ -865,3 +865,39 @@ def test_manage_index_advertises_the_detach(tmp_path, monkeypatch):
     )
     assert entry["method"] == "GET/POST/DELETE"
     assert "detach" in entry["does"]
+
+
+# ------------------------------------------------ merchant taste: brand colour
+@respx.mock
+def test_stated_brand_color_beats_the_models_guess(tmp_path, monkeypatch):
+    # Same contract as prices: what the merchant states is used exactly, auto
+    # fills the silence. Only the HUE is taken — harmony, mood and the contrast
+    # floors stay derived, so a stated colour cannot render the store illegible.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm(monkeypatch, _content("Tinted"))
+    _allow()
+    r = engine.create_store("candles", brand_color="#FF0000")
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == r["slug"]))
+    assert store.content["brand"]["hue"] == 0.0  # red
+    assert "palette" in store.content  # ...and the derived system still resolved
+
+
+def test_brand_color_validators_normalize_and_refuse():
+    import pytest
+    from pydantic import ValidationError
+
+    from app.dashboard import SelfServeCreateBody
+
+    assert main.CreateStoreBody(brand_color="1a7f5c").brand_color == "#1A7F5C"
+    assert (
+        SelfServeCreateBody(description="x", brand_color="#00D1B2").brand_color
+        == "#00D1B2"
+    )
+    assert main.CreateStoreBody(brand_color="").brand_color is None
+    with pytest.raises(ValidationError):
+        main.CreateStoreBody(brand_color="reddish")
+    with pytest.raises(ValidationError):
+        SelfServeCreateBody(description="x", brand_color="#12345")

@@ -440,6 +440,15 @@
           <option value="bold">Bold</option>
           <option value="editorial">Editorial</option>
         </select>
+        <label for="csBrandOn">Brand colour</label>
+        <div class="row" style="align-items:center;gap:10px">
+          <label class="small" style="display:flex;align-items:center;gap:6px;margin:0">
+            <input type="checkbox" id="csBrandOn" /> Pick mine
+          </label>
+          <input type="color" id="csBrand" value="#6C5CE7" disabled style="width:52px;height:30px;padding:2px" />
+          <span class="muted small">Off = Tilla picks a colour that suits what you sell.
+            Your pick sets the hue; contrast stays guaranteed either way.</span>
+        </div>
         <div class="row" style="margin-top:12px">
           <button id="csCreate" class="primary">Create my store</button>
         </div>
@@ -609,7 +618,9 @@
         <strong>Plain-language copy</strong>
         <span class="muted mono">screened before it goes live</span>
       </div>
-      <p class="muted small">Re-word the tagline and one-liner shown on your storefront. Saving re-renders the page — your products, prices, and theme are untouched.</p>
+      <p class="muted small">Re-word the store name, tagline and one-liner shown on your storefront. Saving re-renders the page — your products, prices, theme and web address are untouched.</p>
+      <label for="scName">Store name</label>
+      <input id="scName" maxlength="60" placeholder="Your store&#39;s display name" />
       <label for="scTagline">Tagline</label>
       <input id="scTagline" maxlength="120" placeholder="A short line under your store name" />
       <label for="scOneLiner">One-liner</label>
@@ -1133,6 +1144,7 @@
     var body = { description: desc };
     var theme = byId("csTheme").value;
     if (theme) body.theme = theme;
+    if (byId("csBrandOn").checked) body.brand_color = byId("csBrand").value;
     var btn = byId("csCreate");
     btn.disabled = true; btn.textContent = "Checking your description…";
     var d;
@@ -1878,6 +1890,34 @@
     var prLbl = el("label", null, "Price (USDT0)"); prLbl.htmlFor = "pe-price-" + p.id; ed.appendChild(prLbl);
     var pi = el("input"); pi.id = "pe-price-" + p.id; pi.type = "number"; pi.min = "0.01"; pi.max = "10000"; pi.step = "0.01";
     pi.value = String(p.price_usdt); ed.appendChild(pi);
+    // Merchant's own product photo. Same vision gate as the automatic pipeline —
+    // the photo must depict THIS product, no third-party branding — so the 422
+    // message from the server is the explanation, shown verbatim.
+    var phLbl = el("label", null, "Photo (JPEG, up to 2 MB)"); phLbl.htmlFor = "pe-photo-" + p.id; ed.appendChild(phLbl);
+    var ph = el("input"); ph.id = "pe-photo-" + p.id; ph.type = "file"; ph.accept = "image/jpeg"; ed.appendChild(ph);
+    var phRow = el("div", "row"); phRow.style.marginTop = "8px";
+    var phSet = el("button", "ghost", "Set photo");
+    phSet.onclick = async function () {
+      var f = ph.files[0];
+      if (!f) { pmsg("Choose a JPEG first.", true); return; }
+      var fd = new FormData(); fd.append("file", f);
+      phSet.disabled = true;
+      try {
+        await api(productPath(slug, p.id) + "/image", { method: "POST", body: fd });
+        await loadProducts(slug);
+        pmsg("Photo set — it now shows on " + p.name + "'s card.");
+      } catch (e) { phSet.disabled = false; pmsg(e.message, true); }
+    };
+    var phRm = el("button", "ghost", "Remove photo");
+    phRm.onclick = async function () {
+      phRm.disabled = true;
+      try {
+        await api(productPath(slug, p.id) + "/image", { method: "DELETE" });
+        await loadProducts(slug);
+        pmsg("Photo removed — the card falls back to the generated artwork.");
+      } catch (e) { phRm.disabled = false; pmsg(e.message, true); }
+    };
+    phRow.appendChild(phSet); phRow.appendChild(phRm); ed.appendChild(phRow);
     var edRow = el("div", "row"); edRow.style.marginTop = "12px";
     var save = el("button", "primary", "Save");
     save.onclick = async function () {
@@ -2245,25 +2285,30 @@
     return e.message;
   }
   async function loadStoreCopy(slug) {
+    byId("scName").value = "";
     byId("scTagline").value = "";
     byId("scOneLiner").value = "";
     scmsg("");
     try {
       var c = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/description");
+      byId("scName").value = c.store_name || "";
       byId("scTagline").value = c.tagline || "";
       byId("scOneLiner").value = c.hero_subcopy || "";
     } catch (e) { /* a store with no copy yet just starts blank */ }
   }
   async function saveStoreCopy() {
     if (!LAST_STORE) return;
+    var name = byId("scName").value.trim();
     var tagline = byId("scTagline").value.trim();
     var oneLiner = byId("scOneLiner").value.trim();
-    if (!tagline && !oneLiner) { scmsg("Enter a tagline or one-liner first.", true); return; }
+    if (!name && !tagline && !oneLiner) { scmsg("Enter a store name, tagline or one-liner first.", true); return; }
     var btn = byId("scSave"); btn.disabled = true;
     try {
+      var cbody = { tagline: tagline, hero_subcopy: oneLiner };
+      if (name) cbody.store_name = name; // never send empty — blanking the name is only ever a mistake
       await api("/api/merchant/stores/" + encodeURIComponent(LAST_STORE) + "/description", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tagline: tagline, hero_subcopy: oneLiner })
+        body: JSON.stringify(cbody)
       });
       scmsg("Saved — your storefront copy is updated.");
     } catch (e) { scmsg(copyErr(e), true); }
@@ -2406,6 +2451,7 @@
   byId("scSave").onclick = saveStoreCopy;
   byId("dKind").onchange = syncDeliverableKind;
   byId("dSet").onclick = setDeliverable;
+  byId("csBrandOn").onchange = function () { byId("csBrand").disabled = !this.checked; };
   byId("dDetach").onclick = detachDeliverable;
   byId("whSave").onclick = saveWebhook;
   byId("whDelete").onclick = deleteWebhook;
