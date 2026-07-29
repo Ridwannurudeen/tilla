@@ -101,7 +101,12 @@ done
 
 ssh "$VPS" "test ! -e '$STAGE' && test ! -e '$BACKUP' && mkdir -p '$STAGE'"
 tar -cf - "${FILES[@]}" | ssh "$VPS" "tar -xf - -C '$STAGE'"
-ssh "$VPS" "cd '$STAGE' && find . -type f -printf '%P\\n' | LC_ALL=C sort > '$MANIFEST'"
+# The manifest lives INSIDE the stage, and a `>` redirection creates its target
+# before `find` walks — so without the exclusion, find counts the manifest itself
+# and the guard reports 110-staged-as-111 and refuses every deploy. Found the
+# first time this hardened script ran; the guard failed CLOSED, which is the
+# correct failure, but for a reason that was its own bug.
+ssh "$VPS" "cd '$STAGE' && find . -type f ! -name '.manifest' -printf '%P\\n' | LC_ALL=C sort > '$MANIFEST'"
 remote_count=$(ssh "$VPS" "wc -l < '$MANIFEST'")
 [ "$remote_count" = "${#FILES[@]}" ] || {
   echo "staged file count mismatch: expected ${#FILES[@]}, got $remote_count" >&2
