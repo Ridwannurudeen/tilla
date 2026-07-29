@@ -1930,6 +1930,121 @@ async def create_deliverable(
     return resp
 
 
+@app.get("/api/stores/{slug}/manage")
+@limiter.limit("60/minute")
+def manage_index(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    session: Session = Depends(get_session),
+):
+    """What this manage key can actually do, and where.
+
+    A merchant reported probing 21 candidate routes and the API index before
+    giving up: the create response and the 402 summaries say "use your manage key"
+    without ever naming a path, and there is no /openapi.json to fall back on. A
+    capability that cannot be discovered is one the holder does not have.
+
+    Deliberately not FastAPI's auto-docs: those would expose every internal route
+    to anyone. This lists only what THIS key opens, to someone who already holds
+    it, for one store."""
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None:
+        raise HTTPException(404, "store not found")
+    _require_store_key(request, store, session)
+    products = session.scalars(
+        select(Product).where(Product.store_id == store.id).order_by(Product.id)
+    ).all()
+    active = session.scalar(
+        select(Deliverable)
+        .where(Deliverable.store_id == store.id, Deliverable.active.is_(True))
+        .order_by(Deliverable.id.desc())
+    )
+    return {
+        "slug": store.slug,
+        "status": store.status,
+        "url": f"{config.PUBLIC_BASE_URL}/s/{store.slug}/",
+        "pay_to": store.pay_to,
+        "products": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "price_usdt": p.price_micro / 1e6,
+                "active": p.active,
+            }
+            for p in products
+        ],
+        "deliverable": (
+            {"id": active.id, "kind": active.kind, "version": active.version}
+            if active
+            else None
+        ),
+        "manage_key_endpoints": [
+            {
+                "method": "GET",
+                "path": f"/api/stores/{store.slug}/manage",
+                "does": "this index",
+                "cost": "free",
+            },
+            {
+                "method": "GET/POST",
+                "path": f"/api/stores/{store.slug}/deliverable",
+                "does": (
+                    "read or set the goods buyers receive — multipart `file`, or "
+                    "JSON {kind: text|license, payload}"
+                ),
+                "cost": "free",
+            },
+            {
+                "method": "POST",
+                "path": f"/api/stores/{store.slug}/pricing",
+                "does": "declare the payment model (one_time / batch / metered)",
+                "cost": "free",
+            },
+            {
+                "method": "POST",
+                "path": "/add-product",
+                "does": (
+                    "add a product at an EXPLICIT price_usdt — the only way to set "
+                    "a price directly rather than have it inferred from prose"
+                ),
+                "cost": "0.01 USDT (x402)",
+            },
+            {
+                "method": "POST",
+                "path": "/upgrade-store",
+                "does": "regenerate brand and catalogue from a new description",
+                "cost": "0.03 USDT (x402)",
+            },
+        ],
+        # The question a manage key cannot answer on its own. Price is inferred by
+        # the model from the description at create time, so there is no price field
+        # on create-store; editing one afterwards is a merchant action, not a
+        # store-capability one.
+        "changing_a_price": {
+            "note": (
+                "create-store has no price field — price is inferred from your "
+                "description. To change one on an existing product, authenticate "
+                "as the MERCHANT (the wallet in pay_to) rather than with this key."
+            ),
+            "recommended": {
+                "method": "PATCH",
+                "path": f"/api/merchant/stores/{store.slug}/products/<product_id>",
+                "body": {"price_usdt": 0.01},
+                "auth": (
+                    "sign in at POST /api/merchant/auth/nonce then "
+                    "/api/merchant/auth/verify with the pay_to wallet"
+                ),
+                "cost": "free",
+            },
+            "alternatives": [
+                "POST /add-product with an explicit price_usdt (0.01 USDT)",
+                "POST /upgrade-store with a description stating the new price "
+                "(0.03 USDT, regenerates the catalogue)",
+            ],
+        },
+    }
+
+
 @app.get("/api/stores/{slug}/deliverable")
 @limiter.limit("60/minute")
 def get_deliverable(

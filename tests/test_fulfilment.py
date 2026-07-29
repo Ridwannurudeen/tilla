@@ -350,3 +350,53 @@ def test_get_deliverable_never_returns_file_bytes(tmp_path, monkeypatch):
     ).json()
     assert b["kind"] == "file" and b["file_name"] == "a.pdf"
     assert "payload" not in b
+
+
+# ------------------------------------------- discoverability of the manage key
+@respx.mock
+def test_manage_index_lists_what_the_key_opens(tmp_path, monkeypatch):
+    # A merchant probed 21 candidate routes and the API index before giving up:
+    # the create response says "use your manage key" without naming a path, and
+    # there is no /openapi.json. A capability that cannot be discovered is one the
+    # holder does not have.
+    slug, key = _manage_key(
+        monkeypatch,
+        tmp_path,
+        "Indexed",
+        deliverable={"kind": "text", "payload": "goods"},
+    )
+    r = client.get(
+        f"/api/stores/{slug}/manage", headers={"Authorization": f"Bearer {key}"}
+    )
+    assert r.status_code == 200, r.text
+    b = r.json()
+    paths = {e["path"] for e in b["manage_key_endpoints"]}
+    assert f"/api/stores/{slug}/deliverable" in paths
+    assert "/add-product" in paths and "/upgrade-store" in paths
+    assert b["deliverable"]["kind"] == "text"
+    assert b["products"] and "price_usdt" in b["products"][0]
+
+
+@respx.mock
+def test_manage_index_answers_the_price_question(tmp_path, monkeypatch):
+    # The blocker they hit: no price field on create-store, and no way to learn
+    # that repricing is a MERCHANT action rather than a manage-key one.
+    slug, key = _manage_key(monkeypatch, tmp_path, "Priced")
+    b = client.get(
+        f"/api/stores/{slug}/manage", headers={"Authorization": f"Bearer {key}"}
+    ).json()
+    cp = b["changing_a_price"]
+    assert "no price field" in cp["note"]
+    assert cp["recommended"]["method"] == "PATCH"
+    assert "/api/merchant/stores/" in cp["recommended"]["path"]
+    assert cp["recommended"]["cost"] == "free"
+    assert any("add-product" in a for a in cp["alternatives"])
+
+
+@respx.mock
+def test_manage_index_requires_the_key(tmp_path, monkeypatch):
+    slug, _key = _manage_key(monkeypatch, tmp_path, "Shut")
+    assert client.get(f"/api/stores/{slug}/manage").status_code in (401, 403)
+    assert client.get(
+        f"/api/stores/{slug}/manage", headers={"Authorization": "Bearer nope"}
+    ).status_code in (401, 403)
