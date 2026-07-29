@@ -98,6 +98,16 @@ A hand-rolled stateless JSON-RPC 2.0 server at `POST /s/{slug}/mcp`
   store's own `feed.json`, `mcp`, `buy`, and human storefront. **M16.4** adds
   `?include=federated` (peer listings marked `federated: true`, linking OUT to
   the peer's own checkout — Tilla never proxies a peer sale).
+  (Corrected 2026-07-29: "live stores" means live stores **with at least one
+  active product**. Merchants can now pause a store by deactivating its last
+  product; a paused store keeps resolving by direct link — its page, `feed.json`
+  and MCP answer with an empty catalog — but is excluded from the bulk index and
+  its `total`, because recommending a store nothing can be bought from spends a
+  buyer's call on a guaranteed 409. Same date: `mcp-get-product.yaml`'s
+  `deliverable_kind` is no longer `required` — it used to default to `"text"`
+  for a store with nothing attached, a claim that contradicted the same store's
+  feed; it is now emitted only when goods are attached, and the always-present
+  `fulfilment` field is the signal to key on.)
 
 ## Conformance checklist (curl-only, self-run)
 

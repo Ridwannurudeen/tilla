@@ -22,7 +22,15 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import affiliates, chain, config, delivery, payment, webhooks
+from app import (
+    affiliates,
+    buyer_inputs as buyer_inputs_module,
+    chain,
+    config,
+    delivery,
+    payment,
+    webhooks,
+)
 from app.db import SessionLocal
 from app.models import (
     ChainCursor,
@@ -276,6 +284,7 @@ def create_order(
     product: Product,
     referrer_addr: str | None = None,
     price_micro_override: int | None = None,
+    buyer_inputs: dict | None = None,
 ) -> Order:
     """Insert a pending order with a unique per-address expected_micro. Redraws
     the offset on collision (app check) or IntegrityError (index backstop);
@@ -291,6 +300,7 @@ def create_order(
     floor). None keeps the product's list price, byte-identical to the pre-override flow.
     It is recorded on ``amount_micro`` (so the paid amount maps back to the chosen tier),
     while ``expected_micro`` still carries the unique matching offset."""
+    validated_inputs = buyer_inputs_module.validate_buyer_inputs(product, buyer_inputs)
     now = _now()
     created_block = _current_head()
     base_price = (
@@ -328,6 +338,7 @@ def create_order(
             referrer_addr=referrer_addr,
             created_block=created_block,
             expires_at=now + timedelta(minutes=config.ORDER_TTL_MIN),
+            buyer_inputs=validated_inputs or None,
         )
         session.add(order)
         try:

@@ -571,7 +571,8 @@ def merchant_store_agent_view(
             "agent_card": "/.well-known/agent-card.json",
         },
         "feed_products": [
-            agentic._feed_product(store, store.slug, p, store_url) for p in products
+            agentic._feed_product(session, store, store.slug, product, store_url)
+            for product in products
         ],
         "mcp_tools": [
             {"name": t["name"], "description": t["description"]}
@@ -581,7 +582,17 @@ def merchant_store_agent_view(
         if rows
         else {
             "listed": False,
-            "reason": "hidden" if store.visibility != "public" else "not_live",
+            # Three ways to be absent from discovery, and they are not the same
+            # news. 'paused' became reachable when the last-product 409 was lifted:
+            # without this branch a merchant who had just paused their own store
+            # was told it was "not_live", which is false and alarming.
+            "reason": (
+                "hidden"
+                if store.visibility != "public"
+                else "not_live"
+                if store.status != "live"
+                else "paused"
+            ),
         },
     }
 

@@ -28,6 +28,10 @@ logger = logging.getLogger("tilla")
 
 _BUYER_ANY = "any_agent"
 _BUYER_ERC8004_RE = re.compile(r"^erc8004:(\d{1,20})$")
+# ``merchants.contact_agent_id`` is an SQL INTEGER. Keep every parsed value within
+# the signed range SQLite and Postgres both persist, rather than accepting a value
+# that only fails later at commit time.
+_PERSISTED_AGENT_ID_MAX = 2**63 - 1
 
 # Positive-result identity cache: agent_id -> (owner_wallet, expires_at). Only
 # verified owners are cached (never an outage/None), so a discount is never served
@@ -37,13 +41,15 @@ _owner_cache_lock = threading.Lock()
 
 
 def parse_agent_id(raw: str) -> int | None:
-    """Accept a bare numeric id or the ``erc8004:<id>`` form; None if malformed."""
+    """Accept a persistable numeric id or ``erc8004:<id>``, else ``None``."""
     raw = (raw or "").strip()
     m = _BUYER_ERC8004_RE.match(raw)
     if m:
-        return int(m.group(1))
+        value = int(m.group(1))
+        return value if value <= _PERSISTED_AGENT_ID_MAX else None
     if raw.isdigit():
-        return int(raw)
+        value = int(raw)
+        return value if value <= _PERSISTED_AGENT_ID_MAX else None
     return None
 
 

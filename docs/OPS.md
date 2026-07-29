@@ -2,7 +2,7 @@
 
 Live: <https://tilla.gudman.xyz> · systemd unit `tilla-api` (root, uvicorn `127.0.0.1:8040 --proxy-headers`) · code at `/opt/tilla` on the shared Contabo VPS `root@75.119.153.252`. The box hosts other live projects (Warden, groundtruth, solvent, …) — every op here touches **only** tilla-owned paths/units.
 
-Deploy is per-file via `scripts/deploy.sh` (never a directory clobber). `tilla.db`, `stores/`, `deliverables/`, `.env` are **server-owned** and never written by deploy.
+Deploy is a fully staged, short maintenance-window update via `scripts/deploy.sh`: it transfers and compiles the complete repo-owned manifest first, then stops `tilla-api` (and an active `tilla-sidecar`) before replacing code. It backs up only those repo-owned files for rollback. `tilla.db`, `stores/`, `deliverables/`, and `.env` are **server-owned** and never written by deploy.
 
 ---
 
@@ -11,12 +11,12 @@ Deploy is per-file via `scripts/deploy.sh` (never a directory clobber). `tilla.d
 | Endpoint | Meaning | Cost | Used by |
 |---|---|---|---|
 | `GET /health` | pure liveness — no DB, no network, byte-identical to pre-M12 | trivial | deploy smoke, watchdog liveness probe |
-| `GET /ready` | readiness — DB `SELECT 1`, migration head == `0030_creation_block_floor`, sweeper + RPC heartbeats fresh | one sqlite `SELECT` + in-memory reads, **no network call** | watchdog (every ~60s) |
+| `GET /ready` | readiness — DB `SELECT 1`, migration head == `0032_merchant_contact`, sweeper + RPC heartbeats fresh | one sqlite `SELECT` + in-memory reads, **no network call** | watchdog (every ~60s) |
 
 `/ready` is unauthenticated, unthrottled, and **never raises** — always JSON, `200` when ready else `503` naming the failing component:
 
 ```json
-{"ready": true, "checks": {"db":"ok","migrations":"0030_creation_block_floor","sweeper":"ok","rpc":"ok"}}
+{"ready": true, "checks": {"db":"ok","migrations":"0032_merchant_contact","sweeper":"ok","rpc":"ok"}}
 ```
 
 - `sweeper`/`rpc` report `disabled` when `TILLA_SWEEP_ENABLED=0` (dev/tests). In prod they read heartbeats the sweeper stamps each tick: `sweeper` stale after `READY_SWEEP_STALE_SEC` (default 180s), `rpc` after `READY_RPC_STALE_SEC` (default 300s). No per-probe RPC call — an RPC outage surfaces via the sweeper's piggybacked head read, so the once-a-minute watchdog never burns `eth_blockNumber` quota.
@@ -117,7 +117,7 @@ Unset → logs `offsite not configured` and exits 0 (safe no-op). Set → `rsync
 ## 8. Restore runbook + drill
 
 ### Restore drill (read-only, safe anytime)
-`scripts/restore_drill.sh <backup.db> [deliverables-dir]` restores into a **mktemp dir (never `/opt/tilla` live paths)**, runs `PRAGMA integrity_check`, asserts the migration head is `0030_creation_block_floor`, prints stores/orders/deliverables counts, and re-hashes up to 20 deliverables against their DB `file_sha256`. PASS/FAIL exit code.
+`scripts/restore_drill.sh <backup.db> [deliverables-dir]` restores into a **mktemp dir (never `/opt/tilla` live paths)**, runs `PRAGMA integrity_check`, asserts the migration head is `0032_merchant_contact`, prints stores/orders/deliverables counts, and re-hashes up to 20 deliverables against their DB `file_sha256`. PASS/FAIL exit code.
 ```bash
 /opt/tilla/scripts/restore_drill.sh /opt/tilla/backups/tilla-$(date +%F).db /opt/tilla/backups/deliverables
 ```
@@ -127,7 +127,7 @@ Unset → logs `offsite not configured` and exits 0 (safe no-op). Set → `rsync
 systemctl stop tilla-api
 cp /opt/tilla/backups/tilla-<date>.db /opt/tilla/tilla.db     # restore DB
 rsync -a /opt/tilla/backups/deliverables/ /opt/tilla/deliverables/   # restore files
-cd /opt/tilla && .venv/bin/alembic current                    # confirm head == 0030_creation_block_floor
+cd /opt/tilla && .venv/bin/alembic current                    # confirm head == 0032_merchant_contact
 systemctl start tilla-api
 # stores/ rebuilds itself: rerender_stores() runs at startup from the DB
 curl -fsS https://tilla.gudman.xyz/health && curl -fsS https://tilla.gudman.xyz/ready

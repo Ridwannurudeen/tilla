@@ -47,6 +47,12 @@ in `/opt/tilla/.env` (the MPP/subscriptions dormant-mount pattern). Flip the fla
   request-signature verification activates **only** when `TILLA_ACP_SIGNING_SECRET` is
   set. No card/token payment data is ever accepted or stored — x402 / on-chain only.
 
+- **buyer inputs** — when the selected product's feed or MCP detail exposes
+  `buyer_inputs`, the create request must carry those values in a top-level `inputs`
+  object. Missing required values return `422` before an order is allocated or any
+  payment can be completed; accepted values are stored on the order and echoed as
+  `buyer_inputs` in the checkout-session response.
+
 ### Spike 9 (PARKED): x402-middleware complete mode
 A second complete mode — registering `POST /s/:slug/checkout_sessions/:id/complete` on
 the existing x402 paywall with resolvers keyed off the session row, so an unpaid

@@ -9,9 +9,14 @@ $id: "https://tilla.gudman.xyz/schemas/mcp-get-product.json"
 title: "Tilla MCP get_product structuredContent"
 type: object
 additionalProperties: false
+# deliverable_kind left `required` on 2026-07-29: it used to default to "text"
+# for a store with NOTHING attached — a claim that a text deliverable existed,
+# contradicting the same store's feed. The enum cannot express "none", so the
+# field is now emitted only when goods are attached; `fulfilment` is the honest
+# always-present signal.
 required:
   [id, name, description, price, price_micro, currency, network,
-   deliverable_kind, pricing, x402, requiredFunds, nextActions]
+   pricing, x402, requiredFunds, nextActions]
 properties:
   id:
     type: integer
@@ -34,6 +39,22 @@ properties:
   deliverable_kind:
     type: string
     enum: [file, text, license]
+  buyer_inputs:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [name, label, required]
+      properties:
+        name:
+          type: string
+        label:
+          type: string
+        required:
+          type: boolean
+  fulfilment:
+    type: string
+    enum: [automatic, merchant]
   pricing:
     type: object
     additionalProperties: false

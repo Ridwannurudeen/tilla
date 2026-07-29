@@ -8,6 +8,7 @@ import logging
 import pathlib
 import shutil
 import subprocess
+import sys
 import time
 
 import pytest
@@ -20,6 +21,7 @@ from app.db import SessionLocal
 from app.db import engine as db_engine
 from app.db import expected_migration_head
 from app.models import EventLog, Order, Product, Store
+from scripts import repair_delivery_text
 
 client = TestClient(main.app)
 
@@ -382,6 +384,7 @@ def test_generation_usage_logged(make_store, monkeypatch, tmp_path, caplog):
 
 # ============================ shell-script hygiene ========================
 _SHELL_SCRIPTS = (
+    "deploy.sh",
     "watchdog.sh",
     "backup_db.sh",
     "backup_offsite.sh",
@@ -403,5 +406,81 @@ def test_shell_scripts_are_lf_only():
 def test_shell_scripts_pass_bash_syntax_check():
     for name in _SHELL_SCRIPTS:
         path = _scripts_dir() / name
-        res = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
-        assert res.returncode == 0, f"{name}: {res.stderr}"
+        res = subprocess.run(
+            ["bash", "-n"],
+            input=path.read_bytes(),
+            capture_output=True,
+        )
+        assert res.returncode == 0, f"{name}: {res.stderr.decode()}"
+
+
+def test_deploy_stages_complete_release_before_stopping_services():
+    source = (_scripts_dir() / "deploy.sh").read_text(encoding="utf-8")
+    assert "'pyproject.toml'" in source
+    assert "'sidecar/*'" in source
+    assert 'tar -cf - "${FILES[@]}"' in source
+    assert source.index("systemctl stop tilla-api") > source.index("compileall")
+    assert "'$VENV/bin/pip' install --upgrade ." in source
+    assert "npm ci --omit=dev" in source
+
+
+def test_repair_delivery_only_targets_historical_tilla_fallback(make_store):
+    make_store(
+        slug="legacy-delivery",
+        delivery=_historical_delivery("legacy-delivery"),
+    )
+    make_store(
+        slug="merchant-delivery",
+        pay_to="0x" + "b" * 40,
+        delivery="Download instructions: https://merchant.example/files/manual.pdf",
+    )
+    with SessionLocal() as session:
+        legacy = session.scalar(select(Store).where(Store.slug == "legacy-delivery"))
+        merchant = session.scalar(
+            select(Store).where(Store.slug == "merchant-delivery")
+        )
+        assert repair_delivery_text._is_tilla_authored(legacy) is True
+        assert repair_delivery_text._is_tilla_authored(merchant) is False
+
+
+def _historical_delivery(slug: str) -> str:
+    return (
+        "✅ Thank you! Your your order is ready: "
+        f"https://tilla.gudman.xyz/files/{slug} (demo delivery link)"
+    )
+
+
+def test_repair_delivery_dry_run_does_not_write(make_store, monkeypatch, tmp_path):
+    make_store(slug="repair-dry", delivery=_historical_delivery("repair-dry"))
+    monkeypatch.setattr(config, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["repair_delivery_text"])
+
+    assert repair_delivery_text.main() == 0
+
+    with SessionLocal() as session:
+        store = session.scalar(select(Store).where(Store.slug == "repair-dry"))
+        assert store.delivery == _historical_delivery("repair-dry")
+    assert not (tmp_path / "repair-dry" / "store.json").exists()
+
+
+def test_repair_delivery_apply_is_idempotent(make_store, monkeypatch, tmp_path, capsys):
+    make_store(slug="repair-apply", delivery=_historical_delivery("repair-apply"))
+    store_dir = tmp_path / "repair-apply"
+    store_dir.mkdir()
+    path = store_dir / "store.json"
+    path.write_text(
+        json.dumps({"delivery": _historical_delivery("repair-apply")}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "STORES_DIR", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["repair_delivery_text", "--apply"])
+
+    assert repair_delivery_text.main() == 0
+    expected = engine.default_delivery_text("repair-apply", "your order")
+    with SessionLocal() as session:
+        store = session.scalar(select(Store).where(Store.slug == "repair-apply"))
+        assert store.delivery == expected
+    assert json.loads(path.read_text(encoding="utf-8"))["delivery"] == expected
+
+    assert repair_delivery_text.main() == 0
+    assert "nothing to repair" in capsys.readouterr().out

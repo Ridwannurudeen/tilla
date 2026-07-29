@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
 from app import affiliates, agentic, chain, checkout, config
+from app.buyer_inputs import validate_buyer_inputs
 from app.db import SessionLocal
 from app.limiter import limiter
 from app.models import AcpSession, Order, Product, Store, log_event
@@ -198,6 +199,7 @@ def _session_shape(
         ],
         "fulfillment": {"type": "digital"},
         "buyer": acp.buyer,
+        "buyer_inputs": order.buyer_inputs if order is not None else None,
         # The custom x402 handler (for x402-native agents) + the on-chain USDT0
         # fallback the tx-hash complete path settles. pay_to is the MERCHANT wallet
         # (non-custodial) — the buyer needs it to send funds, exactly as the human
@@ -249,8 +251,11 @@ def _create_core(slug, body, api_version, idem):
                 return _session_shape(session, existing, store, order), 200
         product = _validate_items(body.get("items"), session, store)
         ref = _extract_affiliate(body)
+        buyer_inputs = validate_buyer_inputs(product, body.get("inputs"))
         try:
-            order = checkout.create_order(session, store, product, ref)
+            order = checkout.create_order(
+                session, store, product, ref, buyer_inputs=buyer_inputs
+            )
         except checkout.AmountUnavailable as exc:
             raise HTTPException(503, "checkout busy, retry") from exc
         acp = AcpSession(

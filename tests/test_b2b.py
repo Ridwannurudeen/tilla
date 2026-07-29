@@ -94,6 +94,14 @@ TIER_6961 = {"buyer": "erc8004:6961", "price_micro": 5_000_000}
 TIER_ANY = {"buyer": "any_agent", "price_micro": 7_000_000}
 
 
+def test_parse_agent_id_stays_within_persisted_integer_range():
+    maximum = 2**63 - 1
+    assert b2b.parse_agent_id(str(maximum)) == maximum
+    assert b2b.parse_agent_id(f"erc8004:{maximum}") == maximum
+    assert b2b.parse_agent_id(str(maximum + 1)) is None
+    assert b2b.parse_agent_id(f"erc8004:{maximum + 1}") is None
+
+
 # --------------------------------------------------------------- tier writes
 def test_pricing_accepts_tiers(make_store):
     make_store(slug="b1", price_micro=9_000_000)

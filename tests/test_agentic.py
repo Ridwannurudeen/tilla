@@ -16,7 +16,7 @@ from sqlalchemy import select
 import app.main as main
 from app import chain, config
 from app.db import SessionLocal
-from app.models import Order, Product, Store, get_or_create_merchant
+from app.models import Deliverable, Order, Product, Store, get_or_create_merchant
 
 client = TestClient(main.app)
 
@@ -485,6 +485,86 @@ def test_mcp_create_checkout_optional_product_id(make_store):
     assert 9_000_001 <= default["amount_micro"] <= 9_004_999
 
 
+def test_mcp_checkout_requires_and_persists_declared_buyer_inputs(make_store):
+    sid = make_store(slug="mcp-inputs", price_micro=2_000_000)
+    with SessionLocal() as s:
+        product = s.scalar(select(Product).where(Product.store_id == sid))
+        product.buyer_inputs = [
+            {"name": "token_address", "label": "Token", "required": True}
+        ]
+        s.commit()
+
+    missing = _mcp("mcp-inputs", "tools/call", {"name": "create_checkout"}).json()[
+        "result"
+    ]
+    assert missing["isError"] is True
+    assert "token_address" in missing["structuredContent"]["error"]
+    with SessionLocal() as s:
+        assert s.scalars(select(Order).where(Order.store_id == sid)).all() == []
+
+    created = _mcp(
+        "mcp-inputs",
+        "tools/call",
+        {
+            "name": "create_checkout",
+            "arguments": {"inputs": {"token_address": "0xabc"}},
+        },
+    ).json()["result"]["structuredContent"]
+    with SessionLocal() as s:
+        assert s.get(Order, created["checkout_id"]).buyer_inputs == {
+            "token_address": "0xabc"
+        }
+
+
+def test_product_fulfilment_is_truthful_in_feed_mcp_and_discovery(make_store):
+    sid = make_store(slug="mixed-delivery", price_micro=2_000_000)
+    with SessionLocal() as s:
+        second = Product(
+            store_id=sid, name="Automatic", price_micro=3_000_000, active=True
+        )
+        s.add(second)
+        s.flush()
+        s.add(
+            Deliverable(
+                store_id=sid,
+                product_id=second.id,
+                kind="text",
+                payload="AUTOMATIC",
+                active=True,
+            )
+        )
+        s.commit()
+        primary_id = s.scalar(
+            select(Product.id).where(Product.store_id == sid).order_by(Product.id)
+        )
+        second_id = second.id
+
+    feed = client.get("/s/mixed-delivery/feed.json").json()
+    by_id = {int(product["id"]): product for product in feed["products"]}
+    assert feed["store"]["fulfilment"] == "mixed"
+    assert by_id[primary_id]["fulfilment"] == "merchant"
+    assert by_id[second_id]["fulfilment"] == "automatic"
+
+    products = _mcp("mixed-delivery", "tools/call", {"name": "list_products"}).json()[
+        "result"
+    ]["structuredContent"]["products"]
+    assert {p["id"]: p["fulfilment"] for p in products} == {
+        primary_id: "merchant",
+        second_id: "automatic",
+    }
+    product = _mcp(
+        "mixed-delivery",
+        "tools/call",
+        {"name": "get_product", "arguments": {"product_id": second_id}},
+    ).json()["result"]["structuredContent"]
+    assert product["deliverable_kind"] == "text"
+    assert product["fulfilment"] == "automatic"
+
+    discovery = client.get("/discovery/resources").json()["resources"]
+    row = next(item for item in discovery if item["slug"] == "mixed-delivery")
+    assert row["fulfilment"] == "mixed"
+
+
 def test_mcp_create_checkout_unknown_product_id_is_tool_error(make_store):
     make_store(slug="mcp-nope", price_micro=1_000_000)
     r = _mcp(
@@ -565,6 +645,33 @@ def test_discovery_resources_live_only_and_caps():
     row = next(r for r in body["resources"] if r["slug"] == "live-a")
     assert "pay_to" not in row  # merchant wallet never bulk-exported
     assert row["buy"] == "/s/live-a/buy"
+
+
+def test_discovery_excludes_a_paused_store_and_its_total_agrees():
+    # Pausing (deactivating the last product) became reachable when the 409 was
+    # lifted. A paused store kept appearing in discovery — advertising a price
+    # range, a trust tier and a fulfilment mode to an agent whose buy would then
+    # 409. And the total MUST move with the rows: a count larger than any page
+    # can return reads to a paging client as missing results (the exact bug the
+    # count query's own comment documents for hidden stores).
+    _seed(slug="open-shop")
+    paused = _seed(slug="paused-shop")
+    with SessionLocal() as s:
+        for prod in s.scalars(select(Product).where(Product.store_id == paused)):
+            prod.active = False
+        s.commit()
+    body = client.get("/discovery/resources?limit=50").json()
+    slugs = {row["slug"] for row in body["resources"]}
+    assert "open-shop" in slugs, "a store with something to sell is never hidden"
+    assert "paused-shop" not in slugs
+    assert body["total"] == len(body["resources"]) == 1
+    # search flows through the same filter
+    hits = client.get("/discovery/search?q=paused-shop").json()["resources"]
+    assert hits == []
+    # but the paused store still resolves by DIRECT link, with an empty catalog —
+    # excluded from recommendations, not erased
+    feed = client.get("/s/paused-shop/feed.json")
+    assert feed.status_code == 200 and feed.json()["products"] == []
 
 
 def test_discovery_sold_count_counts_only_delivered():
@@ -810,6 +917,16 @@ def test_hidden_store_excluded_from_bulk_but_reachable_directly():
     # ...but it stays fully reachable by direct link (owner + agent preview)
     assert client.get("/s/hidshop/feed.json").status_code == 200
     assert _mcp("hidshop", "tools/list").status_code == 200
+
+
+def test_sandbox_store_is_rejected_by_agent_protocols():
+    from app import agentic
+
+    _seed(slug="sandboxshop", status="sandbox")
+    assert client.get("/s/sandboxshop/feed.json").status_code == 404
+    assert _mcp("sandboxshop", "tools/list").status_code == 404
+    sentinel = "0x" + "f" * 40
+    assert agentic.resolve_pay_to("/s/sandboxshop/buy", sentinel) == sentinel
 
 
 def test_hidden_store_graduates_to_public_on_first_sale():

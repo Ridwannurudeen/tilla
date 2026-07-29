@@ -204,7 +204,10 @@ def test_create_store_pending_when_screening_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
     _mock_llm(monkeypatch, {"store_name": "Pending Store", "price_usdt": 9})
     respx.post(WARDEN_SCREEN_URL).mock(side_effect=httpx.TimeoutException("timeout"))
-    r = client.post("/create-store", json={"description": "something"})
+    r = client.post(
+        "/create-store",
+        json={"description": "something", "receive_address": "0x" + "a" * 40},
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "pending_screening"
@@ -232,7 +235,13 @@ def test_create_store_live_when_screening_allows(tmp_path, monkeypatch):
     respx.post(WARDEN_SCREEN_URL).mock(
         return_value=httpx.Response(200, json={"verdict": "ALLOW"})
     )
-    r = client.post("/create-store", json={"description": "something safe"})
+    r = client.post(
+        "/create-store",
+        json={
+            "description": "something safe",
+            "receive_address": "0x" + "a" * 40,
+        },
+    )
     assert r.status_code == 200
     slug = r.json()["slug"]
     slug_dir = tmp_path / slug
@@ -244,8 +253,8 @@ def test_create_store_live_when_screening_allows(tmp_path, monkeypatch):
 @respx.mock
 def test_create_store_empty_body_delivers_the_sample_store(tmp_path, monkeypatch):
     # The full unattended-reviewer path: paid POST with NO parameters ends in a
-    # live store built from DEFAULT_STORE_DESCRIPTION, and the response says a
-    # default was used so a machine caller can tell its input never arrived.
+    # non-payable sample built from DEFAULT_STORE_DESCRIPTION, and the response
+    # says a default was used so a machine caller can tell its input never arrived.
     monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
     seen = {}
 
@@ -277,7 +286,13 @@ def test_create_store_with_description_carries_no_note(tmp_path, monkeypatch):
     respx.post(WARDEN_SCREEN_URL).mock(
         return_value=httpx.Response(200, json={"verdict": "ALLOW"})
     )
-    r = client.post("/create-store", json={"description": "I sell honest socks"})
+    r = client.post(
+        "/create-store",
+        json={
+            "description": "I sell honest socks",
+            "receive_address": "0x" + "a" * 40,
+        },
+    )
     assert r.status_code == 200
     assert "note" not in r.json()
 
@@ -299,7 +314,10 @@ def test_pending_store_resumes_live_and_checkout_works(tmp_path, monkeypatch):
     respx.post(WARDEN_SCREEN_URL).mock(side_effect=_screen)
 
     # 1) screening unavailable -> pending: no index.html, checkout 409'd
-    r = client.post("/create-store", json={"description": "something"})
+    r = client.post(
+        "/create-store",
+        json={"description": "something", "receive_address": "0x" + "a" * 40},
+    )
     assert r.status_code == 200
     slug = r.json()["slug"]
     slug_dir = tmp_path / slug

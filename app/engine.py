@@ -1072,7 +1072,14 @@ def _persist_receipt(session, store_id: int, receipt) -> None:
 
 
 def create_store(
-    desc, addr=None, delivery=None, theme=None, deliverable=None, notify_agent_id=None
+    desc,
+    addr=None,
+    delivery=None,
+    theme=None,
+    deliverable=None,
+    notify_agent_id=None,
+    *,
+    sandbox=False,
 ):
     """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
@@ -1086,6 +1093,12 @@ def create_store(
     index.html so nginx keeps serving /s/<slug>/, and store.json as one-milestone
     rollback insurance so the pre-M2 app can still read a store it didn't create.
     """
+    # A public API caller without a payout address gets the marketplace review
+    # sample, not a merchant storefront: it remains non-payable. Internal callers
+    # that use the historical default address keep their existing live-store
+    # behavior unless they explicitly request this public sandbox mode.
+    # The rendering pipeline still needs a valid address, so the preview uses the
+    # historical demo address while its persisted state gates every checkout path.
     addr = addr or DEFAULT_ADDR
     content = generate(desc)
     # Strip the token-usage sidecar keys before content is persisted/rendered; they
@@ -1103,6 +1116,7 @@ def create_store(
         )
     )
     pending = outcome.status == "pending"
+    store_status = "sandbox" if sandbox else "pending_screening" if pending else "live"
     # Per-store capability secret returned ONCE to the paid caller (the store
     # owner by construction). Only its sha256 hash is persisted.
     manage_key, manage_key_hash = mint_manage_key()
@@ -1167,7 +1181,7 @@ def create_store(
             # 409'd until then.
             meta = {
                 "slug": slug,
-                "status": "pending_screening",
+                "status": store_status,
                 "product_name": content.get("product_name", ""),
                 "amount_usdt": content.get("price_usdt", 0),
                 "pay_to": addr,
@@ -1180,7 +1194,7 @@ def create_store(
             _write_store_pages(d, content, addr, slug, theme_file)
             meta = {
                 "slug": slug,
-                "status": "live",
+                "status": store_status,
                 "product_name": content.get("product_name", ""),
                 "amount_usdt": content.get("price_usdt", 0),
                 "pay_to": addr,
@@ -1205,8 +1219,9 @@ def create_store(
                 store = Store(
                     slug=slug,
                     merchant_id=merchant.id,
-                    status="pending_screening" if pending else "live",
+                    status=store_status,
                     pay_to=addr,
+                    visibility="hidden" if sandbox else "public",
                     manage_key_hash=manage_key_hash,
                     delivery=store_delivery,
                     description=desc,
@@ -1315,13 +1330,17 @@ def create_store(
     if pending:
         return {
             "slug": slug,
-            "status": "pending_screening",
+            "status": store_status,
             "store_name": content.get("store_name", ""),
             "manage_key": manage_key,
             "message": (
-                "Store queued: content screening is temporarily unavailable. "
+                "Sample created without a merchant payout address; it is hidden and "
+                "non-payable."
+                if sandbox
+                else "Store queued: content screening is temporarily unavailable. "
                 "It will not go live until screening completes."
             ),
+            **({"visibility": "hidden", "payable": False} if sandbox else {}),
         }
     return {
         "slug": slug,
@@ -1330,6 +1349,11 @@ def create_store(
         "product_name": receipt_content.get("product_name", ""),
         "price_usdt": receipt_content.get("price_usdt", 0),
         "manage_key": manage_key,
+        **(
+            {"status": "sandbox", "visibility": "hidden", "payable": False}
+            if sandbox
+            else {}
+        ),
     }
 
 

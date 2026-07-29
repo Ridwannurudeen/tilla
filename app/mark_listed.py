@@ -73,12 +73,15 @@ def describe(slug: str) -> dict:
         store = session.scalar(select(Store).where(Store.slug == slug))
         if store is None:
             raise LookupError(f"store not found: {slug}")
-        rows = _discovery_rows(session, [Store.slug == slug], 1, 0)
-        if not rows:
-            raise LookupError(f"store is not publicly live, nothing to list: {slug}")
+        # Check the product FIRST. Discovery now excludes stores with no active
+        # product, so an emptiness test alone reports a paused store as "not
+        # publicly live" — false, and it made this dedicated branch unreachable.
         product = _active_product(session, store.id)
         if product is None:
             raise LookupError(f"store has no active product: {slug}")
+        rows = _discovery_rows(session, [Store.slug == slug], 1, 0)
+        if not rows:
+            raise LookupError(f"store is not publicly live, nothing to list: {slug}")
         row = rows[0]
         store_name = _store_name(store)
         fee = _usdt_str(product.price_micro)

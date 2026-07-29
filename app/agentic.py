@@ -35,7 +35,7 @@ from decimal import Decimal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -59,6 +59,7 @@ from app import (
     imagery,
     webhooks,
 )
+from app.buyer_inputs import declared_buyer_inputs, validate_buyer_inputs
 from app.db import SessionLocal, get_session
 from app.limiter import limiter
 from app.models import (
@@ -189,7 +190,7 @@ def _product_for_path(session: Session, store: Store, path: str) -> Product | No
     )
 
 
-def _deferred_deliverable_ok(session: Session, store_id: int) -> bool:
+def _deferred_deliverable_ok(session: Session, product: Product) -> bool:
     """True iff this store's active deliverable is a server-gated FILE — the one
     shape the deferred rail may be offered on.
 
@@ -203,31 +204,28 @@ def _deferred_deliverable_ok(session: Session, store_id: int) -> bool:
     SERVE time, so a row that predates the guard, or one written around it, still
     cannot advertise or take payment on the rail.
     """
-    active = session.scalar(
-        select(Deliverable)
-        .where(Deliverable.store_id == store_id, Deliverable.active.is_(True))
-        .order_by(Deliverable.id.desc())
-        .limit(1)
-    )
+    active = checkout._active_deliverable(session, product.store_id, product.id)
     return active is not None and active.kind == "file"
 
 
-def _has_active_deliverable(session: Session, store_id: int) -> bool:
-    """Whether this store has ANY active deliverable, of any kind.
+def _product_fulfilment(session: Session, product: Product) -> str:
+    return fulfilment_mode(
+        checkout._active_deliverable(session, product.store_id, product.id) is not None
+    )
 
-    Deliberately broader than :func:`checkout._active_deliverable`, which resolves
-    the ONE row to serve an order and so returns only the store-level default.
-    ``fulfilment`` is a store-level statement, and the discovery query answers it
-    with a joined COUNT over the same set — the two have to agree or a store reads
-    'automatic' in one surface and 'merchant' in the other."""
-    return (
-        session.scalar(
-            select(func.count(Deliverable.id)).where(
-                Deliverable.store_id == store_id, Deliverable.active.is_(True)
-            )
-        )
-        or 0
-    ) > 0
+
+def _store_fulfilment_mode(session: Session, store: Store) -> str:
+    products = session.scalars(
+        select(Product)
+        .where(Product.store_id == store.id, Product.active.is_(True))
+        .order_by(Product.id)
+    ).all()
+    modes = {_product_fulfilment(session, product) for product in products}
+    if modes == {"automatic"}:
+        return "automatic"
+    if modes == {"merchant"} or not modes:
+        return "merchant"
+    return "mixed"
 
 
 def _is_batch_path(path: str) -> bool:
@@ -251,7 +249,7 @@ def _is_batch_path(path: str) -> bool:
             return (
                 product is not None
                 and (product.pricing_model or "one_time") == "batch"
-                and _deferred_deliverable_ok(session, store.id)
+                and _deferred_deliverable_ok(session, product)
             )
     except Exception:
         logger.exception("aggr batch-check failed for %s", path)
@@ -335,7 +333,7 @@ def enabled_schemes(product: Product) -> list[str]:
     if _pricing_model(product) == "batch" and config.AGGR_DEFERRED_ENABLED:
         try:
             with SessionLocal() as session:
-                if _deferred_deliverable_ok(session, product.store_id):
+                if _deferred_deliverable_ok(session, product):
                     schemes.append("aggr_deferred")
         except Exception:
             logger.exception("aggr deliverable-check failed for product %s", product.id)
@@ -732,7 +730,7 @@ def _do_agent_buy(
             raise HTTPException(
                 409, "aggr_deferred is only available for batch products"
             )
-        if not _deferred_deliverable_ok(session, store.id):
+        if not _deferred_deliverable_ok(session, product):
             raise HTTPException(
                 409,
                 "aggr_deferred requires a file deliverable: text is released in the "
@@ -1309,6 +1307,10 @@ class _CreateCheckoutArgs(BaseModel):
     product_id: int | None = None
     # M13 affiliate attribution (optional): the referring agent's payout wallet.
     ref: str | None = None
+    # The values required by this specific product's ``buyer_inputs`` declaration.
+    # They are validated before the order reservation, so no payable order exists
+    # without the merchant's fulfilment brief.
+    inputs: dict[str, str] | None = None
 
     @field_validator("ref")
     @classmethod
@@ -1489,13 +1491,18 @@ def _mcp_tools() -> list[dict]:
                 "nothing: money moves only on the explicit `pay` step. Pass an "
                 "optional product_id to check out a specific product; omit it for the "
                 "store's primary product. Pass an optional `ref` (a 0x EVM address) to "
-                "attribute the sale to a referring agent's payout wallet."
+                "attribute the sale to a referring agent's payout wallet. Supply "
+                "`inputs` when the selected product declares buyer requirements."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "product_id": {"type": "integer"},
                     "ref": {"type": "string"},
+                    "inputs": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -1535,6 +1542,8 @@ def _tool_list_products(session: Session, store: Store) -> dict:
                 "currency": CURRENCY,
                 "network": NETWORK,
                 "sla_minutes": _effective_sla(p),
+                "buyer_inputs": declared_buyer_inputs(p),
+                "fulfilment": _product_fulfilment(session, p),
             }
             for p in products
         ]
@@ -1557,12 +1566,7 @@ def _tool_get_product(
     )
     if product is None:
         raise _ToolError("product not found")
-    deliverable = session.scalar(
-        select(Deliverable)
-        .where(Deliverable.store_id == store.id, Deliverable.active.is_(True))
-        .order_by(Deliverable.id.desc())
-        .limit(1)
-    )
+    deliverable = checkout._active_deliverable(session, store.id, product.id)
     result = {
         "id": product.id,
         "name": product.name,
@@ -1572,7 +1576,14 @@ def _tool_get_product(
         "currency": CURRENCY,
         "network": NETWORK,
         "sla_minutes": _effective_sla(product),
-        "deliverable_kind": deliverable.kind if deliverable else "text",
+        # Emitted only when goods are actually attached. The old default reported
+        # "text" for a store with NOTHING attached — an agent read a claim that a
+        # text deliverable existed while the same store's feed said fulfilment
+        # "merchant". The enum cannot express "none", so absence is how none is
+        # said; `fulfilment` below is the field a buyer should key on.
+        **({"deliverable_kind": deliverable.kind} if deliverable else {}),
+        "buyer_inputs": declared_buyer_inputs(product),
+        "fulfilment": _product_fulfilment(session, product),
         "pricing": _pricing_block(product),
         "x402": {
             "endpoint": f"/s/{slug}/buy/{product.id}",
@@ -1608,10 +1619,17 @@ def _tool_create_checkout(
     store: Store,
     product_id: int | None = None,
     referrer_addr: str | None = None,
+    inputs: dict | None = None,
 ) -> dict:
     product = _resolve_active_product(session, store, product_id)
     try:
-        order = checkout.create_order(session, store, product, referrer_addr)
+        buyer_inputs = validate_buyer_inputs(product, inputs)
+    except HTTPException as exc:
+        raise _ToolError(str(exc.detail)) from exc
+    try:
+        order = checkout.create_order(
+            session, store, product, referrer_addr, buyer_inputs=buyer_inputs
+        )
     except checkout.AmountUnavailable as exc:
         raise _ToolError("checkout busy, retry") from exc
     log_event(session, "agentic", "order.created", store_id=store.id, order_id=order.id)
@@ -1674,7 +1692,9 @@ def _mcp_tools_call(session: Session, store: Store, slug: str, req_id, params) -
             result = _tool_preview_order(session, store, pargs.product_id)
         elif name == "create_checkout":
             args = _CreateCheckoutArgs.model_validate(raw_args)
-            result = _tool_create_checkout(session, store, args.product_id, args.ref)
+            result = _tool_create_checkout(
+                session, store, args.product_id, args.ref, args.inputs
+            )
         elif name == "pay":
             result = _tool_pay(session, store, _PayArgs.model_validate(raw_args))
         else:
@@ -2014,7 +2034,9 @@ def _buy_input_schema(product: Product | None) -> dict:
     return schema
 
 
-def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> dict:
+def _feed_product(
+    session: Session, store: Store, slug: str, product: Product, store_url: str
+) -> dict:
     image_url = product_image_url(store, product, store_url)
     return {
         "id": str(product.id),
@@ -2027,6 +2049,8 @@ def _feed_product(store: Store, slug: str, product: Product, store_url: str) -> 
         "price": {"amount": _usdt_str(product.price_micro), "currency": CURRENCY},
         "availability": "in_stock",
         "sla_minutes": _effective_sla(product),
+        "buyer_inputs": declared_buyer_inputs(product),
+        "fulfilment": _product_fulfilment(session, product),
         "pricing": _pricing_block(product),
         "x402": {
             "endpoint": f"/s/{slug}/buy/{product.id}",
@@ -2106,9 +2130,12 @@ def feed_json(
             # Discovery carries this too; an agent that came straight to a store's
             # feed never saw the discovery row, and this is the one thing it cannot
             # infer from the catalog.
-            "fulfilment": fulfilment_mode(_has_active_deliverable(session, store.id)),
+            "fulfilment": _store_fulfilment_mode(session, store),
         },
-        "products": [_feed_product(store, slug, p, store_url) for p in products],
+        "products": [
+            _feed_product(session, store, slug, product, store_url)
+            for product in products
+        ],
     }
     return JSONResponse(body, headers=_AGENT_HEADERS)
 
@@ -2280,6 +2307,13 @@ def agent_card(request: Request):
                                 "product to buy; omit for the primary product"
                             ),
                         },
+                        "inputs": {
+                            "type": "object",
+                            "description": (
+                                "merchant-declared values required by the selected "
+                                "product; read its feed or MCP get_product first"
+                            ),
+                        },
                     },
                 },
                 "sla_minutes": DELIVERY_SLA_MINUTES,
@@ -2427,69 +2461,6 @@ def _trust_tier(sold: int, success_rate: float | None, buyers: int = 0) -> str:
     return "emerging"
 
 
-def declared_buyer_inputs(product: Product | None) -> list[dict]:
-    """The merchant's declared buyer inputs for a product, normalised and safe.
-
-    Tolerant of anything already in the column: the JSON is merchant-supplied, so a
-    malformed entry is skipped rather than raising on a read path that feeds
-    discovery, the storefront and the buy gate alike."""
-    raw = getattr(product, "buyer_inputs", None)
-    if not isinstance(raw, list):
-        return []
-    out = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        out.append(
-            {
-                "name": name,
-                "label": str(item.get("label") or name).strip(),
-                "required": bool(item.get("required", True)),
-            }
-        )
-    return out
-
-
-def validate_buyer_inputs(product: Product | None, supplied: dict | None) -> dict:
-    """The supplied inputs, or raise 422 BEFORE settlement.
-
-    This is the whole point of the feature. A >=400 here makes the x402 middleware
-    skip settlement, so a buy that cannot be fulfilled never moves funds: the
-    merchant is not left holding money for a job with no brief, and the buyer is
-    not left with a receipt for nothing. A merchant reported exactly that shape —
-    a store that "can take 0.01 and deliver nothing" because checkout could not ask
-    which token to research.
-
-    Undeclared keys are dropped rather than rejected: an agent that sends extra
-    context should not have its payment refused over it."""
-    declared = declared_buyer_inputs(product)
-    if not declared:
-        return {}
-    supplied = supplied or {}
-    kept, missing = {}, []
-    for field in declared:
-        value = supplied.get(field["name"])
-        value = value.strip() if isinstance(value, str) else value
-        if value in (None, ""):
-            if field["required"]:
-                missing.append(field["name"])
-            continue
-        kept[field["name"]] = str(value)[: config.MAX_BUYER_INPUT_LEN]
-    if missing:
-        raise HTTPException(
-            422,
-            "this product requires buyer input before it can be sold: "
-            + ", ".join(missing)
-            + '. POST {"inputs": {"'
-            + missing[0]
-            + '": "…"}} with the payment.',
-        )
-    return kept
-
-
 def fulfilment_mode(has_deliverable: bool) -> str:
     """How a buyer receives the goods once they have paid.
 
@@ -2507,10 +2478,23 @@ def fulfilment_mode(has_deliverable: bool) -> str:
     return "automatic" if has_deliverable else "merchant"
 
 
+def _fulfilment_from_counts(
+    active_products: int, has_default: bool, specific_products: int
+) -> str:
+    if active_products < 1:
+        return "merchant"
+    if has_default or specific_products >= active_products:
+        return "automatic"
+    if specific_products:
+        return "mixed"
+    return "merchant"
+
+
 def _discovery_row(
     store: Store,
     pmin,
     pmax,
+    active_products,
     sold,
     buyers,
     last_sale,
@@ -2519,7 +2503,8 @@ def _discovery_row(
     pending,
     review_avg,
     review_count,
-    deliverables=None,
+    has_default,
+    specific_products,
 ) -> dict:
     # Reputation signals an agent buyer can rank on, computed from terminal orders:
     # sold_count = delivered count; success_rate = good / (good + rejected + refunded)
@@ -2557,7 +2542,11 @@ def _discovery_row(
         "disputed_count": rejected,
         "trust_tier": _trust_tier(good, success_rate, buyers or 0),
         # What the buyer actually receives on payment. See fulfilment_mode.
-        "fulfilment": fulfilment_mode(bool(deliverables)),
+        "fulfilment": _fulfilment_from_counts(
+            active_products or 0,
+            bool(has_default),
+            specific_products or 0,
+        ),
         "review_avg": round(float(review_avg), 2) if review_avg is not None else None,
         "review_count": review_count or 0,
         "created_at": store.created_at.isoformat() + "Z",
@@ -2644,6 +2633,7 @@ def _discovery_rows(
             Product.store_id.label("sid"),
             func.min(Product.price_micro).label("pmin"),
             func.max(Product.price_micro).label("pmax"),
+            func.count(Product.id).label("nproducts"),
         )
         .where(Product.active.is_(True))
         .group_by(Product.store_id)
@@ -2660,16 +2650,43 @@ def _discovery_rows(
         .group_by(Review.store_id)
         .subquery()
     )
-    # Whether the store has goods attached, joined rather than looked up per row:
-    # discovery returns a page of stores and a per-store query here would be N+1 on
-    # the hottest read an agent buyer makes.
+    # Product delivery truth joined rather than looked up per row: a store default
+    # makes every active product automatic; without one, each active product needs
+    # its own active deliverable. This distinguishes a fully automatic catalogue
+    # from a mixed manual/automatic one without an N+1 query on discovery.
     fulfil_sq = (
         select(
-            Deliverable.store_id.label("sid"),
-            func.count(Deliverable.id).label("ndeliv"),
+            Product.store_id.label("sid"),
+            func.max(
+                case(
+                    (
+                        and_(
+                            Deliverable.id.is_not(None),
+                            Deliverable.product_id.is_(None),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("has_default"),
+            func.count(
+                func.distinct(case((Deliverable.product_id.is_not(None), Product.id)))
+            ).label("specific_products"),
         )
-        .where(Deliverable.active.is_(True))
-        .group_by(Deliverable.store_id)
+        .select_from(Product)
+        .outerjoin(
+            Deliverable,
+            and_(
+                Deliverable.store_id == Product.store_id,
+                Deliverable.active.is_(True),
+                or_(
+                    Deliverable.product_id.is_(None),
+                    Deliverable.product_id == Product.id,
+                ),
+            ),
+        )
+        .where(Product.active.is_(True))
+        .group_by(Product.store_id)
         .subquery()
     )
     sold_c = func.coalesce(metrics_sq.c.sold, 0)
@@ -2699,6 +2716,7 @@ def _discovery_rows(
             Store,
             price_sq.c.pmin,
             price_sq.c.pmax,
+            price_sq.c.nproducts,
             metrics_sq.c.sold,
             metrics_sq.c.buyers,
             metrics_sq.c.last_sale,
@@ -2707,14 +2725,33 @@ def _discovery_rows(
             metrics_sq.c.pending,
             reviews_sq.c.ravg,
             reviews_sq.c.rcount,
-            fulfil_sq.c.ndeliv,
+            fulfil_sq.c.has_default,
+            fulfil_sq.c.specific_products,
         )
         .outerjoin(price_sq, price_sq.c.sid == Store.id)
         .outerjoin(metrics_sq, metrics_sq.c.sid == Store.id)
         .outerjoin(reviews_sq, reviews_sq.c.sid == Store.id)
         .outerjoin(fulfil_sq, fulfil_sq.c.sid == Store.id)
         # Phase 1.7: hidden (sandbox) stores stay out of bulk discovery.
-        .where(Store.status == "live", Store.visibility == "public", *where_clauses)
+        #
+        # A store with NO ACTIVE PRODUCT is excluded too. Pausing became possible
+        # when the last-product 409 was lifted, and a paused store kept appearing
+        # here — advertising its price range, its trust tier and its `fulfilment`
+        # mode to an agent that would then get a 409 from the buy endpoint. No
+        # funds move, but recommending something unbuyable spends a buyer's call
+        # and lies about availability, which is the same class of defect as the
+        # rest of this file's history.
+        #
+        # Keyed on price_sq (built from ACTIVE products only), so this cannot hide
+        # a store that has something to sell — which matters because six of our
+        # seven marketplace services point at specific stores, and hiding one
+        # would leave a listing card aimed at a store a reviewer cannot buy from.
+        .where(
+            Store.status == "live",
+            Store.visibility == "public",
+            price_sq.c.pmin.is_not(None),
+            *where_clauses,
+        )
         .order_by(*order_by)
         .limit(limit)
         .offset(offset)
@@ -2742,8 +2779,15 @@ def discovery_resources(
         .select_from(Store)
         # Must mirror _discovery_rows' filter: it excludes hidden stores, so counting
         # them here reported a total larger than any page could ever return (live: 18
-        # vs 15 rows), which reads to a paging client as missing results.
-        .where(Store.status == "live", Store.visibility == "public")
+        # vs 15 rows), which reads to a paging client as missing results. The
+        # no-active-product exclusion has to be mirrored for the same reason — a
+        # paused store counted but never returned is the identical bug wearing a
+        # different hat.
+        .where(
+            Store.status == "live",
+            Store.visibility == "public",
+            Store.id.in_(select(Product.store_id).where(Product.active.is_(True))),
+        )
     )
     resources = _discovery_rows(session, [], limit, offset, sort)
     body: dict = {

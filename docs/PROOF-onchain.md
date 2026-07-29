@@ -361,7 +361,7 @@ Wallet balance moved **39.790953 -> 39.760953 USDT0**, exactly -0.030000 for the
   found Tilla; and one of the three (VigilOK) could only be exercised in its empty state, because
   no wallet with an open Aave V3 position was available to screen. Both stated in the reviews.
 
-## 13. An INDEPENDENT merchant fulfils an INDEPENDENT buyer — PROVEN (2026-07-28)
+## 13. An INDEPENDENT merchant fulfils an INDEPENDENT buyer — PROVEN (settlement re-verified 2026-07-29)
 Every prior entry has Tilla on one side of the trade. This one has Tilla on neither: a merchant it
 does not own sells goods it did not write to a buyer, over a storefront Tilla generated. It is the
 half of the two-sided market that had never once run in production, and it needed a defect fixed
@@ -387,7 +387,7 @@ comes back, and that there is no obligation to continue.
 | Order | Paid | settle tx | What the buyer received |
 |---|---|---|---|
 | `318b060576c5470c` (22:00) | 0.100000 | `0xe1745c4b3ec4cc5c9e46d0c5b3edfc31` + `202ec61b5141f31d11c36b35f6143a42` | the unconfigured message — no deliverable existed yet |
-| `5f00db249ea14247` (22:5x) | 0.100000 | `0xdb111c221ba61de3033bd7db446d58a4` + `51a782ca226ed09b68ce21be7cbccb07` | **the merchant's real 1489-char handoff**, Entitlement id 2 bound to the buyer |
+| `5f00db249ea14247` (22:5x) | 0.100000 | `0xdb111c221ba61de3033bd7db446d58a4` + `51a782ca226ed09b68ce21be7cbccb07` — receipt `status 1`, block **66511009**, USDT0 transfer **0.100000** to the merchant | **the merchant's real 1489-char handoff**, Entitlement id 2 bound to the buyer |
 
 - **Tilla takes no cut.** Both orders record `paid_micro = 100000` against `amount_micro = 100000`,
   payee `0xFAF50D…7e0f`. The platform fee is charged once at `create-store` and never again;
@@ -418,7 +418,7 @@ comes back, and that there is no obligation to continue.
 | MPP metered channel (#10) | deposit `0x125c88d9…61441f`; closes `0xcecc3a1f…b8b5f8`, `0x40646e85…78f1be4` | 66035448, 66056578, 66056643 | proven (open → voucher → delivery → close; 0.1 to merchant, 3.9 refunded) |
 | Escrow job `1379aae00c6b4efd` | fund `0x486cc9cf…3da85b`; no release | 66054682 | **partially proven** — disputed, unreleased |
 | Tilla hires an agent, paid Warden scan (#11) | `0xf546da66…f403cc` | 66208040 | proven (Tilla as buyer) |
-| Independent merchant fulfils a buyer (#13) | `0xdb111c22…cbccb07` | — | proven (goods, not a message; Entitlement bound) |
+| Independent merchant fulfils a buyer (#13) | `0xdb111c22…cbccb07` | 66511009 | proven (goods, not a message; Entitlement bound) |
 
 Thirteen rails are proven with real on-chain USDT0 and independently re-verified receipts; one
 disputed escrow job remains partially proven and is never cited otherwise. **Most** entries are
@@ -436,6 +436,10 @@ deposit). The four EAS attestation txs carry zero token transfers, as expected f
 two #10 close txs added later the same day (§10) were verified the same way when they were found, so
 every hash in the document has now been receipt-checked. Both test-wallet balances below were re-read
 on 2026-07-25, at the chain head stated with them, and still match.
+
+**Entry #13 re-verification 2026-07-29:** its settlement receipt was re-read at block **66511009** with
+`status 0x1`; the decoded USDT0 transfer is **0.100000** to the independent merchant. The earlier
+summary row omitted the block, so it is recorded here rather than inferred from an order row.
 
 **Entry #10 was reopened the same day and upgraded to proven.** Its two close transactions had never
 been recorded, and OKX's settlement-agent API — the only source both earlier versions of the entry

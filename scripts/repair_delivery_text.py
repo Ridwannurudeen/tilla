@@ -16,8 +16,8 @@ to match, since that file is what `app.import_stores` re-reads on a fresh host.
 
 Deliberately narrow — a store is rewritten only when BOTH hold:
 
-  * its `delivery` is text TILLA generated (the fabricated marker, or an exact
-    render of a superseded default), and
+  * its `delivery` is text TILLA generated (the exact fabricated fallback, or an
+    exact render of a superseded default), and
   * it has no active deliverable.
 
 The second condition is what keeps this safe. A merchant who attached real goods
@@ -51,11 +51,16 @@ def _product_name(store: Store) -> str:
 def _is_tilla_authored(store: Store) -> bool:
     """True iff this store's delivery text is one WE generated, not the merchant's.
 
-    Either it carries the fabricated-link marker, or it is an exact render of a
-    superseded default for this store. Exact match is the point: it is proof of
-    authorship, so no merchant's own wording can be caught by it."""
+    Either it is the exact historical fabricated-link fallback for this store, or
+    it is an exact render of a superseded default. Exact match is the point: it is
+    proof of authorship, so a merchant's own URL containing ``/files/`` cannot be
+    caught by a broad substring match."""
     text = store.delivery or ""
-    if engine.LEGACY_DELIVERY_MARKER in text:
+    historical = (
+        f"✅ Thank you! Your {_product_name(store)} is ready: "
+        f"https://tilla.gudman.xyz/files/{store.slug} (demo delivery link)"
+    )
+    if text == historical:
         return True
     return text in engine.superseded_delivery_texts(store.slug, _product_name(store))
 

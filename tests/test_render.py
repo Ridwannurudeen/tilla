@@ -169,6 +169,19 @@ def test_checkout_retry_resets_state_before_poll(theme):
     assert html.index(reset) < html.index("poll();")
 
 
+@pytest.mark.parametrize("theme", THEMES)
+def test_checkout_collects_buyer_inputs_with_text_content_only(theme):
+    # Feed-provided labels/names are merchant data. The checkout must insert them
+    # as text nodes, then send the values under the API's `inputs` object.
+    html = render({"store_name": "X"}, ADDR, SLUG, theme)
+    assert "renderBuyerInputs" in html
+    assert "p.buyer_inputs" in html
+    assert "input.name = field.name" in html
+    assert "label.textContent" in html
+    assert "payload.inputs = inputs" in html
+    assert "innerHTML" not in html
+
+
 # ---------- M18.3 checkout chain honesty + operator bridge affordance ----------
 @pytest.mark.parametrize("theme", THEMES)
 def test_checkout_chain_honesty_present(theme):

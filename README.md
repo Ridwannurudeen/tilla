@@ -92,7 +92,7 @@ combination appearing just **1.68%** of the time and each of the ten design pers
 
 **No free CSS anywhere.** Every value is a server-validated enum or a computed colour, so merchant copy
 can never reach a style context. Design identity is resolved at generation time and persisted with the
-store, so a shop's look never drifts — verified stable across all 31 live public stores. Full design system in
+store, so a shop's look never drifts — verified stable across the public catalogue at measurement time. Full design system in
 [`docs/DESIGN-DNA.md`](docs/DESIGN-DNA.md).
 
 ## Photography that matches what is being sold
@@ -265,7 +265,7 @@ fifth completed task was Tilla's own operator agent (#4844) calling its own serv
 the rail works and nothing about demand; it is excluded from the three-client count. A sixth is
 still open. Verify with `onchainos agent tasks --agent-id 6961`.
 
-**A counter is not a receipt.** `soldCount` reads 49, but it counts *served* orders including
+**A counter is not a receipt.** The marketplace `soldCount` includes *served* orders including
 unsettled ones — one wallet alone ran **36 orders that were cancelled with zero on-chain
 settlement**, probing the rails without ever paying. Tilla's revenue claims cite settlement
 receipts, never the counter, and the 10.55 USDT0 above excludes every unpaid probe. It also excludes
@@ -289,11 +289,11 @@ independently verifiable and verifies: Oddsmith quoted OKB at 86.3605 against OK
 ```sh
 pip install -e ".[dev]"
 ruff check . && ruff format --check .
-pytest -q                # 1279 tests
+pytest -q
 ```
 
 Migrations: `alembic upgrade head`. The local repo is the source of truth; the VPS is a deploy target
-(file-by-file scp + `systemctl restart tilla-api` + smoke test), never edited directly.
+(full manifest staging + a short service stop + migration + smoke test), never edited directly.
 
 ## SDKs
 

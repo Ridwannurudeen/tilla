@@ -177,6 +177,89 @@ def test_no_deliverable_means_no_row(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------- the API surface
+@respx.mock
+def test_bodyless_create_is_a_hidden_nonpayable_sandbox(tmp_path, monkeypatch):
+    """The listing review's bodyless POST must never publish Tilla's demo wallet.
+
+    The response remains useful to an unattended reviewer, but a checkout attempt
+    creates no order and exposes no payable store until a merchant supplies their
+    own receive address on a new create call.
+    """
+    import app.engine as engine
+    from app.models import Order
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setenv("TILLA_LLM_KEY", "k")
+    _fake_llm(monkeypatch, _content("Review sample"))
+    _allow()
+
+    created = client.post("/create-store")
+
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["status"] == "sandbox"
+    assert body["visibility"] == "hidden"
+    assert body["payable"] is False
+    assert "receive_address" in body["note"]
+    with SessionLocal() as session:
+        store = session.scalar(select(Store).where(Store.slug == body["slug"]))
+        assert store is not None
+        assert store.status == "sandbox"
+        assert store.visibility == "hidden"
+        assert store.pay_to == engine.DEFAULT_ADDR
+
+    checkout = client.post(f"/api/checkout/{body['slug']}")
+
+    assert checkout.status_code == 404
+    with SessionLocal() as session:
+        assert session.scalar(select(Order).where(Order.store_id == store.id)) is None
+
+    described = client.post("/create-store", json={"description": "I sell guides"})
+
+    assert described.status_code == 200, described.text
+    assert described.json()["status"] == "sandbox"
+    assert described.json()["payable"] is False
+    assert "receive_address" in described.json()["note"]
+
+
+def test_browser_checkout_requires_and_persists_declared_buyer_inputs(make_store):
+    from app.models import Order, Product
+
+    store_id = make_store(slug="briefed", pay_to="0x" + "b" * 40)
+    with SessionLocal() as session:
+        product = session.scalar(select(Product).where(Product.store_id == store_id))
+        product.buyer_inputs = [
+            {"name": "token", "label": "Token address", "required": True},
+            {"name": "context", "label": "Extra context", "required": False},
+        ]
+        session.commit()
+
+    missing = client.post("/api/checkout/briefed")
+
+    assert missing.status_code == 422
+    with SessionLocal() as session:
+        assert session.scalar(select(Order).where(Order.store_id == store_id)) is None
+
+    created = client.post(
+        "/api/checkout/briefed",
+        json={
+            "inputs": {
+                "token": "0xabc",
+                "context": "focus on governance",
+                "ignored": "not merchant declared",
+            }
+        },
+    )
+
+    assert created.status_code == 200, created.text
+    with SessionLocal() as session:
+        order = session.get(Order, created.json()["id"])
+        assert order.buyer_inputs == {
+            "token": "0xabc",
+            "context": "focus on governance",
+        }
+
+
 def test_create_store_schema_advertises_fulfilment_fields():
     # The 402 body and the agent card both derive from this model, so publishing
     # the fields is what makes them discoverable to a paying agent.
@@ -456,6 +539,52 @@ def test_manage_index_names_the_consequence_of_having_no_deliverable(
 
 
 @respx.mock
+def test_manage_index_reports_product_specific_mixed_fulfilment(tmp_path, monkeypatch):
+    """A product-specific good must not make manual products look automatic."""
+    from app.models import Product
+
+    slug, key = _manage_key(monkeypatch, tmp_path, "Mixed")
+    with SessionLocal() as session:
+        store = session.scalar(select(Store).where(Store.slug == slug))
+        primary = session.scalar(select(Product).where(Product.store_id == store.id))
+        secondary = Product(
+            store_id=store.id,
+            name="Manual consultation",
+            price_micro=8_000_000,
+            active=True,
+        )
+        session.add(secondary)
+        session.flush()
+        session.add(
+            Deliverable(
+                store_id=store.id,
+                product_id=primary.id,
+                kind="text",
+                payload="automatic primary good",
+                version=1,
+                active=True,
+            )
+        )
+        session.commit()
+
+    response = client.get(
+        f"/api/stores/{slug}/manage", headers={"Authorization": f"Bearer {key}"}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    by_product = {product["id"]: product for product in body["products"]}
+    assert body["fulfilment"]["mode"] == "mixed"
+    assert by_product[primary.id]["fulfilment"] == "automatic"
+    assert by_product[secondary.id]["fulfilment"] == "merchant"
+    assert body["deliverable"] is None
+    assert len(body["deliverables"]) == 1
+    assert body["deliverables"][0]["product_id"] == primary.id
+    assert body["deliverables"][0]["kind"] == "text"
+    assert body["deliverables"][0]["version"] == 1
+
+
+@respx.mock
 def test_manage_index_requires_the_key(tmp_path, monkeypatch):
     slug, _key = _manage_key(monkeypatch, tmp_path, "Shut")
     assert client.get(f"/api/stores/{slug}/manage").status_code in (401, 403)
@@ -509,3 +638,230 @@ def test_a_malformed_notify_agent_id_never_fails_the_paid_create(tmp_path, monke
 
     body = main_mod.CreateStoreBody(description="x", notify_agent_id="not-an-id")
     assert main_mod.b2b.parse_agent_id(body.notify_agent_id) is None
+
+
+# ------------------------------------------------ detaching: the one-way door
+# A merchant reported that attaching goods could never be undone: DELETE 405, and
+# POST with active:false / an empty payload both 422 on the create schema. That
+# left the store advertising fulfilment "automatic" — a claim a buying agent acts
+# on without a human reading anything — with no way to withdraw it.
+@respx.mock
+def test_detach_flips_the_store_back_to_merchant_fulfilment(tmp_path, monkeypatch):
+    slug, key = _manage_key(
+        monkeypatch, tmp_path, "Detach", deliverable={"kind": "text", "payload": "G"}
+    )
+    auth = {"Authorization": f"Bearer {key}"}
+    assert (
+        client.get(f"/s/{slug}/feed.json").json()["store"]["fulfilment"] == "automatic"
+    )
+
+    r = client.delete(f"/api/stores/{slug}/deliverable", headers=auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["configured"] is False and r.json()["detached"] == 1
+    # the machine-readable claim must actually withdraw, in the surface an agent reads
+    assert (
+        client.get(f"/s/{slug}/feed.json").json()["store"]["fulfilment"] == "merchant"
+    )
+    assert (
+        client.get(f"/api/stores/{slug}/deliverable", headers=auth).json()["configured"]
+        is False
+    )
+
+
+@respx.mock
+def test_detach_is_idempotent_and_key_gated(tmp_path, monkeypatch):
+    slug, key = _manage_key(
+        monkeypatch, tmp_path, "Twice", deliverable={"kind": "text", "payload": "G"}
+    )
+    auth = {"Authorization": f"Bearer {key}"}
+    assert (
+        client.delete(f"/api/stores/{slug}/deliverable", headers=auth).status_code
+        == 200
+    )
+    # a retry after a timeout must be a no-op, not a 404
+    second = client.delete(f"/api/stores/{slug}/deliverable", headers=auth)
+    assert second.status_code == 200 and second.json()["detached"] == 0
+    # and it is owner-only
+    assert client.delete(f"/api/stores/{slug}/deliverable").status_code in (401, 403)
+
+
+@respx.mock
+def test_detach_does_not_revoke_what_a_buyer_already_received(tmp_path, monkeypatch):
+    # DEACTIVATES, never deletes. Entitlement.deliverable_id is an FK and the claim
+    # paths resolve the row by id, so a delivered buyer keeps their goods.
+    from app.models import Entitlement
+
+    slug, key = _manage_key(
+        monkeypatch, tmp_path, "Kept", deliverable={"kind": "license", "payload": None}
+    )
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        _deliver_order(store.id, oid="detach-keep")
+        ent = s.scalar(select(Entitlement).where(Entitlement.order_id == "detach-keep"))
+        assert ent is not None and ent.license_key
+        key_before, deliverable_id = ent.license_key, ent.deliverable_id
+
+    client.delete(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    )
+
+    with SessionLocal() as s:
+        row = s.get(Deliverable, deliverable_id)
+        assert row is not None, "the row must survive — an FK points at it"
+        assert row.active is False
+        ent = s.scalar(select(Entitlement).where(Entitlement.order_id == "detach-keep"))
+        assert ent.license_key == key_before and ent.revoked_at is None
+
+
+@respx.mock
+def test_detach_refuses_while_an_order_is_paid_but_undelivered(tmp_path, monkeypatch):
+    # checkout.deliver resolves the deliverable at DELIVERY time, so detaching in
+    # the gap between payment landing and delivery running would hand a buyer the
+    # placeholder text after their money was irrevocable.
+    from app.models import Order
+
+    slug, key = _manage_key(
+        monkeypatch, tmp_path, "Race", deliverable={"kind": "text", "payload": "G"}
+    )
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        s.add(
+            Order(
+                id="race-ord",
+                store_id=store.id,
+                pay_to=store.pay_to,
+                amount_micro=1_000_000,
+                expected_micro=1_000_000,
+                status="confirmed",  # funds in, delivery not yet run
+            )
+        )
+        s.commit()
+    r = client.delete(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    )
+    assert r.status_code == 409
+    assert "not been delivered yet" in r.json()["detail"]
+    # and the goods are still attached, so the pending delivery still mints them
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        assert (
+            s.scalar(
+                select(Deliverable).where(
+                    Deliverable.store_id == store.id, Deliverable.active.is_(True)
+                )
+            )
+            is not None
+        )
+
+
+@respx.mock
+def test_detach_refuses_while_a_metered_channel_holds_prepaid_balance(
+    tmp_path, monkeypatch
+):
+    # MPP has NO Order rows, so the order guard above is structurally blind to it:
+    # a buyer funds a channel and draws units down later, each redemption resolving
+    # the deliverable at that moment.
+    from app.models import MppChannel, Product
+
+    slug, key = _manage_key(
+        monkeypatch, tmp_path, "Metered", deliverable={"kind": "text", "payload": "G"}
+    )
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        product = s.scalar(select(Product).where(Product.store_id == store.id))
+        s.add(
+            MppChannel(
+                store_id=store.id,
+                product_id=product.id,
+                channel_id="ch-prepaid",
+                pay_to=store.pay_to,
+                deposit_micro=2_000_000,
+                spent_micro=100_000,  # 1.9 USDT still prepaid and unspent
+                unit_price_micro=100_000,
+                status="open",
+            )
+        )
+        s.commit()
+    r = client.delete(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    )
+    assert r.status_code == 409
+    assert "prepaid" in r.json()["detail"]
+
+    # fully drawn down => nothing left to strand => detach allowed
+    with SessionLocal() as s:
+        ch = s.scalar(select(MppChannel).where(MppChannel.channel_id == "ch-prepaid"))
+        ch.spent_micro = ch.deposit_micro
+        s.commit()
+    assert (
+        client.delete(
+            f"/api/stores/{slug}/deliverable",
+            headers={"Authorization": f"Bearer {key}"},
+        ).status_code
+        == 200
+    )
+
+
+@respx.mock
+def test_detach_shows_what_buyers_will_now_get_and_warns_a_listed_store(
+    tmp_path, monkeypatch
+):
+    # The message buyers now receive is echoed so the merchant SEES it rather than
+    # learning it from a complaint; and a marketplace-LISTED store is warned that
+    # its on-chain listing text ("delivered as soon as the payment clears") is now
+    # an overclaim — listing edits are user-gated, so a silent detach would leave
+    # a stale claim on the most public surface there is.
+    slug, key = _manage_key(
+        monkeypatch, tmp_path, "Listed", deliverable={"kind": "text", "payload": "G"}
+    )
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        store.marketplace_status = "listed"
+        s.commit()
+    r = client.delete(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["delivery_message"]  # never empty — falls back to the default
+    assert any("LISTED" in w for w in body["warnings"])
+
+
+@respx.mock
+def test_detach_warns_when_subscription_products_keep_billing(tmp_path, monkeypatch):
+    # Renewals settle at the facilitator BEFORE our delivery hook runs and there is
+    # no local subscriber table to wait on — so this cannot be a 409 like the
+    # order/channel guards. It must be said, not hidden.
+    from app.models import Product
+
+    slug, key = _manage_key(
+        monkeypatch, tmp_path, "Subbed", deliverable={"kind": "text", "payload": "G"}
+    )
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        product = s.scalar(select(Product).where(Product.store_id == store.id))
+        product.pricing_model = "subscription"
+        s.commit()
+    r = client.delete(
+        f"/api/stores/{slug}/deliverable", headers={"Authorization": f"Bearer {key}"}
+    )
+    assert r.status_code == 200
+    assert any("subscription" in w for w in r.json()["warnings"])
+
+
+@respx.mock
+def test_manage_index_advertises_the_detach(tmp_path, monkeypatch):
+    # The index exists because a merchant probed 21 routes for a capability we
+    # never named. The detach was built after that lesson; shipping it unlisted
+    # would repeat the exact failure it answers.
+    slug, key = _manage_key(monkeypatch, tmp_path, "Advertised")
+    b = client.get(
+        f"/api/stores/{slug}/manage", headers={"Authorization": f"Bearer {key}"}
+    ).json()
+    entry = next(
+        e
+        for e in b["manage_key_endpoints"]
+        if e["path"] == f"/api/stores/{slug}/deliverable"
+    )
+    assert entry["method"] == "GET/POST/DELETE"
+    assert "detach" in entry["does"]

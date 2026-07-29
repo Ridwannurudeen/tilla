@@ -958,6 +958,16 @@ def test_store_agent_view_hidden_reports_not_listed(make_store):
     assert body["discovery"] == {"listed": False, "reason": "hidden"}
 
 
+def test_merchant_contact_rejects_agent_id_outside_persisted_integer_range():
+    token = _merchant_token(Account.create())
+    r = client.post(
+        "/api/merchant/contact",
+        headers=_auth(token),
+        json={"notify_agent_id": str(2**63)},
+    )
+    assert r.status_code == 422
+
+
 # --------------------------------------------- plain-language store copy editing
 @respx.mock
 def test_merchant_edit_store_copy_rerenders(make_store, tmp_path, monkeypatch):

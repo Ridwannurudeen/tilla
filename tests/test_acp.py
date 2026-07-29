@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 import app.main as main
 from app import chain, config
 from app.db import SessionLocal
-from app.models import AcpSession, Order, ProcessedTransfer
+from app.models import AcpSession, Order, ProcessedTransfer, Product
 
 client = TestClient(main.app)
 
@@ -115,6 +115,39 @@ def test_create_defaults_to_primary_product(make_store, acp_on):
     r = client.post("/s/acp-c2/checkout_sessions", json={})
     assert r.status_code == 201, r.text
     assert r.json()["status"] == "ready_for_payment"
+
+
+def test_create_requires_and_persists_declared_buyer_inputs(make_store, acp_on):
+    store_id = make_store(slug="acp-inputs", pay_to="0x" + "a" * 40)
+    product_id = _pid(store_id)
+    with SessionLocal() as s:
+        product = s.get(Product, product_id)
+        product.buyer_inputs = [
+            {"name": "token_address", "label": "Token", "required": True}
+        ]
+        s.commit()
+
+    missing = client.post(
+        "/s/acp-inputs/checkout_sessions",
+        json={"items": [{"id": product_id, "quantity": 1}]},
+    )
+    assert missing.status_code == 422
+    assert "token_address" in missing.json()["detail"]
+    with SessionLocal() as s:
+        assert s.scalars(select(Order).where(Order.store_id == store_id)).all() == []
+
+    created = client.post(
+        "/s/acp-inputs/checkout_sessions",
+        json={
+            "items": [{"id": product_id, "quantity": 1}],
+            "inputs": {"token_address": "0xabc"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["buyer_inputs"] == {"token_address": "0xabc"}
+    with SessionLocal() as s:
+        acp = s.get(AcpSession, created.json()["id"])
+        assert s.get(Order, acp.order_id).buyer_inputs == {"token_address": "0xabc"}
 
 
 def test_create_rejects_bad_line_item(make_store, acp_on):

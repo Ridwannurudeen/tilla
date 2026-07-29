@@ -116,12 +116,19 @@ def openai_aggregate(request: Request, session: Session = Depends(get_session)):
     )
     base = config.PUBLIC_BASE_URL.rstrip("/")
     products: list[dict] = []
+    # Count only stores that CONTRIBUTE — a paused store (no active product, now a
+    # reachable state) adds zero products, and a store_count larger than the set of
+    # stores actually represented reads to a consumer as missing rows.
+    contributing = 0
     for store in stores:
         store_url = f"{base}/s/{store.slug}/"
-        for p in _active_products(session, store.id):
+        rows = _active_products(session, store.id)
+        if rows:
+            contributing += 1
+        for p in rows:
             products.append(_openai_product(store, p, store_url, include_store=True))
     body = {
-        "feed": {"name": "Tilla", "url": base, "store_count": len(stores)},
+        "feed": {"name": "Tilla", "url": base, "store_count": contributing},
         "products": products,
     }
     return JSONResponse(body, headers=agentic._AGENT_HEADERS)

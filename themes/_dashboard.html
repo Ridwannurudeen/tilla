@@ -562,9 +562,12 @@
       </div>
       <div class="row" style="margin-top:12px">
         <button id="dSet" class="primary">Set deliverable</button>
+        <button id="dDetach">Detach</button>
       </div>
       <p class="muted small">Replacing a deliverable only changes the chosen scope for new orders —
-         buyers who already paid keep the version they bought.</p>
+         buyers who already paid keep the version they bought. Detaching stops automatic
+         fulfilment for the chosen scope: new buyers receive your delivery message instead,
+         and it is refused while any paid order or funded metered channel is still owed goods.</p>
     </div>
     </div>
 
@@ -2178,6 +2181,33 @@
     btn.disabled = false;
   }
 
+  async function detachDeliverable() {
+    if (!LAST_STORE) return;
+    var sel = byId("dScope");
+    var pid = sel.value; // "" = store default
+    var scopeName = pid ? sel.options[sel.selectedIndex].textContent : "the store default";
+    // The server refuses while paid orders / funded channels are owed goods, so
+    // this confirm is about intent, not safety.
+    if (!confirm("Stop automatic fulfilment for " + scopeName + "? New buyers will receive your delivery message instead. Buyers already delivered keep what they paid for.")) return;
+    var path = "/api/stores/" + encodeURIComponent(LAST_STORE) + "/deliverable" +
+      (pid ? "?product_id=" + encodeURIComponent(pid) : "");
+    var btn = byId("dDetach"); btn.disabled = true;
+    try {
+      var r = await api(path, { method: "DELETE" });
+      await loadDeliverables(LAST_STORE);
+      var msg = r.detached
+        ? "Detached " + scopeName + " — new buyers now receive your delivery message."
+        : "Nothing was attached for " + scopeName + ".";
+      if (r.warnings && r.warnings.length) msg += " Note: " + r.warnings.join(" Also: ");
+      dmsg(msg, !!(r.warnings && r.warnings.length));
+    } catch (e) {
+      // 409 carries the reason a detach is refused (undelivered paid orders /
+      // funded channels) — show it verbatim, it tells the merchant what to wait for.
+      dmsg(e.status === 409 ? e.message : delivErr(e), true);
+    }
+    btn.disabled = false;
+  }
+
   // ---- store copy (plain-language tagline / one-liner; screened server-side,
   //      re-renders the storefront; every value set via input.value, never raw markup) ----
   function scmsg(text, isErr) {
@@ -2353,6 +2383,7 @@
   byId("scSave").onclick = saveStoreCopy;
   byId("dKind").onchange = syncDeliverableKind;
   byId("dSet").onclick = setDeliverable;
+  byId("dDetach").onclick = detachDeliverable;
   byId("whSave").onclick = saveWebhook;
   byId("whDelete").onclick = deleteWebhook;
   byId("csvOrders").onclick = function () { downloadCsv("/api/merchant/export/orders.csv", "orders.csv"); };

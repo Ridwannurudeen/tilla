@@ -17,7 +17,7 @@ from sqlalchemy import select
 import app.main as main
 from app import agentic, b2b, config, delivery
 from app.db import SessionLocal
-from app.models import Product, Store
+from app.models import Deliverable, Product, Store
 from fastapi.testclient import TestClient
 
 client = TestClient(main.app)
@@ -149,6 +149,38 @@ def test_feed_input_schema_advertises_what_the_merchant_demands(make_store):
     # only the required one is required, and the buy body itself becomes required
     assert isch["properties"]["inputs"]["required"] == ["token_address"]
     assert isch["required"] == ["inputs"]
+
+
+def test_get_product_omits_deliverable_kind_when_nothing_is_attached(make_store):
+    # The old default reported "text" for a store with NOTHING attached — an agent
+    # read a claim that a text deliverable existed while the same store's feed said
+    # fulfilment "merchant". The enum cannot express "none", so absence is how none
+    # is said, and the pinned schema stopped requiring the field the same day.
+    make_store(slug="pg-nokind", price_micro=9_000_000)
+    pid = _product_id("pg-nokind")
+    sc = _mcp(
+        "pg-nokind",
+        "tools/call",
+        {"name": "get_product", "arguments": {"product_id": pid}},
+    )["result"]["structuredContent"]
+    jsonschema.validate(sc, MCP_PRODUCT_SCHEMA)
+    assert "deliverable_kind" not in sc
+    assert sc["fulfilment"] == "merchant"
+    # attach real goods -> the kind appears and fulfilment flips, still valid
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == "pg-nokind"))
+        s.add(
+            Deliverable(store_id=store.id, kind="text", payload="the goods", version=1)
+        )
+        s.commit()
+    sc2 = _mcp(
+        "pg-nokind",
+        "tools/call",
+        {"name": "get_product", "arguments": {"product_id": pid}},
+    )["result"]["structuredContent"]
+    jsonschema.validate(sc2, MCP_PRODUCT_SCHEMA)
+    assert sc2["deliverable_kind"] == "text"
+    assert sc2["fulfilment"] == "automatic"
 
 
 def test_quote_base_only_validates(make_store):

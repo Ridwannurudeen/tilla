@@ -34,7 +34,7 @@ properties:
       # emit a Tilla-specific key.
       fulfilment:
         type: string
-        enum: [automatic, merchant]
+        enum: [automatic, merchant, mixed]
   products:
     type: array
     items:
@@ -68,6 +68,27 @@ properties:
         sla_minutes:
           type: integer
           minimum: 1
+        # Buyer-provided values required before this specific product may be sold.
+        # An empty array means a bodyless buy is valid for this product.
+        buyer_inputs:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, label, required]
+            properties:
+              name:
+                type: string
+              label:
+                type: string
+              required:
+                type: boolean
+        # Product-specific delivery truth. A mixed store can still have an
+        # automatic product and a merchant-fulfilled product, so this takes
+        # precedence over store.fulfilment when selecting an item.
+        fulfilment:
+          type: string
+          enum: [automatic, merchant]
         price:
           type: object
           additionalProperties: false

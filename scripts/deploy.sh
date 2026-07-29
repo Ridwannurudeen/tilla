@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Deploy Tilla to the VPS by shipping changed files individually.
-# Never a full-directory clobber: stores/ and .env are server-owned
-# (the www/ pages listed below are repo-owned; the rest of www/ stays server-owned).
+# Deploy Tilla to the VPS through a fully staged, consistency-preserving update.
+# Never a full-directory clobber: stores/, deliverables/, tilla.db*, and .env are
+# server-owned (the www/ pages listed below are repo-owned; the rest of www/ stays
+# server-owned).
 set -euo pipefail
 
 VPS="root@75.119.153.252"
@@ -31,58 +32,165 @@ cd "$(dirname "$0")/.."
 mapfile -t FILES < <(git ls-files \
   'app/*.py' \
   'assets/embed.js' \
+  'pyproject.toml' \
   'alembic.ini' 'alembic/env.py' 'alembic/script.py.mako' 'alembic/versions/*.py' \
   'scripts/*.sh' 'scripts/*.py' \
   'themes/*' \
-  'www/*' | grep -v '^scripts/deploy\.sh$')
+  'www/*' \
+  'sidecar/*' | grep -v '^scripts/deploy\.sh$')
 
-# Subscription sidecar (Node). node_modules is server-owned (installed via
-# `npm ci --omit=dev`), never scp'd. The systemd unit is copied once by hand
-# (see deploy/tilla-sidecar.service header); here we only refresh the JS.
-mapfile -t SIDECAR_FILES < <(git ls-files 'sidecar/*')
+# A running Python or Node process must never observe a mixture of old and new
+# modules. This is deliberately *not* called an atomic deploy: both services are
+# stopped only after the complete release has reached the VPS, then started once the
+# code, dependencies, migrations, and import have succeeded. The short maintenance
+# window is safer than pretending file-by-file replacement is atomic.
+RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD)"
+STAGE="$REMOTE/.deploy-stage-$RELEASE_ID"
+BACKUP="$REMOTE/.deploy-backup-$RELEASE_ID"
+MANIFEST="$STAGE/.manifest"
+DEPLOYING=0
+SIDECAR_WAS_ACTIVE=0
+SIDECAR_SHOULD_START=0
 
-# Ship ATOMICALLY. Copying 85 files one scp at a time leaves a minutes-long window in
-# which the running unit's directory holds a mix of old and new modules; any restart in
-# that window (systemd Restart=always, the watchdog, an operator) boots torn code. Stage
-# everything under a temp dir first, then move it into place file-by-file — the moves are
-# local renames, so the window shrinks from minutes to milliseconds.
-STAGE="$REMOTE/.deploy-stage"
-ssh "$VPS" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
-for f in "${FILES[@]}"; do
-  ssh "$VPS" "mkdir -p '$STAGE/$(dirname "$f")'"
-  scp "$f" "$VPS:$STAGE/$f"
+cleanup_stage() {
+  ssh "$VPS" "rm -rf -- '$STAGE'" || true
+}
+
+rollback_code() {
+  local status=$?
+  trap - ERR
+  if [ "$DEPLOYING" = 1 ]; then
+    echo "deploy failed while services were stopped; restoring staged files" >&2
+    ssh "$VPS" "bash -s -- '$REMOTE' '$STAGE' '$BACKUP'" <<'REMOTE_ROLLBACK' || true
+set -euo pipefail
+remote=$1
+stage=$2
+backup=$3
+while IFS= read -r file; do
+  target="$remote/$file"
+  previous="$backup/files/$file"
+  if [ -e "$previous" ]; then
+    mkdir -p "$(dirname "$target")"
+    cp -p -- "$previous" "$target"
+  else
+    rm -f -- "$target"
+  fi
+done < "$stage/.manifest"
+REMOTE_ROLLBACK
+    ssh "$VPS" "systemctl start tilla-api" || true
+    if [ "$SIDECAR_WAS_ACTIVE" = 1 ]; then
+      ssh "$VPS" "systemctl start tilla-sidecar" || true
+    fi
+  fi
+  exit "$status"
+}
+
+trap cleanup_stage EXIT
+trap rollback_code ERR
+
+# Git owns this manifest, but reject unusual paths before placing one inside a
+# remote shell command. Persistent server-owned paths can never enter it.
+for file in "${FILES[@]}"; do
+  case "$file" in
+    "" | /* | *..* | *[!A-Za-z0-9._/-]*)
+      echo "unsafe deploy path: $file" >&2
+      exit 2
+      ;;
+  esac
 done
-for f in "${FILES[@]}"; do
-  ssh "$VPS" "mkdir -p '$REMOTE/$(dirname "$f")' && mv -f '$STAGE/$f' '$REMOTE/$f'"
-done
-ssh "$VPS" "rm -rf '$STAGE'"
+
+ssh "$VPS" "test ! -e '$STAGE' && test ! -e '$BACKUP' && mkdir -p '$STAGE'"
+tar -cf - "${FILES[@]}" | ssh "$VPS" "tar -xf - -C '$STAGE'"
+ssh "$VPS" "cd '$STAGE' && find . -type f -printf '%P\\n' | LC_ALL=C sort > '$MANIFEST'"
+remote_count=$(ssh "$VPS" "wc -l < '$MANIFEST'")
+[ "$remote_count" = "${#FILES[@]}" ] || {
+  echo "staged file count mismatch: expected ${#FILES[@]}, got $remote_count" >&2
+  exit 1
+}
+
+# The stage is complete before downtime. Compile only; importing app.main could
+# make network-backed startup work while a production process is still live.
+ssh "$VPS" "'$VENV/bin/python' -m compileall -q '$STAGE/app'"
+
+PYTHON_DEPS_CHANGED=0
+SIDECAR_DEPS_CHANGED=0
+ssh "$VPS" "cmp -s '$STAGE/pyproject.toml' '$REMOTE/pyproject.toml'" || PYTHON_DEPS_CHANGED=1
+ssh "$VPS" "cmp -s '$STAGE/sidecar/package-lock.json' '$REMOTE/sidecar/package-lock.json'" || SIDECAR_DEPS_CHANGED=1
+if ssh "$VPS" "systemctl is-enabled tilla-sidecar >/dev/null 2>&1"; then
+  SIDECAR_SHOULD_START=1
+fi
+if ssh "$VPS" "systemctl is-active --quiet tilla-sidecar"; then
+  SIDECAR_WAS_ACTIVE=1
+fi
+
+# Save precisely the repo-owned files that will be replaced. The rollback never
+# touches .env, database/WAL files, stores/, deliverables/, or any other VPS data.
+ssh "$VPS" "bash -s -- '$REMOTE' '$STAGE' '$BACKUP'" <<'REMOTE_BACKUP'
+set -euo pipefail
+remote=$1
+stage=$2
+backup=$3
+mkdir -p "$backup/files"
+: > "$backup/.existing"
+while IFS= read -r file; do
+  source="$remote/$file"
+  if [ -e "$source" ]; then
+    target="$backup/files/$file"
+    mkdir -p "$(dirname "$target")"
+    cp -p -- "$source" "$target"
+    printf '%s\n' "$file" >> "$backup/.existing"
+  fi
+done < "$stage/.manifest"
+REMOTE_BACKUP
+
+ssh "$VPS" "systemctl stop tilla-api"
+if [ "$SIDECAR_WAS_ACTIVE" = 1 ]; then
+  ssh "$VPS" "systemctl stop tilla-sidecar"
+fi
+DEPLOYING=1
+
+ssh "$VPS" "bash -s -- '$REMOTE' '$STAGE'" <<'REMOTE_APPLY'
+set -euo pipefail
+remote=$1
+stage=$2
+while IFS= read -r file; do
+  target="$remote/$file"
+  mkdir -p "$(dirname "$target")"
+  cp -p -- "$stage/$file" "$target"
+done < "$stage/.manifest"
+REMOTE_APPLY
 
 # The shell scripts must stay executable — cron runs backup_db.sh/backup_offsite.sh and
 # the watchdog timer execs watchdog.sh directly (scp does not preserve the +x bit).
 ssh "$VPS" "chmod +x '$REMOTE'/scripts/*.sh"
 
+# The project manifest is itself shipped. Reconcile Python packages only when it
+# changed, then verify the resulting virtualenv before migration/restart. Likewise
+# `npm ci` follows a package-lock change rather than leaving a stale sidecar tree.
+if [ "$PYTHON_DEPS_CHANGED" = 1 ]; then
+  ssh "$VPS" "cd '$REMOTE' && '$VENV/bin/pip' install --upgrade ."
+fi
+ssh "$VPS" "'$VENV/bin/pip' check"
+if [ "$SIDECAR_DEPS_CHANGED" = 1 ] || ! ssh "$VPS" "test -d '$REMOTE/sidecar/node_modules'"; then
+  ssh "$VPS" "cd '$REMOTE/sidecar' && npm ci --omit=dev"
+fi
+
 # Migrate BEFORE restart so new code never meets an old schema. Runs without the
-# systemd EnvironmentFile, so it relies on TILLA_DB_PATH being unset (default
-# /opt/tilla/tilla.db); do not source .env over ssh (keeps secrets out of argv).
+# systemd EnvironmentFile; do not source .env over ssh (keeps secrets out of argv).
 if [ -d alembic ]; then
   ssh "$VPS" "cd '$REMOTE' && '$VENV/bin/alembic' upgrade head"
 fi
 
 # Import any on-disk stores that have no DB row yet (idempotent — re-runs are
-# no-ops). Runs before the restart so a live store's checkout never 404s.
+# no-ops). Runs before restart so a live store's checkout never 404s.
 ssh "$VPS" "cd '$REMOTE' && '$VENV/bin/python' -m app.import_stores"
 
-# Refresh the subscription sidecar JS (dormant unless TILLA_SUBSCRIPTIONS_ENABLED
-# + OKX creds; bound to 127.0.0.1:8790, never nginx-exposed). Only restart it if
-# the unit is already installed — a missing unit is fine (subscribe proxy 503s).
-for f in "${SIDECAR_FILES[@]}"; do
-  ssh "$VPS" "mkdir -p '$REMOTE/$(dirname "$f")'"
-  scp "$f" "$VPS:$REMOTE/$f"
-done
-ssh "$VPS" "test -d '$REMOTE/sidecar/node_modules' || (cd '$REMOTE/sidecar' && npm ci --omit=dev)"
-ssh "$VPS" "systemctl is-enabled tilla-sidecar >/dev/null 2>&1 && systemctl restart tilla-sidecar || true"
-
-ssh "$VPS" "systemctl restart tilla-api"
+ssh "$VPS" "systemctl start tilla-api"
+if [ "$SIDECAR_SHOULD_START" = 1 ]; then
+  ssh "$VPS" "systemctl start tilla-sidecar"
+fi
+DEPLOYING=0
+trap - ERR
 
 # Smoke: health is up, both live stores still render (nginx serves them
 # statically — unaffected by the restart), and an unpaid create-store is still
@@ -196,4 +304,5 @@ if [ ${#SMOKE_FAILURES[@]} -ne 0 ]; then
   exit 1
 fi
 
+ssh "$VPS" "rm -rf -- '$BACKUP'"
 echo "deploy ok: health up, ready 200, live stores render, create-store gated (402)"

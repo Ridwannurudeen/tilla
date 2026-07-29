@@ -105,6 +105,12 @@
     color:var(--text); background:color-mix(in srgb,var(--text) 6%,transparent);
     border:1px solid color-mix(in srgb,var(--text) 20%,transparent); border-radius:3px; }
   #co .co-pwyw input:focus-visible{ outline:2px solid var(--text); outline-offset:2px; }
+  #co .co-inputs{ display:grid; gap:10px; }
+  #co .co-inputs label{ font-size:12px; font-weight:700; color:var(--text); }
+  #co .co-inputs input{ width:100%; margin-top:5px; padding:11px 12px; font:inherit;
+    color:var(--text); background:color-mix(in srgb,var(--text) 6%,transparent);
+    border:1px solid color-mix(in srgb,var(--text) 20%,transparent); border-radius:3px; }
+  #co .co-inputs input:focus-visible{ outline:2px solid var(--text); outline-offset:2px; }
   #co .co-oerr{ font-size:12px; font-weight:600; color:#F59E0B; }
   #co .co-manual{ margin-top:16px; }
   #co .co-qrwrap{ display:flex; justify-content:center; }
@@ -380,20 +386,22 @@
       if (productId != null) for (i = 0; i < prods.length; i++) if (String(prods[i].id) === String(productId)) { p = prods[i]; break; }
       if (!p && productIndex != null && productIndex >= 0 && productIndex < prods.length) p = prods[productIndex];
       if (!p) p = prods[0];
-      if (!p || !p.pricing) return null;
-      var model = p.pricing.model || "one_time";
-      var opts = null, pr = p.pricing.params;
+      if (!p) return null;
+      var pricing = p.pricing || {};
+      var model = pricing.model || "one_time";
+      var opts = null, pr = pricing.params;
+      var inputs = Array.isArray(p.buyer_inputs) ? p.buyer_inputs : [];
       if (pr) {
         var tiers = Array.isArray(pr.membership_tiers) ? pr.membership_tiers : null;
         var pwywMin = (typeof pr.pwyw_min_micro === "number") ? pr.pwyw_min_micro : null;
         if ((tiers && tiers.length) || pwywMin != null) opts = { tiers: tiers, pwywMin: pwywMin };
       }
-      return { model: model, opts: opts };
+      return { model: model, opts: opts, inputs: inputs };
     } catch (e) { return null; }
   }
   // Render the tier chooser / amount field. On confirm, _startPay is called with the
   // chosen `tier` name or `amount_micro` folded into the base payload.
-  function renderOptions(opts, productId, productIndex) {
+  function renderOptions(opts, productId, productIndex, inputFields) {
     var el = byId("coOptions"); el.textContent = ""; el.style.display = "block";
     byId("coManual").style.display = "none";
     byId("coAmount").textContent = "…";
@@ -410,7 +418,8 @@
         b.onclick = function () {
           clearOptions();
           var payload = buildPayload(productId, productIndex); payload.tier = t.name;
-          _startPay(payload);
+          if (inputFields && inputFields.length) renderBuyerInputs(inputFields, payload);
+          else _startPay(payload);
         };
         el.appendChild(b);
       });
@@ -433,6 +442,44 @@
       if (micro < BigInt(opts.pwywMin)) { err.textContent = "Minimum is " + minStr + " USDT0."; return; }
       clearOptions();
       var payload = buildPayload(productId, productIndex); payload.amount_micro = Number(micro);
+      if (inputFields && inputFields.length) renderBuyerInputs(inputFields, payload);
+      else _startPay(payload);
+    };
+    el.appendChild(wrap);
+  }
+  function renderBuyerInputs(fields, payload) {
+    var el = byId("coOptions"); el.textContent = ""; el.style.display = "block";
+    byId("coManual").style.display = "none";
+    var wrap = document.createElement("div"); wrap.className = "co-inputs";
+    var title = document.createElement("div"); title.className = "co-olabel";
+    title.textContent = "Details the merchant needs"; wrap.appendChild(title);
+    var controls = [];
+    fields.forEach(function (field, index) {
+      if (!field || typeof field.name !== "string" || !field.name.trim()) return;
+      var label = document.createElement("label");
+      var input = document.createElement("input");
+      input.id = "coBuyerInput" + index; input.type = "text"; input.name = field.name;
+      input.required = field.required !== false; input.autocomplete = "off";
+      label.htmlFor = input.id;
+      label.textContent = (typeof field.label === "string" && field.label.trim() ? field.label : field.name)
+        + (input.required ? " (required)" : " (optional)");
+      label.appendChild(input); wrap.appendChild(label);
+      controls.push({ name: field.name, input: input });
+    });
+    if (!controls.length) { _startPay(payload); return; }
+    var err = document.createElement("div"); err.className = "co-oerr"; wrap.appendChild(err);
+    var go = document.createElement("button"); go.type = "button"; go.className = "co-btn";
+    go.textContent = "Continue to payment"; go.style.marginTop = "4px"; wrap.appendChild(go);
+    go.onclick = function () {
+      var inputs = {}, missing = [];
+      controls.forEach(function (control) {
+        var value = control.input.value.trim();
+        if (!value && control.input.required) missing.push(control.name);
+        else if (value) inputs[control.name] = value;
+      });
+      if (missing.length) { err.textContent = "Complete the required details before payment."; return; }
+      payload.inputs = inputs;
+      clearOptions();
       _startPay(payload);
     };
     el.appendChild(wrap);
@@ -471,8 +518,16 @@
     // is folded into the checkout call.
     var pricing = await loadProductPricing(productId, productIndex);
     if (pricing && pricing.model === "subscription") { _startSubscribe(); return; }
-    if (pricing && pricing.opts) { renderOptions(pricing.opts, productId, productIndex); return; }
-    _startPay(buildPayload(productId, productIndex));
+    if (pricing && pricing.opts) {
+      renderOptions(pricing.opts, productId, productIndex, pricing.inputs);
+      return;
+    }
+    var payload = buildPayload(productId, productIndex);
+    if (pricing && pricing.inputs && pricing.inputs.length) {
+      renderBuyerInputs(pricing.inputs, payload);
+      return;
+    }
+    _startPay(payload);
   }
   async function _startPay(payload) {
     var d;

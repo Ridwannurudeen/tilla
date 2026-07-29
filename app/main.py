@@ -78,6 +78,7 @@ from app.models import (
     EmailSubscriber,
     Entitlement,
     Merchant,
+    MppChannel,
     Order,
     Product,
     Review,
@@ -417,9 +418,11 @@ def merchant_profile(
 ):
     """Phase 4 link-in-bio: a merchant's PUBLIC 'all my stores' profile — their LIVE,
     PUBLIC stores (Phase 1.7 visibility) as one shareable page. Hidden/pending/blocked
-    stores are excluded (the same filter as discovery + the sitemap). An unknown
-    address, a malformed address, or a merchant with no public stores is a uniform 404
-    (no existence oracle). Store names/descriptions are screened LLM copy rendered
+    stores are excluded (the same filter as the sitemap; note discovery additionally
+    excludes stores with no active product, deliberately NOT mirrored here — a
+    direct link to a paused store should keep resolving even while bulk discovery
+    stops recommending it). An unknown address, a malformed address, or a merchant
+    with no public stores is a uniform 404 (no existence oracle). Store names/descriptions are screened LLM copy rendered
     through the autoescaped Jinja env, so they stay inert text; the wallet shown is
     already public (it is every store's on-chain receive address)."""
     addr = address.lower()
@@ -724,6 +727,7 @@ def _run_create_store(
             theme=theme,
             deliverable=deliverable,
             notify_agent_id=notify_agent_id,
+            sandbox=receive_address is None,
         )
     except ScreeningBlocked as exc:
         logger.warning(
@@ -770,7 +774,14 @@ def create_store_post(request: Request, body: CreateStoreBody | None = None):
         deliverable=body.deliverable.model_dump() if body.deliverable else None,
         notify_agent_id=notify_agent_id,
     )
-    if defaulted and isinstance(result, dict):
+    if isinstance(result, dict) and result.get("status") == "sandbox":
+        result["note"] = (
+            "no merchant receive_address provided; a hidden, non-payable sample "
+            "store was generated. POST "
+            '{"description": "what you sell", "receive_address": "0x..."} '
+            "to create a payable merchant store"
+        )
+    elif defaulted and isinstance(result, dict):
         # Additive: tell the (machine) caller what happened, so an agent that
         # meant to pass a description can see its input never arrived.
         result["note"] = (
@@ -1228,6 +1239,9 @@ class CheckoutCreateBody(BaseModel):
     # -> the product list price, byte-identical to the pre-storefront-depth flow.
     tier: str | None = Field(default=None, max_length=60)
     amount_micro: StrictInt | None = None
+    # Per-product merchant requirements (for example, a token address for a
+    # research report). Validated and persisted by checkout.create_order.
+    inputs: dict[str, str] | None = None
 
     @field_validator("ref")
     @classmethod
@@ -1342,7 +1356,12 @@ def create_checkout(
     price_override = _resolve_checkout_price(product, tier, chosen_amount)
     try:
         order = checkout.create_order(
-            session, store, product, referrer_addr, price_micro_override=price_override
+            session,
+            store,
+            product,
+            referrer_addr,
+            price_micro_override=price_override,
+            buyer_inputs=body.inputs if body is not None else None,
         )
     except checkout.AmountUnavailable as exc:
         raise HTTPException(503, "checkout busy, retry") from exc
@@ -1467,11 +1486,16 @@ def _authorize_order_email(request: Request, session: Session, order: Order) -> 
 
 def _deactivate_deliverables(
     session: Session, store_id: int, product_id: int | None = None
-) -> None:
+) -> int:
     """Flip active deliverables inactive within one scope: the store-level default
     (product_id NULL) when product_id is None, else just that product's — so
     setting a per-product deliverable never disturbs the store default or other
-    products' deliverables (and vice versa)."""
+    products' deliverables (and vice versa).
+
+    Returns how many rows it flipped. One conditional UPDATE rather than a
+    read-then-write: a concurrent replace committing between a SELECT and its
+    flush would otherwise be clobbered, or counted as detached while it stayed
+    live."""
     stmt = update(Deliverable).where(
         Deliverable.store_id == store_id, Deliverable.active.is_(True)
     )
@@ -1479,7 +1503,7 @@ def _deactivate_deliverables(
         stmt = stmt.where(Deliverable.product_id.is_(None))
     else:
         stmt = stmt.where(Deliverable.product_id == product_id)
-    session.execute(stmt.values(active=False))
+    return session.execute(stmt.values(active=False)).rowcount or 0
 
 
 def _deliverable_product_id(session: Session, store: Store, raw: object) -> int | None:
@@ -1969,11 +1993,29 @@ def manage_index(
     products = session.scalars(
         select(Product).where(Product.store_id == store.id).order_by(Product.id)
     ).all()
-    active = session.scalar(
+    active_rows = session.scalars(
         select(Deliverable)
         .where(Deliverable.store_id == store.id, Deliverable.active.is_(True))
         .order_by(Deliverable.id.desc())
-    )
+    ).all()
+    # Match checkout._active_deliverable exactly: an active product-specific row
+    # wins; otherwise the newest store-level row applies.  The old manage index
+    # read one arbitrary newest row and called the whole store automatic, which is
+    # false for a mixed catalogue.
+    active_by_scope: dict[int | None, Deliverable] = {}
+    for row in active_rows:
+        active_by_scope.setdefault(row.product_id, row)
+    resolved_by_product = {
+        product.id: active_by_scope.get(product.id) or active_by_scope.get(None)
+        for product in products
+    }
+    automatic_count = sum(row is not None for row in resolved_by_product.values())
+    if automatic_count == len(products) and products:
+        fulfilment_mode = "automatic"
+    elif automatic_count:
+        fulfilment_mode = "mixed"
+    else:
+        fulfilment_mode = "merchant"
     return {
         "slug": store.slug,
         "status": store.status,
@@ -1989,28 +2031,57 @@ def manage_index(
                 # means a bodyless buy succeeds, which is right for a file but wrong
                 # for a service that needs to know what to work on.
                 "buyer_inputs": agentic.declared_buyer_inputs(p),
+                "fulfilment": (
+                    "automatic" if resolved_by_product[p.id] is not None else "merchant"
+                ),
             }
             for p in products
         ],
+        # All active rows, with product_id exposing the scope.  Never include a
+        # text payload: that can itself be the merchant's digital good.
+        "deliverables": [
+            {
+                "id": row.id,
+                "product_id": row.product_id,
+                "kind": row.kind,
+                "version": row.version,
+            }
+            for row in active_rows
+        ],
+        # Backward-compatible store-default summary only.  A product-specific row
+        # must not masquerade as a store-wide deliverable for older callers.
         "deliverable": (
-            {"id": active.id, "kind": active.kind, "version": active.version}
-            if active
+            {
+                "id": active_by_scope[None].id,
+                "kind": active_by_scope[None].kind,
+                "version": active_by_scope[None].version,
+            }
+            if active_by_scope.get(None)
             else None
         ),
-        # `deliverable: null` is a fact the holder still has to interpret. State the
-        # consequence instead: 36 of 38 live stores were in this position and their
-        # merchants had no way to learn it after the create response scrolled past.
         "fulfilment": (
             {
-                "mode": agentic.fulfilment_mode(active is not None),
+                "mode": fulfilment_mode,
                 "means": (
                     "buyers receive a licence key or a signed download link "
                     "automatically when they pay"
                 ),
             }
-            if active is not None
+            if fulfilment_mode == "automatic"
             else {
-                "mode": agentic.fulfilment_mode(False),
+                "mode": "mixed",
+                "means": (
+                    "some products deliver automatically and others require your "
+                    "direct fulfilment; inspect each product's fulfilment field"
+                ),
+                "to_automate": (
+                    f"POST /api/stores/{store.slug}/deliverable with this key "
+                    "and product_id for each remaining merchant-fulfilled product"
+                ),
+            }
+            if fulfilment_mode == "mixed"
+            else {
+                "mode": "merchant",
                 "means": (
                     "buyers receive your delivery message and nothing else — "
                     "Tilla hands over no goods, so you fulfil each sale yourself"
@@ -2029,11 +2100,17 @@ def manage_index(
                 "cost": "free",
             },
             {
-                "method": "GET/POST",
+                # DELETE listed the day it shipped. This index exists because a
+                # merchant probed 21 routes for a capability we never named; the
+                # detach was built after that lesson and must not repeat it.
+                "method": "GET/POST/DELETE",
                 "path": f"/api/stores/{store.slug}/deliverable",
                 "does": (
-                    "read or set the goods buyers receive — multipart `file`, or "
-                    "JSON {kind: text|license, payload}"
+                    "read, set, or detach the goods buyers receive — multipart "
+                    "`file`, JSON {kind: text|license, payload}, or DELETE "
+                    "(optionally ?product_id=) to stop automatic fulfilment; "
+                    "refused while paid orders or funded metered channels are "
+                    "still owed goods"
                 ),
                 "cost": "free",
             },
@@ -2150,6 +2227,157 @@ def get_deliverable(
         resp["max_activations"] = d.max_activations
     else:
         resp["payload"] = d.payload
+    return resp
+
+
+@app.delete("/api/stores/{slug}/deliverable")
+@limiter.limit("20/minute")
+def detach_deliverable(
+    request: Request,
+    slug: str = Path(..., pattern=config.SLUG_PATTERN),
+    product_id: int | None = None,
+    session: Session = Depends(get_session),
+):
+    """Stop offering goods automatically. Same manage-key gate as GET and POST.
+
+    Attaching was a ONE-WAY DOOR: a merchant reported DELETE 405, and POST with
+    ``active:false`` / an empty payload both 422 on the create schema, so a
+    deliverable could never be taken off. That left the store advertising
+    ``fulfilment: automatic`` — a machine-readable claim a buying agent acts on
+    without a human reading anything — with no way to withdraw it.
+
+    DEACTIVATES, never deletes. ``Entitlement.deliverable_id`` is a foreign key
+    and the download path resolves the row by id straight from the signed token,
+    gating on the entitlement's ``revoked_at`` rather than on this flag — so a
+    buyer who has already been DELIVERED keeps their licence key and download.
+
+    But delivery is not the same moment as payment, and that gap is the whole
+    difficulty here. ``checkout.deliver`` resolves the deliverable when it runs,
+    not when the buyer paid, and it only mints an Entitlement if one is active
+    THEN. So an order whose funds have landed but whose delivery has not yet run —
+    on-chain confirmations pending, a late payment being promoted, an agent's
+    settle in flight — would be handed the plain text fallback and no goods, after
+    the money was irrevocable. That is this project's oldest failure (taking
+    payment and handing over nothing) reintroduced through a race, so the detach
+    REFUSES with 409 while any such order exists. The merchant waits minutes, not
+    forever; the reaper voids anything genuinely stuck.
+
+    Scoped like the POST rather than store-wide: bare detaches the store-level
+    default, ``?product_id=`` detaches that product's. A store-wide sweep would
+    silently withdraw per-product goods a merchant could not even see, since GET
+    returns only the newest row.
+
+    Idempotent: a store with nothing attached is a 200 describing that state, not
+    a 404. Detaching twice is a no-op, which is what an agent retrying a timeout
+    needs."""
+    store = session.scalar(select(Store).where(Store.slug == slug))
+    if store is None:
+        raise HTTPException(404, "store not found")
+    _require_store_key(request, store, session)
+    # Funds committed, goods not yet handed over. 'detected' is on-chain but still
+    # short of the confirmation floor; READY_TO_DELIVER is paid and awaiting the
+    # sweeper tick that delivers it.
+    in_flight = session.scalar(
+        select(func.count())
+        .select_from(Order)
+        .where(
+            Order.store_id == store.id,
+            Order.status.in_(("detected",) + checkout.READY_TO_DELIVER),
+        )
+    )
+    if in_flight:
+        raise HTTPException(
+            409,
+            f"{in_flight} paid order(s) have not been delivered yet; detaching now "
+            "would hand them the delivery message instead of the goods they paid "
+            "for. Retry once they have been delivered.",
+        )
+    # MPP is prepaid and has NO Order rows at all ("MPP has no per-voucher Order",
+    # mpp._metered_unit_payload), so the count above is structurally blind to it: a
+    # buyer who funded a channel draws units down later, and each redemption
+    # resolves the deliverable AT THAT MOMENT. Detaching mid-channel converts
+    # money they have already committed into the placeholder message.
+    #
+    # The exit is closing the channel, which refunds the unspent remainder
+    # on-chain — the merchant settles with the buyer rather than keeping the
+    # deposit and withdrawing the goods.
+    unspent = session.scalar(
+        select(func.count())
+        .select_from(MppChannel)
+        .where(
+            MppChannel.store_id == store.id,
+            MppChannel.status == "open",
+            MppChannel.spent_micro < MppChannel.deposit_micro,
+        )
+    )
+    if unspent:
+        raise HTTPException(
+            409,
+            f"{unspent} metered channel(s) still hold prepaid, unspent balance on "
+            "this store; detaching now would take goods a buyer has already paid "
+            "for. Close them (POST /s/<slug>/mpp/close refunds the remainder) "
+            "before detaching.",
+        )
+    detached = _deactivate_deliverables(session, store.id, product_id)
+    if detached:
+        log_event(
+            session,
+            "merchant",
+            "deliverable.detached",
+            store_id=store.id,
+            data={"count": detached, "product_id": product_id},
+        )
+    session.commit()
+    resp: dict = {
+        "configured": False,
+        "detached": detached,
+        "scope": "product" if product_id is not None else "store",
+        "note": (
+            "buyers now receive the store's delivery message instead of minted "
+            "goods; this store reports fulfilment 'merchant' once nothing active "
+            "remains. Already-delivered buyers keep the licence keys and downloads "
+            "they paid for. POST to this same path to attach goods again."
+        ),
+        # What a buyer will now actually receive after paying — shown so the
+        # merchant SEES it rather than discovering it from a buyer's complaint.
+        # For a store created with goods attached this is often still the
+        # "merchant has not configured fulfilment" placeholder, which reads wrong
+        # for a deliberate detach; POST /api/merchant/stores/<slug>/description
+        # sets a proper message.
+        "delivery_message": (
+            store.delivery if store.delivery else checkout.DEFAULT_DELIVERY
+        ),
+    }
+    warnings = []
+    if store.marketplace_status == "listed":
+        # The on-chain OKX listing text bakes in "delivered as soon as the payment
+        # clears" (mark_listed.describe). Listing edits are user-gated by design,
+        # so this cannot be fixed automatically — but leaving it silent is the
+        # stale-persisted-claim failure again, on the most public surface there is.
+        warnings.append(
+            "this store is LISTED on the OKX marketplace and its listing text "
+            "promises delivery on payment; that text is now an overclaim until "
+            "the listing is updated or goods are re-attached"
+        )
+    has_subscription = session.scalar(
+        select(func.count())
+        .select_from(Product)
+        .where(
+            Product.store_id == store.id,
+            Product.active.is_(True),
+            Product.pricing_model == "subscription",
+        )
+    )
+    if has_subscription:
+        # Renewals settle at the facilitator BEFORE our delivery hook runs, and
+        # there is no local subscriber table to wait on — so this cannot be a 409
+        # like the order/channel guards. Say it instead of hiding it.
+        warnings.append(
+            "active subscription product(s) remain: renewals will keep billing "
+            "and each period now delivers the delivery message, not minted goods"
+        )
+    if warnings:
+        resp["warnings"] = warnings
     return resp
 
 
