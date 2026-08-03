@@ -32,6 +32,7 @@ from app.models import (
     Entitlement,
     EventLog,
     Order,
+    Product,
     Store,
 )
 from app.payment import build_store_payment_option, load_payment_rail
@@ -424,6 +425,40 @@ def test_guard_store_status(make_store):
     assert agentic._guard_store_status("nope") == (404, "store not found")
     assert agentic._guard_store_status("g_pend")[0] == 409
     assert agentic._guard_store_status("g_live") is None
+
+
+def test_guard_refuses_challenges_a_store_cannot_honour(make_store):
+    # The Rouma state: a merchant pauses by deactivating every product, the store
+    # stays live. The challenge surface used to hand out a signable sentinel 402
+    # while the web checkout 409'd — fund-safe (the paid seam refused pre-settle)
+    # but three surfaces disagreed. The guard now refuses BEFORE any 402 is
+    # emitted, with the same statuses the paid seam uses.
+    sid = make_store(slug="g_paused")
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        p = s.get(Product, product.id)
+        p.active = False
+        s.commit()
+    assert agentic._guard_store_status("g_paused") == (
+        409,
+        "store has no active product",
+    )
+    # a /buy/{id} naming the deactivated product mirrors the paid seam's 404
+    assert agentic._guard_store_status("g_paused", product.id) == (
+        404,
+        "product not found",
+    )
+
+    # a live store WITH an active product passes both forms
+    sid2 = make_store(slug="g_selling")
+    _, p2 = _store_product(sid2)
+    assert agentic._guard_store_status("g_selling") is None
+    assert agentic._guard_store_status("g_selling", p2.id) is None
+    # ...but a foreign product id on it is refused (no IDOR via the challenge)
+    assert agentic._guard_store_status("g_selling", product.id) == (
+        404,
+        "product not found",
+    )
 
 
 # ------------------------------------------------------- reaper

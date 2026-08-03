@@ -1088,9 +1088,21 @@ async def agent_reaper_loop() -> None:
 # ============================================================================
 # Agent-guard middleware: 404/409 before any 402; settle-success tx bookkeeping
 # ============================================================================
-def _guard_store_status(slug: str) -> tuple[int, str] | None:
-    """None ⇒ allow (live store, or a DB error → fail open to the payment
-    middleware, which the handler re-checks anyway); else (status, detail)."""
+def _guard_store_status(
+    slug: str, product_id: int | None = None
+) -> tuple[int, str] | None:
+    """None ⇒ allow (live store with something to sell, or a DB error → fail open
+    to the payment middleware, which the handler re-checks anyway); else
+    (status, detail).
+
+    The product checks mirror the paid seam's refusals exactly (409 for a bare
+    /buy on a productless store, 404 for a /buy/{id} that names anything but an
+    active product of THIS store). They run here too so the CHALLENGE surface
+    tells the truth: a live store with nothing to sell used to emit a signable
+    sentinel 402 that could only ever be refused after the buyer signed — the
+    web checkout said 409, the challenge said "pay me". Fund-safe before (the
+    paid seam refused pre-settle), but three surfaces disagreed; a merchant
+    detaching their last product is exactly the state that reaches this."""
     try:
         with SessionLocal() as session:
             store = session.scalar(select(Store).where(Store.slug == slug))
@@ -1100,6 +1112,22 @@ def _guard_store_status(slug: str) -> tuple[int, str] | None:
                 return (409, "store is not yet live (pending content screening)")
             if store.status != "live":
                 return (404, "store not found")
+            if product_id is not None:
+                product = session.get(Product, product_id)
+                if (
+                    product is None
+                    or product.store_id != store.id
+                    or not product.active
+                ):
+                    return (404, "product not found")
+                return None
+            has_active = session.scalar(
+                select(Product.id)
+                .where(Product.store_id == store.id, Product.active.is_(True))
+                .limit(1)
+            )
+            if has_active is None:
+                return (409, "store has no active product")
             return None
     except Exception:
         logger.exception("agent guard store-status check failed for %s", slug)
@@ -1257,15 +1285,18 @@ async def agent_guard_dispatch(request: Request, call_next):
     ):
         return await call_next(request)
     slug = _slug_from_path(request.url.path)
-    # The dead-store guard and the settle bookkeeping below are POST-only concerns;
-    # GET /s/{slug}/buy is the discovery probe agents use to READ the challenge. It
-    # still emits a 402, so it must get the same honest accepts list — the filter was
-    # POST-gated, so a GET on a non-batch store advertised an aggr_deferred scheme its
-    # own handler would 409.
-    if request.method == "POST":
-        guard = await asyncio.to_thread(_guard_store_status, slug)
-        if guard is not None:
-            return JSONResponse({"detail": guard[1]}, status_code=guard[0])
+    # The guard runs on BOTH methods: GET /s/{slug}/buy is the discovery probe
+    # agents use to READ the challenge, and a challenge that a dead or productless
+    # store can never honour is a lie — an external merchant found their paused
+    # (0-active-product, still-live) stores handing out signable sentinel 402s on
+    # GET while the web checkout said 409. The settle bookkeeping below stays
+    # POST-only. Listed marketplace endpoints all point at live stores with active
+    # products, so their GET probes still receive the expected 402 challenge.
+    guard = await asyncio.to_thread(
+        _guard_store_status, slug, _product_id_from_path(request.url.path)
+    )
+    if guard is not None:
+        return JSONResponse({"detail": guard[1]}, status_code=guard[0])
     response = await call_next(request)
     if response.status_code == 402 and config.AGGR_DEFERRED_ENABLED:
         # CHALLENGE HONESTY: with the aggr flag on, the static accepts list carries

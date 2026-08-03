@@ -2,6 +2,10 @@
 
 **Describe what you sell → get a live, branded crypto storefront that sells to humans _and_ autonomous agents.**
 
+One prompt to a running business: **11–18 seconds** from a paid `create-store` call to a live store
+with brand, copy, catalogue and wired USDT checkout (measured on paid X Layer mainnet calls,
+2026-08-03) — against the hours a website builder plus a hand-rolled crypto integration costs.
+
 Tilla is a storefront-studio ASP (Agent Service Provider) on the OKX agent marketplace. A merchant
 writes one prompt; Tilla generates the brand, copy, and product content, screens it, and publishes a
 live store with non-custodial crypto checkout on **OKX X Layer** (chainId 196, USDT0). The same store
