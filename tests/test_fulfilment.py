@@ -518,6 +518,27 @@ def test_manage_index_answers_the_price_question(tmp_path, monkeypatch):
 
 
 @respx.mock
+def test_manage_index_names_the_other_merchant_actions(tmp_path, monkeypatch):
+    # Repricing used to be the ONLY merchant-session action this index named, so
+    # renaming a store, rewording its headline and replacing a product photo all
+    # read as impossible — the same "capability we never named" failure the index
+    # was built to end, with a 0.03 USDT regeneration as the apparent workaround.
+    slug, key = _manage_key(monkeypatch, tmp_path, "Renamed")
+    b = client.get(
+        f"/api/stores/{slug}/manage", headers={"Authorization": f"Bearer {key}"}
+    ).json()
+    other = b["other_merchant_actions"]
+    assert "merchant sign-in" in other["note"]
+    paths = {e["path"] for e in other["endpoints"]}
+    assert f"/api/merchant/stores/{slug}/description" in paths
+    assert f"/api/merchant/stores/{slug}/products/<product_id>/image" in paths
+    assert f"/api/merchant/stores/{slug}/visibility" in paths
+    copy = next(e for e in other["endpoints"] if e["path"].endswith("/description"))
+    # the headline is the field a merchant could not reach at all before
+    assert "hero_headline" in copy["does"]
+
+
+@respx.mock
 def test_manage_index_names_the_consequence_of_having_no_deliverable(
     tmp_path, monkeypatch
 ):

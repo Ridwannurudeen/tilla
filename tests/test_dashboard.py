@@ -1056,6 +1056,34 @@ def test_store_copy_edit_idor_gated(make_store, tmp_path, monkeypatch):
     )
 
 
+@respx.mock
+def test_merchant_can_reword_the_hero_headline(make_store, tmp_path, monkeypatch):
+    # hero_headline is the biggest text on the storefront and was the only piece of
+    # generated copy with no edit path — rewording it meant regenerating the whole
+    # store (0.03 USDT) and losing the catalogue. It round-trips like the rest now.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _allow_screening()
+    acct = Account.create()
+    _owned_store(acct, "headlinestore", make_store)
+    tok = _merchant_token(acct)
+    r = client.post(
+        "/api/merchant/stores/headlinestore/description",
+        headers=_auth(tok),
+        json={"hero_headline": "Beans worth waking up for"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["hero_headline"] == "Beans worth waking up for"
+    # rendered into the live page and readable back through the GET
+    html = (tmp_path / "headlinestore" / "index.html").read_text(encoding="utf-8")
+    assert "Beans worth waking up for" in html
+    c = client.get(
+        "/api/merchant/stores/headlinestore/description", headers=_auth(tok)
+    ).json()
+    assert c["hero_headline"] == "Beans worth waking up for"
+
+
 def test_store_copy_edit_requires_a_field(make_store):
     acct = Account.create()
     _owned_store(acct, "emptycopy", make_store)

@@ -466,11 +466,16 @@ def merchant_delete_custom_domain(
 
 
 class StoreCopyBody(BaseModel):
-    """A plain-language copy edit: the storefront tagline and/or the one-line
-    description (``hero_subcopy``). Both optional so a merchant can update either;
-    the route rejects a fully-empty edit (422)."""
+    """A plain-language copy edit: the storefront tagline, headline and/or the
+    one-line description (``hero_subcopy``). All optional so a merchant can update
+    any subset; the route rejects a fully-empty edit (422)."""
 
     tagline: str | None = Field(default=None, max_length=120)
+    # The biggest words on the storefront. The model writes one at create time and
+    # it was the only generated copy with no way to change it — a merchant who
+    # disliked their headline had to regenerate the whole store (0.03 USDT, new
+    # catalogue) to reword eight words. Bound matches GeneratedContent.
+    hero_headline: str | None = Field(default=None, max_length=160)
     hero_subcopy: str | None = Field(default=None, max_length=280)
     # The store's display name. The model invents one at create time; it is the
     # merchant's brand and must be theirs to change. The SLUG (URL) deliberately
@@ -497,8 +502,8 @@ def merchant_get_store_copy(
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
     session: Session = Depends(get_session),
 ):
-    """The store's editable plain-language copy — the tagline and one-line
-    description the owner re-words to re-render the storefront (no LLM
+    """The store's editable plain-language copy — the name, tagline, headline and
+    one-line description the owner re-words to re-render the storefront (no LLM
     regeneration). Owner-gated (404 for a non-owned/unknown slug)."""
     merchant = _require_merchant(request, session)
     store = _owned_store(session, merchant, slug)
@@ -507,6 +512,7 @@ def merchant_get_store_copy(
         "slug": store.slug,
         "store_name": str(content.get("store_name", "")),
         "tagline": str(content.get("tagline", "")),
+        "hero_headline": str(content.get("hero_headline", "")),
         "hero_subcopy": str(content.get("hero_subcopy", "")),
     }
 
@@ -519,8 +525,8 @@ def merchant_set_store_copy(
     slug: str = Path(..., pattern=config.SLUG_PATTERN),
     session: Session = Depends(get_session),
 ):
-    """Owner edit of a store's plain-language copy: the storefront tagline and/or
-    the one-line description. The submitted text is content-screened FAIL-CLOSED
+    """Owner edit of a store's plain-language copy: the storefront name, tagline,
+    headline and/or one-line description. The submitted text is screened FAIL-CLOSED
     (BLOCK->422, screening unavailable->503) BEFORE any write; only an explicit
     ALLOW updates stores.content and re-renders the static page — the catalog,
     prices, palette, and theme are untouched (no LLM regeneration). Owner-gated
@@ -532,6 +538,8 @@ def merchant_set_store_copy(
     updates: dict[str, str] = {}
     if body.tagline is not None:
         updates["tagline"] = body.tagline.strip()
+    if body.hero_headline is not None:
+        updates["hero_headline"] = body.hero_headline.strip()
     if body.hero_subcopy is not None:
         updates["hero_subcopy"] = body.hero_subcopy.strip()
     if body.store_name is not None:
@@ -543,7 +551,9 @@ def merchant_set_store_copy(
             raise HTTPException(422, "store_name cannot be empty")
         updates["store_name"] = name
     if not any(updates.values()):
-        raise HTTPException(422, "provide a store name, tagline or one-liner to update")
+        raise HTTPException(
+            422, "provide a store name, tagline, headline or one-liner to update"
+        )
     _screen_copy("\n".join(v for v in updates.values() if v))
     engine.update_store_copy(session, store, updates)
     log_event(
@@ -559,6 +569,7 @@ def merchant_set_store_copy(
         "slug": store.slug,
         "store_name": str(content.get("store_name", "")),
         "tagline": str(content.get("tagline", "")),
+        "hero_headline": str(content.get("hero_headline", "")),
         "hero_subcopy": str(content.get("hero_subcopy", "")),
     }
 

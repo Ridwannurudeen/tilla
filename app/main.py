@@ -2202,6 +2202,47 @@ def manage_index(
                 "(the call costs 0.03 USDT, regenerates the catalogue)",
             ],
         },
+        # Same lesson as the DELETE above: a capability we never name is a
+        # capability merchants probe for and then assume is missing. Repricing was
+        # the only merchant-session action this index mentioned, so renaming a
+        # store, rewording its headline and replacing a product photo all read as
+        # impossible — the fallback being a 0.03 USDT regeneration that throws away
+        # the catalogue to change a few words.
+        "other_merchant_actions": {
+            "note": (
+                "these need the SAME merchant sign-in as changing a price (the "
+                "wallet in pay_to), not this key — all are free"
+            ),
+            "endpoints": [
+                {
+                    "method": "POST",
+                    "path": f"/api/merchant/stores/{store.slug}/description",
+                    "does": (
+                        "reword the storefront copy: store_name, tagline, "
+                        "hero_headline, hero_subcopy (any subset). The slug/URL "
+                        "never changes, and the catalogue is untouched"
+                    ),
+                },
+                {
+                    "method": "POST/DELETE",
+                    "path": (
+                        f"/api/merchant/stores/{store.slug}/products/<product_id>/image"
+                    ),
+                    "does": (
+                        "upload your own product photo (JPEG, <=2MB) or DELETE to "
+                        "drop back to generated photography"
+                    ),
+                },
+                {
+                    "method": "POST",
+                    "path": f"/api/merchant/stores/{store.slug}/visibility",
+                    "does": (
+                        "{visibility: public|hidden} — hidden keeps a live store "
+                        "out of discovery while direct links still work"
+                    ),
+                },
+            ],
+        },
     }
 
 

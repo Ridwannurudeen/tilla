@@ -618,11 +618,13 @@
         <strong>Plain-language copy</strong>
         <span class="muted mono">screened before it goes live</span>
       </div>
-      <p class="muted small">Re-word the store name, tagline and one-liner shown on your storefront. Saving re-renders the page — your products, prices, theme and web address are untouched.</p>
+      <p class="muted small">Re-word the store name, tagline, headline and one-liner shown on your storefront. Saving re-renders the page — your products, prices, theme and web address are untouched.</p>
       <label for="scName">Store name</label>
       <input id="scName" maxlength="60" placeholder="Your store&#39;s display name" />
       <label for="scTagline">Tagline</label>
       <input id="scTagline" maxlength="120" placeholder="A short line under your store name" />
+      <label for="scHeadline">Headline</label>
+      <input id="scHeadline" maxlength="160" placeholder="The big line at the top of your storefront" />
       <label for="scOneLiner">One-liner</label>
       <textarea id="scOneLiner" maxlength="280" placeholder="One sentence describing what you sell"></textarea>
       <div class="row" style="margin-top:12px">
@@ -2287,12 +2289,14 @@
   async function loadStoreCopy(slug) {
     byId("scName").value = "";
     byId("scTagline").value = "";
+    byId("scHeadline").value = "";
     byId("scOneLiner").value = "";
     scmsg("");
     try {
       var c = await api("/api/merchant/stores/" + encodeURIComponent(slug) + "/description");
       byId("scName").value = c.store_name || "";
       byId("scTagline").value = c.tagline || "";
+      byId("scHeadline").value = c.hero_headline || "";
       byId("scOneLiner").value = c.hero_subcopy || "";
     } catch (e) { /* a store with no copy yet just starts blank */ }
   }
@@ -2300,11 +2304,12 @@
     if (!LAST_STORE) return;
     var name = byId("scName").value.trim();
     var tagline = byId("scTagline").value.trim();
+    var headline = byId("scHeadline").value.trim();
     var oneLiner = byId("scOneLiner").value.trim();
-    if (!name && !tagline && !oneLiner) { scmsg("Enter a store name, tagline or one-liner first.", true); return; }
+    if (!name && !tagline && !headline && !oneLiner) { scmsg("Enter a store name, tagline, headline or one-liner first.", true); return; }
     var btn = byId("scSave"); btn.disabled = true;
     try {
-      var cbody = { tagline: tagline, hero_subcopy: oneLiner };
+      var cbody = { tagline: tagline, hero_headline: headline, hero_subcopy: oneLiner };
       if (name) cbody.store_name = name; // never send empty — blanking the name is only ever a mistake
       await api("/api/merchant/stores/" + encodeURIComponent(LAST_STORE) + "/description", {
         method: "POST", headers: { "content-type": "application/json" },
