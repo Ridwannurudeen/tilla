@@ -13,9 +13,15 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+from starlette.requests import Request
 from x402.http.utils import encode_payment_response_header
 from x402.http.x402_http_server_base import x402HTTPServerBase
-from x402.schemas import AssetAmount, SettleResponse
+from x402.schemas import (
+    AssetAmount,
+    PaymentPayload,
+    PaymentRequirements,
+    SettleResponse,
+)
 
 import app.main as main
 from app import agentic, checkout, config, delivery
@@ -746,3 +752,72 @@ def test_malformed_declaration_is_ignored_not_fatal(make_store):
         declared = agentic.declared_buyer_inputs(s.merge(product))
     assert [f["name"] for f in declared] == ["ok"]
     assert declared[0]["label"] == "ok"  # label defaults to the name
+
+
+# ------------------------------------------------------- paused store (0 active)
+def _paid_exact_request(slug, path=None):
+    """A Request carrying a verified-payment payload — the state the x402
+    middleware leaves behind on a paid retry (mirrors test_aggr_deferred)."""
+    path = path or f"/s/{slug}/buy"
+    req = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "raw_path": path.encode(),
+            "headers": [],
+            "query_string": b"",
+            "client": ("test", 1),
+            "server": ("test", 80),
+            "scheme": "http",
+        }
+    )
+    req.state.payment_payload = PaymentPayload(
+        x402_version=2,
+        payload={"authorization": {"nonce": NONCE, "from": PAYER, "value": "1"}},
+        accepted=PaymentRequirements(
+            scheme="exact",
+            network="eip155:196",
+            asset="0x" + "a" * 40,
+            amount="1",
+            pay_to="0x" + "b" * 40,
+            max_timeout_seconds=300,
+            extra={},
+        ),
+    )
+    return req
+
+
+def test_paid_buy_on_productless_live_store_refuses_before_settle(make_store):
+    """The state an external merchant found on prod: a LIVE store whose every
+    product is deactivated. The challenge surface is deliberately infallible —
+    resolve_pay_to still answers the merchant wallet and resolve_price the '1'
+    sentinel — so the funds-safe layer is the paid handler: bare /buy is 409 and
+    /buy/{id} is 404 BEFORE settle (>=400 makes the middleware skip settlement).
+    The signed authorization is never executed and no Order row is ever created."""
+    merchant = "0x" + "d" * 40
+    sid = make_store(slug="paused1", pay_to=merchant)
+    with SessionLocal() as s:
+        product = agentic._active_product(s, sid)
+        pid = product.id
+        product.active = False
+        s.commit()
+    # the challenge the merchant observed: their own payTo, sentinel amount
+    assert agentic.resolve_pay_to("/s/paused1/buy", SENTINEL) == merchant
+    assert agentic.resolve_price("/s/paused1/buy").amount == "1"
+    with SessionLocal() as s:
+        with pytest.raises(HTTPException) as bare:
+            agentic.agent_buy(_paid_exact_request("paused1"), "paused1", s)
+    assert bare.value.status_code == 409
+    assert "no active product" in bare.value.detail
+    with SessionLocal() as s:
+        with pytest.raises(HTTPException) as byid:
+            agentic.agent_buy_product(
+                _paid_exact_request("paused1", path=f"/s/paused1/buy/{pid}"),
+                "paused1",
+                pid,
+                s,
+            )
+    assert byid.value.status_code == 404
+    with SessionLocal() as s:
+        assert s.scalar(select(Order)) is None
