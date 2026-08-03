@@ -191,6 +191,10 @@
 
   /* ---------- 03 · the purchase ---------- */
   .card{ max-width:40rem; }
+  /* .section is a two-column grid (numeral gutter, then content), so a bare
+     child lands in the ~76-132px gutter and wraps to one word per line. A
+     section-level notice has to span both columns, at the card's own measure. */
+  .shopnote{ grid-column:1/-1; max-width:40rem; }
   .card h2{
     font-size:calc(clamp(1.9rem,3.8vw,2.9rem) * var(--dna-k2));
     font-weight:var(--display-weight); line-height:1.1;
@@ -449,7 +453,7 @@
     <section class="section purchase" id="buy">
       {# Sample store: no payout wallet, so checkout refuses every buy. #}
       {% if SANDBOX %}
-      <p class="mono">Sample store — not payable. This store was generated as a sample and has no payout wallet, so it cannot take payments. Create it again with a receive address to start selling.</p>
+      <p class="mono shopnote">Sample store — not payable. This store was generated as a sample and has no payout wallet, so it cannot take payments. Create it again with a receive address to start selling.</p>
       {% endif %}
       {# Paused store: no active product, so nothing is purchasable. #}
       {% if not PRODUCTS %}

@@ -229,6 +229,16 @@ def test_live_store_carries_no_sandbox_notice_and_keeps_buy_live(theme):
     assert '<button class="buy"' in html
 
 
+def test_editorial_sandbox_notice_spans_the_section_grid():
+    # editorial's .section is a two-column grid (numeral gutter, then content), so a
+    # bare <p> child takes the ~76-132px gutter track and wraps to one word per line.
+    # Every text-level assertion passed while the notice was unreadable; only a
+    # browser showed it. The notice must span both columns at the card's measure.
+    html = render(_SANDBOX_CONTENT, ADDR, SLUG, "editorial.html", sandbox=True)
+    assert 'class="mono shopnote"' in html
+    assert ".shopnote{ grid-column:1/-1; max-width:40rem; }" in html
+
+
 @pytest.mark.parametrize("theme", THEMES)
 def test_checkout_relays_a_stated_refusal_instead_of_asking_for_a_retry(theme):
     # A 409 is the server refusing for a permanent, stated reason (sample store, or
