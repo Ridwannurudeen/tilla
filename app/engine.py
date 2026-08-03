@@ -869,6 +869,14 @@ def generate(desc):
         "figure typical for that kind of item, keep every product in one coherent range, and "
         "never invent a large headline figure — an unstated price is a placeholder the merchant "
         "will correct, not a valuation of their work. "
+        # NAMES ARE THE MERCHANT'S TOO — the same rule as prices, and a worse
+        # failure when broken. A merchant who writes "my shop is called Ember &
+        # Oak" and gets "Lumina" has had their own brand replaced by a generated
+        # one, and store_name mints the slug (see unique_slug below), which is
+        # permanent — a rename keeps the original slug forever.
+        "and for names: if the merchant's description states a store name or a product name, use "
+        "that EXACT name — never translate, shorten, prettify or substitute it. Invent a name only "
+        "when the merchant has not stated one. "
         "emoji (single emoji for the brand), "
         # PHOTOGRAPHY. The store previously had none, and a wrong photo is worse
         # than no photo — a stock shot of a yoga mat on a store selling dumbbells

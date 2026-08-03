@@ -809,6 +809,38 @@ def test_prompt_makes_prices_belong_to_the_merchant(monkeypatch):
     assert "never invent a large headline figure" in prompt
 
 
+def test_prompt_makes_names_belong_to_the_merchant(monkeypatch):
+    # Same rule as prices, worse when broken: store_name mints the slug and a
+    # rename keeps the original slug forever, so a substituted brand is permanent.
+    import app.engine as engine
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": [{"text": "{}"}]}
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(
+        engine.requests,
+        "post",
+        lambda url, headers=None, json=None, timeout=None: sent.update(json) or _Resp(),
+    )
+    try:
+        engine.generate("my shop is called Ember & Oak, I sell soy candles")
+    except Exception:
+        pass  # the empty {} payload fails downstream; the prompt is the assertion
+    prompt = sent["messages"][0]["content"]
+    assert "use that EXACT name" in prompt
+    assert "never translate, shorten, prettify or substitute it" in prompt
+
+
 def test_generate_quantises_price_to_micro_precision(monkeypatch):
     # store.json is written from generated content before the Product row exists,
     # so a price finer than USDT0's 6dp would persist as a rounded price_micro the
