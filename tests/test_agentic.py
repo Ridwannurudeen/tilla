@@ -255,6 +255,32 @@ def test_agent_card_offering_envelope():
     assert buy_actions["x402_buy"]["endpoint"] == "/s/{slug}/buy"
 
 
+def test_create_store_402_summary_names_what_receive_address_decides():
+    # The summary is the first thing an agent reads before it pays. It had drifted
+    # to "POST {description, theme}" while the challenge advertised seven fields,
+    # and it never said what receive_address decides: omit it on a PAID call and
+    # you get a hidden, non-payable sample store whose buy path 404s.
+    from app.agentic import unpaid_schema_body
+    from app.main import CREATE_STORE_SUMMARY, CreateStoreBody
+
+    body = unpaid_schema_body(
+        CreateStoreBody.model_json_schema(), CREATE_STORE_SUMMARY
+    )(object()).body
+    summary = body["summary"]
+    assert "receive_address" in summary
+    assert "non-payable" in summary
+    assert "exactly" in summary  # a stated price is not adjusted
+    assert set(body["input_schema"]["properties"]) >= {
+        "description",
+        "receive_address",
+        "theme",
+        "delivery",
+        "deliverable",
+        "notify_agent_id",
+        "brand_color",
+    }
+
+
 def test_discovery_row_next_actions_route_to_store_surfaces():
     _seed(slug="disc-na", price_micro=2_000_000)
     row = next(

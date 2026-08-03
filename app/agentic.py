@@ -2289,9 +2289,12 @@ def agent_card(request: Request):
                         "endpoint": "/create-store",
                         "protocol": "x402-v2",
                         "description": (
-                            "POST {description, theme} with an x402 payment "
-                            f"({create_store_funds['amount']} {CURRENCY}) "
-                            "to spin up a live store."
+                            "POST {description, receive_address, theme, …} with "
+                            f"an x402 payment ({create_store_funds['amount']} "
+                            f"{CURRENCY}) to spin up a live store. Pass "
+                            "receive_address for a payable store — without it "
+                            "you get a hidden, non-payable sample. A price "
+                            "stated in the description is used exactly."
                         ),
                     }
                 ],

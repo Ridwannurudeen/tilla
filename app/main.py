@@ -642,6 +642,20 @@ DEFAULT_STORE_DESCRIPTION = (
     "A small digital studio selling a downloadable weekly planner template for 9 USDT"
 )
 
+# The first thing an agent reads before it pays. It lives out here, not inline in the
+# x402 RouteConfig, because that block only runs when OKX_API_KEY is set — so nothing
+# in the suite could reach the string and it silently went stale, still promising
+# "POST {description, theme}" long after the challenge advertised seven fields.
+CREATE_STORE_SUMMARY = (
+    "POST {description, receive_address, theme, delivery, deliverable, "
+    "notify_agent_id, brand_color} with an x402 payment to create a live "
+    "storefront; input_schema below is the authority on every field. All are "
+    "optional: an empty or absent body creates a sample store, and WITHOUT "
+    "receive_address the store is a hidden, non-payable sample whose buy path "
+    "404s. A price stated in the description is used for that product exactly, "
+    "never adjusted."
+)
+
 
 class DeliverableBody(BaseModel):
     """Real goods, attached while the store is created. `file` is absent by design:
@@ -2918,9 +2932,7 @@ if os.getenv("OKX_API_KEY"):
         mime_type="application/json",
         unpaid_response_body=agentic.unpaid_schema_body(
             CreateStoreBody.model_json_schema(),
-            "POST {description, theme} with an x402 payment to create a live "
-            "storefront. Every field is optional: an empty or absent body "
-            "creates a sample store.",
+            CREATE_STORE_SUMMARY,
             # The sample the agent card already publishes, kept identical so the
             # card and the challenge cannot disagree.
             {
