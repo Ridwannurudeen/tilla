@@ -229,14 +229,22 @@ def test_live_store_carries_no_sandbox_notice_and_keeps_buy_live(theme):
     assert '<button class="buy"' in html
 
 
-def test_editorial_sandbox_notice_spans_the_section_grid():
-    # editorial's .section is a two-column grid (numeral gutter, then content), so a
-    # bare <p> child takes the ~76-132px gutter track and wraps to one word per line.
-    # Every text-level assertion passed while the notice was unreadable; only a
-    # browser showed it. The notice must span both columns at the card's measure.
-    html = render(_SANDBOX_CONTENT, ADDR, SLUG, "editorial.html", sandbox=True)
-    assert 'class="mono shopnote"' in html
-    assert ".shopnote{ grid-column:1/-1; max-width:40rem; }" in html
+def test_editorial_section_notices_span_the_grid():
+    # editorial's .section is a two-column grid (numeral gutter, then content) that
+    # expects exactly two children. A bare <p> child takes the ~76-132px gutter
+    # track, wraps to one word per line, AND displaces the pair: .index slides into
+    # the content column and .card wraps to the next row. Measured 132x136 on the
+    # live dossier-token store. Every text-level assertion passed while it looked
+    # like that; only a browser showed it. Both section-level notices must span.
+    assert ".shopnote{ grid-column:1/-1; max-width:40rem; }" in render(
+        _SANDBOX_CONTENT, ADDR, SLUG, "editorial.html"
+    )
+    sandbox = render(_SANDBOX_CONTENT, ADDR, SLUG, "editorial.html", sandbox=True)
+    assert 'class="mono shopnote">Sample store' in sandbox
+    paused = render({"store_name": "X", "products": []}, ADDR, SLUG, "editorial.html")
+    assert 'class="mono shopnote">Not currently on sale' in paused
+    # no section-level notice may be a bare .mono child of the grid
+    assert '<p class="mono">Not currently on sale' not in paused
 
 
 @pytest.mark.parametrize("theme", THEMES)
