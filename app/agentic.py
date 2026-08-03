@@ -560,8 +560,18 @@ def _agent_buy_body(
         "amount_micro": order.expected_micro,
         "kind": delivery_row.kind if delivery_row else "text",
         "delivery": delivery_row.payload if delivery_row else checkout.DEFAULT_DELIVERY,
-        "tx": order.tx_hash or "pending",
+        # This body is built BEFORE the x402 middleware settles on the way out, so
+        # tx_hash is NULL on a first buy and populated only on an idempotent replay.
+        # The old `or "pending"` sentinel made one field carry two meanings and read
+        # as "the payment did not go through" to an agent buyer holding a settled
+        # order. Keep `tx` to the hash alone and say where the hash is instead.
+        "tx": order.tx_hash,
     }
+    if order.tx_hash is None:
+        body["tx_note"] = (
+            "settlement completes as this response is returned; the settle tx hash "
+            "is in the PAYMENT-RESPONSE header"
+        )
     # Echo the brief back so the buyer can see what the merchant received, and so a
     # mistyped token address is visible in the receipt rather than only in a report
     # that comes back about the wrong thing.

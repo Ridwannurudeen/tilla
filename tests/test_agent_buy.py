@@ -128,7 +128,10 @@ def test_fulfill_creates_agent_order_and_delivers_text(make_store):
         assert body["order_id"] == order.id
         assert body["kind"] == "text"
         assert body["delivery"] == "SECRET-TEXT"  # legacy store.delivery path
-        assert body["tx"] == "pending"
+        # Pre-settle the hash does not exist yet; `tx` stays null and a note names
+        # the header that carries it, rather than a "pending" that reads as failure.
+        assert body["tx"] is None
+        assert "PAYMENT-RESPONSE" in body["tx_note"]
         assert s.scalar(select(Delivery).where(Delivery.order_id == order.id))
 
 
@@ -180,6 +183,27 @@ def test_fulfill_idempotent_same_nonce(make_store):
         )
         assert s.scalar(select(func.count(Delivery.id))) == 1
         assert s.scalar(select(func.count(Entitlement.id))) == 0  # no deliverable
+
+
+def test_fulfill_replay_after_settle_reports_the_tx_hash(make_store):
+    # Once record_settlement has stored the hash, a replay of the same nonce reports
+    # it in `tx` and drops the note — the field never carries two meanings at once.
+    sid = make_store(slug="b4b", price_micro=1_000_000, delivery="ONCE")
+    store, product = _store_product(sid)
+    with SessionLocal() as s:
+        order, body = agentic.fulfill_agent_order(
+            s, s.merge(store), s.merge(product), PAYER, NONCE
+        )
+        assert body["tx"] is None
+        assert "tx_note" in body
+        order.tx_hash = "0x" + "e" * 64
+        s.commit()
+    with SessionLocal() as s:
+        _, replay = agentic.fulfill_agent_order(
+            s, s.merge(store), s.merge(product), PAYER, NONCE
+        )
+    assert replay["tx"] == "0x" + "e" * 64
+    assert "tx_note" not in replay
 
 
 def test_fulfill_same_nonce_different_payer_409(make_store):
