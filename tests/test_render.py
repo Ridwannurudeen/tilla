@@ -170,6 +170,32 @@ def test_checkout_retry_resets_state_before_poll(theme):
 
 
 @pytest.mark.parametrize("theme", THEMES)
+def test_checkout_scrolls_into_view_when_opened(theme):
+    # Reported by a real merchant on their live 4-product store: every buy button
+    # "does nothing". The panel DID open — it is an inline block rendered AFTER the
+    # product grid, so clicking a card high on the page unfolded it below the fold
+    # while the viewport never moved. Opening the panel must bring it into view.
+    html = render(
+        {
+            "store_name": "X",
+            "products": [
+                {"name": "A", "price_usdt": 1, "cta_text": "Subscribe"},
+                {"name": "B", "price_usdt": 2, "cta_text": "Get access"},
+            ],
+        },
+        ADDR,
+        SLUG,
+        theme,
+    )
+    opened = 'byId("co").classList.add("on");'
+    assert opened in html
+    assert "scrollIntoView" in html
+    # the scroll must follow the class that makes the panel displayable — scrolling
+    # to a display:none element is a no-op
+    assert html.index(opened) < html.index("scrollIntoView")
+
+
+@pytest.mark.parametrize("theme", THEMES)
 def test_checkout_collects_buyer_inputs_with_text_content_only(theme):
     # Feed-provided labels/names are merchant data. The checkout must insert them
     # as text nodes, then send the values under the API's `inputs` object.
