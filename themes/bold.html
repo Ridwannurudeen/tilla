@@ -389,6 +389,12 @@
 
   <section class="shop" id="buy">
     <div class="wrap">
+      {# Sample store: no payout wallet, so checkout refuses every buy. #}
+      {% if SANDBOX %}
+      <div class="card">
+        <p>Sample store — not payable. This store was generated as a sample and has no payout wallet, so it cannot take payments. Create it again with a receive address to start selling.</p>
+      </div>
+      {% endif %}
       {# Paused store: no active product, so nothing is purchasable. #}
       {% if not PRODUCTS %}
       <div class="card">
@@ -423,7 +429,7 @@
             <h2>{{ p.name }}</h2>
             <p class="blurb">{{ p.blurb }}</p>
             <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
-            <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
+            <button class="buy"{% if SANDBOX %} disabled{% endif %} {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
           </article>
         {% endfor %}
         </div>

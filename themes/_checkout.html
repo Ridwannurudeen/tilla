@@ -540,7 +540,7 @@
     _startPay(payload);
   }
   async function _startPay(payload) {
-    var d;
+    var d, refusal = null;
     try {
       var r = await fetch("/api/checkout/" + SLUG, {
         method: "POST",
@@ -548,9 +548,15 @@
         body: JSON.stringify(payload)
       });
       d = await r.json();
+      // A 409 is the server refusing for a stated, PERMANENT reason — a sample
+      // store with no payout wallet, or a catalog the merchant has paused. Telling
+      // the buyer to retry a refusal that can never clear is our own UI making a
+      // false statement, so relay the reason instead. Any other failure really is
+      // worth retrying and keeps the generic message.
+      if (r.status === 409 && d && typeof d.detail === "string") refusal = d.detail;
       if (!r.ok || !d.id) throw new Error("checkout");
     } catch (e) {
-      setStatus("Could not start checkout — please retry.");
+      setStatus(refusal || "Could not start checkout — please retry.");
       setBuysDisabled(false);
       return;
     }

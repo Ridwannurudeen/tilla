@@ -342,14 +342,25 @@ def _products_ctx(content: Mapping) -> dict:
 
 
 def _store_ctx(
-    content: Mapping, addr: str, slug: str, base_url: str | None = None
+    content: Mapping,
+    addr: str,
+    slug: str,
+    base_url: str | None = None,
+    sandbox: bool = False,
 ) -> dict:
     """The full 15-token store-theme context (+ additive palette/SEO). Shared by
     :func:`render` and the M15.2 install-time :func:`render_source` check so a
     candidate theme is exercised with the exact context a live one receives.
-    ``base_url`` (Phase 4 custom domains) re-points canonical/OG at the domain root."""
+    ``base_url`` (Phase 4 custom domains) re-points canonical/OG at the domain root.
+    ``sandbox`` is additive, not part of the token contract."""
     return {
         "SLUG": slug,
+        # A store created without a receive address has no wallet to pay, so every
+        # checkout path refuses it. The page could not know that — it received only
+        # content/addr/slug/theme — so it rendered a live-looking Buy button whose
+        # click 404'd into "please retry", which retrying can never fix. The themes
+        # use this to say what the store is and to render the Buy control disabled.
+        "SANDBOX": sandbox,
         "STORE_NAME": str(content.get("store_name", "My Store")),
         "TAGLINE": str(content.get("tagline", "")),
         "HERO_HEADLINE": str(content.get("hero_headline", "")),
@@ -380,12 +391,14 @@ def render(
     slug: str,
     theme: str = "original.html",
     base_url: str | None = None,
+    sandbox: bool = False,
 ) -> str:
     """Render a store theme from generator output. `content` is untrusted
     (LLM-produced); `addr`/`slug` are our own already-validated values. ``base_url``
-    (Phase 4 custom domains) re-points canonical/OG at ``https://<domain>/``."""
+    (Phase 4 custom domains) re-points canonical/OG at ``https://<domain>/``.
+    ``sandbox`` renders the store as the non-payable sample it is."""
     template = _env.get_template(theme)
-    return template.render(**_store_ctx(content, addr, slug, base_url))
+    return template.render(**_store_ctx(content, addr, slug, base_url, sandbox))
 
 
 def render_source(source: str, content: Mapping, addr: str, slug: str) -> str:

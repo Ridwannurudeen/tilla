@@ -210,7 +210,11 @@ def test_bodyless_create_is_a_hidden_nonpayable_sandbox(tmp_path, monkeypatch):
 
     checkout = client.post(f"/api/checkout/{body['slug']}")
 
-    assert checkout.status_code == 404
+    # 409 with the reason named, not a bare 404: this store's page is publicly
+    # served, so "store not found" read as a glitch worth retrying — and no retry
+    # can ever clear it. Refusing is still absolute; only the wording changed.
+    assert checkout.status_code == 409
+    assert "sample store" in checkout.json()["detail"]
     with SessionLocal() as session:
         assert session.scalar(select(Order).where(Order.store_id == store.id)) is None
 

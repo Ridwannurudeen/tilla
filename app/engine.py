@@ -639,7 +639,14 @@ def resync_catalog(session, store, extras_override=None) -> None:
     flag_modified(store, "content")
     d = STORES_DIR / store.slug
     d.mkdir(parents=True, exist_ok=True)
-    _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+    _write_store_pages(
+        d,
+        content,
+        store.pay_to,
+        store.slug,
+        store.theme,
+        sandbox=store.status == "sandbox",
+    )
 
 
 def update_store_copy(session, store, updates: dict) -> None:
@@ -657,15 +664,26 @@ def update_store_copy(session, store, updates: dict) -> None:
     flag_modified(store, "content")
     d = STORES_DIR / store.slug
     d.mkdir(parents=True, exist_ok=True)
-    _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+    _write_store_pages(
+        d,
+        content,
+        store.pay_to,
+        store.slug,
+        store.theme,
+        sandbox=store.status == "sandbox",
+    )
 
 
-def _write_store_pages(d, content: dict, addr: str, slug: str, theme: str) -> None:
+def _write_store_pages(
+    d, content: dict, addr: str, slug: str, theme: str, sandbox: bool = False
+) -> None:
     """Write the nginx-served static assets for a live store: index.html (the chosen
     theme), og.svg (the Open Graph card source), and og.png (its raster for social
-    scrapers). The <head> references og.png as og:image/twitter:image."""
+    scrapers). The <head> references og.png as og:image/twitter:image. ``sandbox``
+    renders the page as the non-payable sample it is, instead of a storefront whose
+    Buy button 404s."""
     (d / "index.html").write_text(
-        render_theme(content, addr, slug, theme), encoding="utf-8"
+        render_theme(content, addr, slug, theme, sandbox=sandbox), encoding="utf-8"
     )
     (d / "og.svg").write_text(render_og(content, slug), encoding="utf-8")
     _write_og_png(d / "og.svg", d / "og.png")
@@ -1226,7 +1244,7 @@ def create_store(
                 "theme": theme_file,
             }
         else:
-            _write_store_pages(d, content, addr, slug, theme_file)
+            _write_store_pages(d, content, addr, slug, theme_file, sandbox=sandbox)
             meta = {
                 "slug": slug,
                 "status": store_status,
@@ -1504,7 +1522,14 @@ def upgrade_store(session, store, description=None, theme=None) -> dict:
 
         store.content = content
         flag_modified(store, "content")
-    _write_store_pages(d, content, store.pay_to, store.slug, theme_file)
+    _write_store_pages(
+        d,
+        content,
+        store.pay_to,
+        store.slug,
+        theme_file,
+        sandbox=store.status == "sandbox",
+    )
     _persist_receipt(session, store.id, outcome.receipt)
     log_event(
         session,
@@ -1573,10 +1598,18 @@ def rerender_stores() -> dict:
     static pages instead of leaving them serving stale HTML. Idempotent; never
     deletes. A live store with no persisted content is logged and skipped (never
     fatal), mirroring resume_pending — such a store predates content persistence
-    and must be re-created or re-imported to recover its render inputs."""
+    and must be re-created or re-imported to recover its render inputs.
+
+    Sandbox stores are re-rendered too. They have a served index.html exactly like a
+    live store, so excluding them meant a theme fix could never reach the pages that
+    needed it most — the sample stores are the ones that must say they cannot take
+    payments. pending_screening stores stay out: they deliberately have no
+    index.html, and writing one would open a checkout that screening has not cleared."""
     rendered = skipped = 0
     with SessionLocal() as session:
-        stores = session.scalars(select(Store).where(Store.status == "live")).all()
+        stores = session.scalars(
+            select(Store).where(Store.status.in_(("live", "sandbox")))
+        ).all()
         for store in stores:
             content = store.content
             if not isinstance(content, dict):
@@ -1589,7 +1622,14 @@ def rerender_stores() -> dict:
             try:
                 d = STORES_DIR / store.slug
                 d.mkdir(parents=True, exist_ok=True)
-                _write_store_pages(d, content, store.pay_to, store.slug, store.theme)
+                _write_store_pages(
+                    d,
+                    content,
+                    store.pay_to,
+                    store.slug,
+                    store.theme,
+                    sandbox=store.status == "sandbox",
+                )
                 rendered += 1
             except Exception:
                 # Runs at startup — one store that fails to render (e.g. a

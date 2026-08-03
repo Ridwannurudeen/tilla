@@ -195,6 +195,53 @@ def test_checkout_scrolls_into_view_when_opened(theme):
     assert html.index(opened) < html.index("scrollIntoView")
 
 
+_SANDBOX_CONTENT = {
+    "store_name": "X",
+    "products": [
+        {"name": "A", "price_usdt": 1, "cta_text": "Subscribe"},
+        {"name": "B", "price_usdt": 2, "cta_text": "Get access"},
+    ],
+}
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_sandbox_store_says_it_is_not_payable_and_disables_buy(theme):
+    # A store created without a receive address has no payout wallet, so every
+    # checkout path refuses it. It used to render as an ordinary storefront whose
+    # Buy button 404'd into "please retry" — a refusal the buyer could only read as
+    # a glitch. The page must state the reason and never offer a live Buy control.
+    html = render(_SANDBOX_CONTENT, ADDR, SLUG, theme, sandbox=True)
+    assert "Sample store — not payable" in html
+    assert "receive address" in html
+    # every Buy control on the page is disabled, not just the primary one
+    assert html.count('<button class="buy" disabled') == html.count(
+        '<button class="buy"'
+    )
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_live_store_carries_no_sandbox_notice_and_keeps_buy_live(theme):
+    # The other half of the contract: a real merchant's store must be untouched by
+    # the sandbox branch — no notice, no disabled Buy.
+    html = render(_SANDBOX_CONTENT, ADDR, SLUG, theme)
+    assert "Sample store" not in html
+    assert '<button class="buy" disabled' not in html
+    assert '<button class="buy"' in html
+
+
+@pytest.mark.parametrize("theme", THEMES)
+def test_checkout_relays_a_stated_refusal_instead_of_asking_for_a_retry(theme):
+    # A 409 is the server refusing for a permanent, stated reason (sample store, or
+    # a paused catalog). "please retry" is a false statement about a refusal that
+    # can never clear, so the panel must show the server's reason instead.
+    html = render({"store_name": "X"}, ADDR, SLUG, theme)
+    assert (
+        'if (r.status === 409 && d && typeof d.detail === "string") refusal = d.detail;'
+        in html
+    )
+    assert 'setStatus(refusal || "Could not start checkout — please retry.");' in html
+
+
 @pytest.mark.parametrize("theme", THEMES)
 def test_checkout_collects_buyer_inputs_with_text_content_only(theme):
     # Feed-provided labels/names are merchant data. The checkout must insert them

@@ -357,6 +357,49 @@ def test_rerender_stores_rewrites_live_index_from_content(tmp_path, monkeypatch)
     assert "qrMatrix" in html
 
 
+def test_rerender_stores_covers_sandbox_stores_and_marks_them(tmp_path, monkeypatch):
+    # A sandbox store has a served index.html exactly like a live one, so excluding
+    # it from the startup re-render meant the sample stores — the pages that most
+    # need to say they cannot take payments — could never receive a theme fix.
+    import app.engine as engine
+    from app.db import SessionLocal
+    from app.models import Store, get_or_create_merchant
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    content = {"store_name": "S", "price_usdt": 9, "product_name": "Thing"}
+    with SessionLocal() as s:
+        merchant = get_or_create_merchant(s, "0x" + "c" * 40)
+        for slug, status in (
+            ("sb", "sandbox"),
+            ("lv", "live"),
+            ("pd", "pending_screening"),
+        ):
+            s.add(
+                Store(
+                    slug=slug,
+                    merchant_id=merchant.id,
+                    status=status,
+                    pay_to="0x" + "c" * 40,
+                    content=content,
+                    theme="original.html",
+                )
+            )
+        s.commit()
+
+    assert engine.rerender_stores() == {"rendered": 2, "skipped": 0}
+
+    sandbox_html = (tmp_path / "sb" / "index.html").read_text(encoding="utf-8")
+    assert "Sample store — not payable" in sandbox_html
+    assert '<button class="buy" disabled' in sandbox_html
+    # the live store next to it is untouched by the sandbox branch
+    live_html = (tmp_path / "lv" / "index.html").read_text(encoding="utf-8")
+    assert "Sample store" not in live_html
+    assert '<button class="buy" disabled' not in live_html
+    # a pending_screening store still gets NO page: writing one would open a
+    # checkout that screening has not cleared
+    assert not (tmp_path / "pd" / "index.html").exists()
+
+
 def test_rerender_stores_skips_contentless_store(tmp_path, monkeypatch):
     # A pre-persistence live store (content NULL) can't be re-rendered; it must be
     # skipped, never crash the startup re-render.

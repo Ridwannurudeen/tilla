@@ -468,6 +468,14 @@
 
   <section class="shop reveal" id="buy">
     <div class="wrap">
+      {# A sample store has no payout wallet, so checkout refuses it. Say so here
+         rather than letting the buyer discover it by clicking a dead Buy button. #}
+      {% if SANDBOX %}
+      <div class="card">
+        <p class="cat-eyebrow mono">Sample store — not payable</p>
+        <p>This store was generated as a sample and has no payout wallet, so it cannot take payments. Create it again with a receive address to start selling.</p>
+      </div>
+      {% endif %}
       {# A store with no active product is a legitimate state: the merchant has
          paused selling. Say so, rather than showing an empty catalog. #}
       {% if not PRODUCTS %}
@@ -502,7 +510,7 @@
           </div>
           <div>
             <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
-            <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
+            <button class="buy"{% if SANDBOX %} disabled{% endif %} {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
             <p class="buy-note mono">Paid straight to the seller — Tilla never holds your money</p>
           </div>
         </div>
@@ -532,7 +540,7 @@
           <h3>{{ p.name }}</h3>
           <p class="item-blurb">{{ p.blurb }}</p>
           <div class="price-row mono"><span class="p">{{ p.price }}</span><span class="u">USDT0</span></div>
-          <button class="buy" {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
+          <button class="buy"{% if SANDBOX %} disabled{% endif %} {% if p.index == 0 %}id="buyBtn"{% endif %} data-pid="{{ p.id }}" data-idx="{{ p.index }}" onclick="startCheckout(this)">{{ p.cta }}</button>
         </article>
         {% endfor %}
       </div>

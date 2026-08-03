@@ -1003,3 +1003,28 @@ def test_floor_keeps_the_allocator_viable_on_dust_prices(make_store):
         assert 0 < surcharge <= config.AMOUNT_OFFSET_FLOOR
         seen.add(expected)
     assert len(seen) == 6  # distinct amounts still allocated
+
+
+def test_checkout_on_a_sandbox_store_states_why_instead_of_404(make_store):
+    # A sandbox store's page is publicly served, so answering its checkout with
+    # "store not found" was a refusal the buyer could only read as a glitch worth
+    # retrying — and the panel duly told them to retry. It has no payout wallet and
+    # no route can give it one, so the refusal must name the permanent reason.
+    make_store(slug="sample-shop", pay_to="0x" + "d" * 40, status="sandbox")
+    r = client.post("/api/checkout/sample-shop")
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert "sample store" in detail
+    assert "receive_address" in detail
+    # and no order was minted for it
+    with SessionLocal() as s:
+        assert s.scalar(select(func.count(Order.id))) == 0
+
+
+def test_checkout_on_a_blocked_store_still_404s(make_store):
+    # The sandbox branch must not soften every non-live status: a blocked store
+    # stays a bare 404, which is the only honest answer for a store we removed.
+    make_store(slug="gone-shop", pay_to="0x" + "d" * 40, status="blocked")
+    r = client.post("/api/checkout/gone-shop")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "store not found"

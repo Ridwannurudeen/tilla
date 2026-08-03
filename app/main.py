@@ -1356,6 +1356,16 @@ def create_checkout(
         raise HTTPException(404, "store not found")
     if store.status == "pending_screening":
         raise HTTPException(409, "store is not yet live (pending content screening)")
+    if store.status == "sandbox":
+        # Not a 404: this store's page is publicly served, so "not found" was a
+        # refusal the buyer could only read as a glitch worth retrying. It has no
+        # payout wallet and no route can give it one, so name the permanent reason.
+        raise HTTPException(
+            409,
+            "this is a sample store — it was created without a receive address, so "
+            "it cannot take payments. Create the store again with a receive_address "
+            "to start selling.",
+        )
     if store.status != "live":
         raise HTTPException(404, "store not found")
     products = session.scalars(
