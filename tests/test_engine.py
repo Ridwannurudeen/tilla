@@ -916,7 +916,20 @@ def test_prompt_forbids_inventing_capabilities_the_merchant_never_claimed(monkey
     prompt = sent["messages"][0]["content"]
     assert "describe only what the merchant's description supports" in prompt
     assert "Never invent " in prompt
-    assert "vague and true beats detailed and false" in prompt
+    assert "Vague and true beats detailed and false" in prompt
+    # The first attempt at this fix FAILED in production while a test like the three
+    # lines above passed: the rule was present, but the field spec still said the
+    # blurb should be "benefit-led", and the model followed the instruction attached
+    # to the field. A constraint that contradicts its own field spec does nothing.
+    assert "benefit-led" not in prompt
+    assert "claiming ONLY what the merchant stated" in prompt
+    # Concrete negative example — the model followed the abstract rule far less
+    # reliably than it follows a worked example of the exact failure.
+    assert (
+        "do NOT add 'covering contract security, tokenomics, team credibility'"
+        in prompt
+    )
+    assert "A SHORT description must yield SHORT copy" in prompt
 
 
 def test_generate_quantises_price_to_micro_precision(monkeypatch):

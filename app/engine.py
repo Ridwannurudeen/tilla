@@ -872,8 +872,13 @@ def generate(desc):
         "Output ONLY valid JSON (no markdown) with EXACTLY these keys: "
         "store_name (short brand), tagline (<=6 words), hero_headline (punchy, <=8 words), "
         "hero_subcopy (1 sentence), "
+        # NOT "benefit-led". That word sat here while the claims rule below said the
+        # opposite, and the model followed the instruction attached to the field: a
+        # thin description still produced invented "team credibility" and "tokenomics".
+        # The constraint has to live ON the field, not only in a later paragraph.
         "products (an array of 1 to 4 objects, each an object with: name, blurb (1-2 sentences, "
-        "benefit-led), price_usdt (number), cta_text (<=4 words), image_query, image_subject) "
+        "claiming ONLY what the merchant stated — see the claims rule below), "
+        "price_usdt (number), cta_text (<=4 words), image_query, image_subject) "
         "— a focused catalog of related "
         "items that fit the brand; use a single item when the merchant clearly sells one thing, "
         "otherwise 2 to 4 distinct items, "
@@ -906,8 +911,14 @@ def generate(desc):
         # the buyer who pays on the strength of it is the one harmed.
         "and for claims: describe only what the merchant's description supports. Never invent "
         "specific capabilities, features, credentials, integrations, guarantees or coverage the "
-        "merchant did not state. When the description is thin, keep the copy short and general "
-        "rather than inventing specifics to fill it — vague and true beats detailed and false. "
+        "merchant did not state. Do NOT enumerate what a product examines, includes or covers "
+        "unless the merchant listed those items themselves — naming the checks a service performs "
+        "is a factual claim about their product, not marketing. Concretely: from 'I sell signed "
+        "token due-diligence reports for EVM tokens', write 'Signed due-diligence analysis for any "
+        "EVM token' and STOP; do NOT add 'covering contract security, tokenomics, team credibility' "
+        "or any similar list, because you cannot know which checks that merchant actually runs. "
+        "A SHORT description must yield SHORT copy — one plain sentence restating what they sell is "
+        "the correct output, not a failure to fill space. Vague and true beats detailed and false. "
         "emoji (single emoji for the brand), "
         # PHOTOGRAPHY. The store previously had none, and a wrong photo is worse
         # than no photo — a stock shot of a yoga mat on a store selling dumbbells
