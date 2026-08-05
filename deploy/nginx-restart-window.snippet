@@ -1,0 +1,32 @@
+# Deploy-window handling for tilla.gudman.xyz — paste inside the :443 server block.
+#
+# WHY. scripts/deploy.sh stops tilla-api, applies the release, migrates, then starts
+# it again. That is a real (short) downtime window, and on 2026-08-05 a paying buyer's
+# x402 replay landed inside it: nginx answered `GET /create-store` with a bare 502
+# (error.log: "connect() failed (111: Connection refused)"), and they published a
+# review reading "Payment succeeded, but storefront replay returned HTTP 502 and no
+# deliverable." Their money was in fact never at risk — a request that never reaches
+# the app cannot settle — but a 502 reads as "this service is broken" rather than
+# "retry in a moment", which is the wrong signal to send an autonomous buyer.
+#
+# WHAT. A refused upstream is a 502 nginx GENERATES itself, so error_page catches it
+# WITHOUT proxy_intercept_errors. That distinction is load-bearing: the app's own
+# 402 / 404 / 409 answers are part of the verified agent contract (a challenge, a
+# missing store, a paused catalog), and intercepting upstream error responses would
+# rewrite them. Never enable proxy_intercept_errors on this vhost.
+#
+# Verified 2026-08-05 with a temporary `location = /__deadprobe { proxy_pass
+# http://127.0.0.1:9; }` — returned 503 + Retry-After, then the probe was removed.
+# Regression-checked after: create-store 402, buy 402, unknown slug 404, paused store
+# 409, health/ready/discovery/feed/store 200, co-hosted vhosts untouched.
+#
+# NOTE: reload nginx (not restart), and re-test on a FRESH connection — an HTTP/2
+# keepalive can be served by a pre-reload worker and show the old behaviour once.
+
+error_page 502 504 = @tilla_restarting;
+location @tilla_restarting {
+    default_type application/json;
+    add_header Retry-After 20 always;
+    add_header Cache-Control "no-store" always;
+    return 503 '{"error":"temporarily_unavailable","detail":"Tilla is restarting briefly. No payment was taken — an unreachable server cannot settle. Retry in a few seconds."}';
+}
