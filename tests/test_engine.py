@@ -884,6 +884,41 @@ def test_prompt_makes_names_belong_to_the_merchant(monkeypatch):
     assert "never translate, shorten, prettify or substitute it" in prompt
 
 
+def test_prompt_forbids_inventing_capabilities_the_merchant_never_claimed(monkeypatch):
+    # Third instance of the prices/names rule, and the one that reaches a buyer's
+    # wallet: a "benefit-led" blurb from a thin description invented "team
+    # credibility and tokenomics analysis" for a due-diligence store whose product
+    # produces neither. A false capability claim on a merchant's own storefront.
+    import app.engine as engine
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": [{"text": "{}"}]}
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(
+        engine.requests,
+        "post",
+        lambda url, headers=None, json=None, timeout=None: sent.update(json) or _Resp(),
+    )
+    try:
+        engine.generate("I sell signed token due-diligence reports for EVM tokens")
+    except Exception:
+        pass  # the empty {} payload fails downstream; the prompt is the assertion
+    prompt = sent["messages"][0]["content"]
+    assert "describe only what the merchant's description supports" in prompt
+    assert "Never invent " in prompt
+    assert "vague and true beats detailed and false" in prompt
+
+
 def test_generate_quantises_price_to_micro_precision(monkeypatch):
     # store.json is written from generated content before the Product row exists,
     # so a price finer than USDT0's 6dp would persist as a rounded price_micro the

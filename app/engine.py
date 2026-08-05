@@ -895,6 +895,19 @@ def generate(desc):
         "and for names: if the merchant's description states a store name or a product name, use "
         "that EXACT name — never translate, shorten, prettify or substitute it. Invent a name only "
         "when the merchant has not stated one. "
+        # CLAIMS ARE THE MERCHANT'S TOO — same rule as prices and names, and the one
+        # that reaches a buyer's wallet. Asked for a "benefit-led" blurb from a thin
+        # description, the model fills the space with impressive specifics: a store
+        # selling token due-diligence reports was published with copy promising
+        # "team credibility and tokenomics analysis" — words the merchant never
+        # wrote, describing analysis their product does not produce. The merchant
+        # reported it themselves (docs/ISSUES.md #2). That is not marketing polish;
+        # it is a false advertisement we printed on someone else's storefront, and
+        # the buyer who pays on the strength of it is the one harmed.
+        "and for claims: describe only what the merchant's description supports. Never invent "
+        "specific capabilities, features, credentials, integrations, guarantees or coverage the "
+        "merchant did not state. When the description is thin, keep the copy short and general "
+        "rather than inventing specifics to fill it — vague and true beats detailed and false. "
         "emoji (single emoji for the brand), "
         # PHOTOGRAPHY. The store previously had none, and a wrong photo is worse
         # than no photo — a stock shot of a yoga mat on a store selling dumbbells

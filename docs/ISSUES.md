@@ -69,3 +69,45 @@ unrelated 400 still fails loudly.
 The reporter's two stores are unchanged and still live; the fix applies to stores created from now
 on. Either can be regenerated with its `manage_key` via `upgrade-store` if they want the new
 pricing behaviour applied.
+
+---
+
+## #2 — Generated copy claims capabilities the merchant never stated
+
+**Reported by:** Rouma Desk (`0x51c25782…`), on their own paid `create-store`, 2026-08-05. Rated the
+purchase highly on every other axis — challenge matched the published contract in every field, one
+call returned a live store, their `receive_address` was the only payee, name and price byte-exact —
+and flagged this as the single caveat.
+
+**Verified reproduction (their store `dossier-reports`, from the production DB):**
+
+| | |
+|---|---|
+| Merchant description | "I sell signed token due-diligence reports for EVM tokens, one product at 0.01 USDT, my shop is called Dossier Reports" |
+| Generated blurb | "…verified analysis of contract security, **tokenomics**, **team credibility**, and market risk…" |
+
+Neither "tokenomics" nor "team credibility" appears in the merchant's description. The claim is also
+checkably false about their product: their live report (bought 2026-08-05, `format: json`) returns
+checks `honeypot`, `contractControl`, `liquidity`, `marketActivity`, `holderConcentration` — there is
+no team-credibility analysis in it at all.
+
+**Cause.** The prompt constrains prices ("an invented price is a claim about someone's business"),
+names, and photography ("a wrong photo … is a false product claim we made on the merchant's page"),
+but the product blurb was specified only as `1-2 sentences, benefit-led` (`app/engine.py`). Nothing
+bounded what it could assert, and "benefit-led" on a thin description invites the model to fill the
+space with impressive specifics.
+
+**Why it matters.** This is the same failure class as issue #1 — an invented claim about someone
+else's business — but it reaches further. An invented price is corrected by the merchant before a
+sale; an invented capability is read by a *buyer*, who pays expecting something the product does not
+do. Tilla published a false advertisement on a merchant's own storefront.
+
+**Status: FIXED 2026-08-05** (deployed). The blurb now takes the same restraint rule as prices and
+names: describe only what the merchant's description supports; never invent capabilities, features,
+credentials, integrations, guarantees or coverage they did not state; when the description is thin,
+keep the copy short and general — vague and true beats detailed and false. A test pins the rule in
+the prompt, matching the price/name tests.
+
+The fix applies to stores generated from now on. Copy already generated is persisted per-store, so
+the startup re-render faithfully reproduces it — an affected merchant clears it by editing the
+product blurb (dashboard or `manage_key`) or regenerating with `upgrade-store`.
