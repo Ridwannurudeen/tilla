@@ -302,6 +302,42 @@ def test_feed_404_for_non_live():
     assert client.get("/s/ghost/feed.json").status_code == 404
 
 
+def test_feed_store_block_advertises_payable_and_keeps_every_other_key():
+    # `payable` was requested (0xqdee, 2026-08-05) because an agent otherwise learns
+    # whether a store can take money by attempting a purchase. The key set is pinned
+    # whole: this addition must be PURELY additive, since agents parse this block.
+    _seed(slug="payshop", pay_to="0x" + "c" * 40, price_micro=4_000_000)
+    store = client.get("/s/payshop/feed.json").json()["store"]
+    assert set(store) == {"slug", "name", "description", "url", "fulfilment", "payable"}
+    assert store["payable"] is True
+    # a real payout wallet is what makes it true, and it is still never published here
+    assert "pay_to" not in store and "payee" not in store
+
+
+def test_feed_payable_is_false_wherever_the_money_path_would_refuse():
+    # Same source of truth as the challenge surface, so the feed cannot advertise a
+    # store the buy path refuses: a live store whose last active product was detached
+    # answers 409 "store has no active product", and its feed says payable false while
+    # still resolving by direct link.
+    from app import agentic
+
+    paused = _seed(slug="paused-payable")
+    with SessionLocal() as s:
+        for prod in s.scalars(select(Product).where(Product.store_id == paused)):
+            prod.active = False
+        s.commit()
+    body = client.get("/s/paused-payable/feed.json").json()
+    assert body["products"] == []
+    assert body["store"]["payable"] is False
+
+    # A sandbox store (created with no receive_address) has no payout wallet at all.
+    # Its feed 404s, so it never gets to claim anything — and the gate the feed reads
+    # is the one that refuses it, so no route can ever call it payable.
+    _seed(slug="sandbox-payable", status="sandbox")
+    assert client.get("/s/sandbox-payable/feed.json").status_code == 404
+    assert agentic._guard_store_status("sandbox-payable") is not None
+
+
 def test_feed_hostile_store_name_is_inert_json():
     _seed(
         slug="xss",

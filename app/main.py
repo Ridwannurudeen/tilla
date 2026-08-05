@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -18,6 +19,12 @@ from xml.sax.saxutils import escape
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Path, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from itsdangerous import BadSignature, SignatureExpired
 from pydantic import (
     BaseModel,
@@ -33,6 +40,7 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from app import (
@@ -68,7 +76,12 @@ from app.db import (
     expected_migration_head,
     get_session,
 )
-from app.engine import GenerationUnavailable
+from app.engine import (
+    RECOVERY_NOTE,
+    SANDBOX_RECOVERY_NOTE,
+    GenerationUnavailable,
+    IdempotentReplay,
+)
 from app.engine import create_store as gen_store
 from app.engine import rerender_stores, resume_pending, resync_catalog, upgrade_store
 from app.limiter import limiter
@@ -653,7 +666,9 @@ CREATE_STORE_SUMMARY = (
     "optional: an empty or absent body creates a sample store, and WITHOUT "
     "receive_address the store is a hidden, non-payable sample whose buy path "
     "404s. A price stated in the description is used for that product exactly, "
-    "never adjusted."
+    "never adjusted. Send an 'Idempotency-Key' header to make a retry safe: if the "
+    "response is lost, replaying that key returns 409 with the store you already "
+    "paid for and settles no second payment."
 )
 
 
@@ -741,6 +756,167 @@ class CreateStoreBody(BaseModel):
         return v
 
 
+# ---------- pre-settle failures on the paid create route ----------
+# The x402 middleware calls the handler FIRST and settles afterwards, and it skips
+# settlement outright on any status >= 400 ("Don't settle on error responses",
+# x402/http/middleware/fastapi.py). So every error response this route returns is
+# proof that no funds moved — and 0xqdee (2026-08-05) read a deploy-window 502 as a
+# COMPLETED payment and was about to retry with a second signed payment. Saying it
+# in the body is the difference between one charge and two, not decoration.
+NOT_CHARGED_NOTE = (
+    "this attempt was NOT charged: a create-store error response is returned before "
+    "settlement, so no payment was taken for it and retrying costs nothing"
+)
+
+# Charset-restricted because the key reaches a DB query and is echoed back in the 409:
+# [A-Za-z0-9._:-] covers every uuid, ULID, timestamp and "<wallet>-<n>" form a caller
+# would generate, and admits nothing that could carry markup or a SQL/glob wildcard.
+# The 200-char cap matches the column (models.Store.create_idempotency_key).
+_IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9._:-]{1,200}")
+
+
+def _failure_ref(request: Request) -> str:
+    """One short correlation id per request, minted on first use and then reused, so
+    the error body and every log line for that failure carry the SAME id and a buyer
+    who quotes it can be found in journald with one grep. 12 hex chars of a uuid4:
+    unique across far more traffic than this route sees, and it discloses no address,
+    no order id and nothing about our internals."""
+    ref = getattr(request.state, "failure_ref", None)
+    if ref is None:
+        ref = uuid.uuid4().hex[:12]
+        request.state.failure_ref = ref
+    return ref
+
+
+def _pre_settle_body(detail, ref: str) -> dict:
+    """The error envelope for the paid create route: the ORIGINAL ``detail``,
+    untouched in both text and type because agents and tests parse it, plus the
+    not-charged statement and the correlation id as SIBLING keys."""
+    return {"detail": detail, "not_charged": NOT_CHARGED_NOTE, "ref": ref}
+
+
+def _is_paid_create(request: Request) -> bool:
+    """Scope for the two handlers below. Only this route: on a free route "you were
+    not charged" is noise, and the paid buy path settles through agentic.py."""
+    return request.url.path == "/create-store"
+
+
+async def _create_store_http_exception(request: Request, exc: StarletteHTTPException):
+    """Every HTTPException this route raises — the 422 screening refusal, the 503s,
+    the Idempotency-Key 422 — carries the not-charged line and a correlation id.
+    Registered as a handler rather than edited into each raise site because the most
+    confusing failure of all, a 422 for a malformed brand_color or receive_address, is
+    raised by pydantic before the handler body runs and has no raise site to edit."""
+    if not _is_paid_create(request):
+        return await http_exception_handler(request, exc)
+    ref = _failure_ref(request)
+    logger.warning(
+        "create-store refused pre-settle: ref=%s status=%s", ref, exc.status_code
+    )
+    return JSONResponse(
+        _pre_settle_body(exc.detail, ref),
+        status_code=exc.status_code,
+        headers=getattr(exc, "headers", None),
+    )
+
+
+async def _create_store_validation_exception(
+    request: Request, exc: RequestValidationError
+):
+    if not _is_paid_create(request):
+        return await request_validation_exception_handler(request, exc)
+    ref = _failure_ref(request)
+    logger.warning("create-store body rejected pre-settle: ref=%s", ref)
+    return JSONResponse(
+        _pre_settle_body(jsonable_encoder(exc.errors()), ref), status_code=422
+    )
+
+
+app.add_exception_handler(StarletteHTTPException, _create_store_http_exception)
+app.add_exception_handler(RequestValidationError, _create_store_validation_exception)
+
+
+def _idempotency_scope(request: Request) -> str | None:
+    """The wallet an Idempotency-Key is scoped to: the EIP-3009 payer of the x402
+    payment the middleware VERIFIED for this request, lowercased. The same extraction
+    the buy path uses (``request.state.payment_payload``, set by the middleware before
+    it calls the route).
+
+    SCOPED, never global. If one key namespace were shared, the first caller ever to
+    use "retry-1" would refuse every later caller's paid create for a string they
+    never chose, and the 409 would hand them that stranger's slug, url, product and
+    price — including for a hidden sandbox store. That is a denied purchase plus an
+    information leak, traded for a double charge: strictly worse than the bug.
+
+    None when there is no verified payer, which means the paywall is not installed
+    (OKX_API_KEY unset — dev and the test suite). The key is then ignored: with no
+    paywall there is no payment to duplicate, so there is nothing to protect and
+    nothing to scope by. In production the middleware 402s an unpaid request before
+    this handler runs, so a paid create always has a payer."""
+    payload = getattr(request.state, "payment_payload", None)
+    inner = getattr(payload, "payload", None)
+    auth = inner.get("authorization") if isinstance(inner, dict) else None
+    frm = auth.get("from") if isinstance(auth, dict) else None
+    return frm.lower() if isinstance(frm, str) and frm else None
+
+
+def _already_created_409(request: Request, slug: str) -> JSONResponse:
+    """The reply to a create whose Idempotency-Key already funded a store.
+
+    409, and it MUST stay >= 400. That is the mechanism, not a preference between
+    status codes: the middleware skips settlement on any >= 400, so refusing here is
+    exactly what makes the buyer's retry FREE — the fresh payment they signed for it
+    is never settled. Anyone who "tidies" this to 200 re-introduces the double charge
+    the whole feature exists to prevent, silently, and the buyer pays twice for one
+    store. Everything the caller needs is in the 409 body instead.
+
+    Built from the Store row, not from a create result, so a pending_screening or
+    sandbox store answers as truthfully as a live one."""
+    ref = _failure_ref(request)
+    logger.warning("create-store idempotent replay: ref=%s slug=%s", ref, slug)
+    with SessionLocal() as session:
+        store = session.scalar(select(Store).where(Store.slug == slug))
+        if store is None:
+            # No code path deletes a store, so this is only reachable when an operator
+            # removed the row out of band — NOT dead code, and worth three lines: the
+            # alternative is an AttributeError, and a 500 on a paid route is a worse
+            # answer than a 409 that says the same fund-safe thing.
+            raise HTTPException(409, "a store already exists for this Idempotency-Key")
+        primary = session.scalar(
+            select(Product)
+            .where(Product.store_id == store.id)
+            .order_by(Product.id)
+            .limit(1)
+        )
+        return JSONResponse(
+            {
+                **_pre_settle_body(
+                    "this Idempotency-Key already created a store; it was not "
+                    "created again and this attempt was not charged",
+                    ref,
+                ),
+                "slug": store.slug,
+                "url": f"{config.PUBLIC_BASE_URL}/s/{store.slug}/",
+                "product_name": primary.name if primary else "",
+                "price_usdt": primary.price_micro / 1e6 if primary else 0,
+                "status": store.status,
+                # The one thing this CANNOT return: manage_key is minted once and only
+                # its sha256 is persisted (delivery.hash_manage_key), so it cannot be
+                # looked up, and minting a fresh one here would hand store control to
+                # anyone who replayed a key. Without it the caller keeps the store but
+                # loses the headless upgrade-store / add-product / deliverable-upload
+                # path until they use the wallet route — which is what this says. Same
+                # text the create response uses, shared so the two cannot drift.
+                "recovery": (
+                    SANDBOX_RECOVERY_NOTE
+                    if store.status == "sandbox"
+                    else RECOVERY_NOTE
+                ),
+            },
+            status_code=409,
+        )
+
+
 def _run_create_store(
     description: str,
     receive_address: str | None,
@@ -749,6 +925,10 @@ def _run_create_store(
     deliverable: dict | None = None,
     notify_agent_id: int | None = None,
     brand_color: str | None = None,
+    *,
+    ref: str,
+    idempotency_addr: str | None = None,
+    idempotency_key: str | None = None,
 ):
     try:
         return gen_store(
@@ -760,10 +940,13 @@ def _run_create_store(
             notify_agent_id=notify_agent_id,
             brand_color=brand_color,
             sandbox=receive_address is None,
+            idempotency_addr=idempotency_addr,
+            idempotency_key=idempotency_key,
         )
     except ScreeningBlocked as exc:
         logger.warning(
-            "store creation blocked by screening: risk_level=%s",
+            "store creation blocked by screening: ref=%s risk_level=%s",
+            ref,
             exc.verdict.get("risk_level"),
         )
         raise HTTPException(422, "content did not pass safety screening") from exc
@@ -771,7 +954,7 @@ def _run_create_store(
         # An Anthropic outage (or malformed output) is a 503, not a 500. 503 >= 400,
         # so the x402 middleware skips settlement — a paid create-store during an
         # outage moves ZERO funds. No canned/cached fallback store, ever.
-        logger.warning("store generation unavailable: %s", exc)
+        logger.warning("store generation unavailable: ref=%s %s", ref, exc)
         raise HTTPException(
             503,
             "store generation temporarily unavailable — retry shortly",
@@ -782,8 +965,44 @@ def _run_create_store(
 @app.post("/create-store")
 @limiter.limit("6/minute")
 def create_store_post(request: Request, body: CreateStoreBody | None = None):
+    ref = _failure_ref(request)
     if not os.environ.get("TILLA_LLM_KEY"):
         raise HTTPException(503, "generation unavailable")
+    # Header-only, deliberately: adding a field to CreateStoreBody would change
+    # model_json_schema(), which IS the published 402 challenge body and its
+    # extensions, and the advertised input contract must stay byte-identical. An
+    # empty or whitespace-only header normalises to None — treating "" as a key would
+    # give every later caller who sends one a STRANGER'S 409.
+    idempotency_key = (request.headers.get("Idempotency-Key") or "").strip() or None
+    if idempotency_key is not None and not _IDEMPOTENCY_KEY.fullmatch(idempotency_key):
+        # 422 BEFORE settle, same convention as a malformed receive_address: refusing
+        # costs the caller nothing, while accepting a key we cannot store or safely
+        # echo would hand back an idempotency guarantee that does not hold.
+        raise HTTPException(
+            422,
+            "Idempotency-Key must be 1-200 characters of letters, digits, '.', "
+            "'_', ':' or '-'",
+        )
+    # The key is only ever stored WITH the payer it is scoped to — a row holding one
+    # without the other matches no lookup and would mean nothing. No verified payer
+    # means no paywall (dev/test), where there is no payment to duplicate either.
+    idempotency_addr = _idempotency_scope(request) if idempotency_key else None
+    if idempotency_addr is None:
+        idempotency_key = None
+    if idempotency_key:
+        # FAST PATH for the case this exists for: a retry after a lost response, which
+        # arrives seconds or minutes later. Answering it here saves a whole LLM
+        # generation; the unique index inside create_store's transaction is what
+        # catches the two-requests-at-once race the pre-check cannot see.
+        with SessionLocal() as session:
+            held = session.scalar(
+                select(Store.slug).where(
+                    Store.create_idempotency_addr == idempotency_addr,
+                    Store.create_idempotency_key == idempotency_key,
+                )
+            )
+        if held:
+            return _already_created_409(request, held)
     # `None` covers a POST with no JSON body at all — the same caller-supplied-
     # nothing case as `{}`, so it earns the same sample store, not a 422.
     body = body or CreateStoreBody()
@@ -798,14 +1017,31 @@ def create_store_post(request: Request, body: CreateStoreBody | None = None):
     notify_agent_id = (
         b2b.parse_agent_id(body.notify_agent_id) if body.notify_agent_id else None
     )
-    result = _run_create_store(
-        description,
-        body.receive_address,
-        body.theme,
-        delivery=body.delivery,
-        deliverable=body.deliverable.model_dump() if body.deliverable else None,
-        notify_agent_id=notify_agent_id,
-    )
+    try:
+        result = _run_create_store(
+            description,
+            body.receive_address,
+            body.theme,
+            delivery=body.delivery,
+            deliverable=body.deliverable.model_dump() if body.deliverable else None,
+            notify_agent_id=notify_agent_id,
+            # brand_color was VALIDATED here and then never passed on, so the paid
+            # agent path advertised a field in its own 402 challenge, 422'd a bad
+            # value to prove it was reading it, and silently ignored a good one. The
+            # whole chain already existed — _run_create_store takes it, gen_store
+            # applies the hue, the dashboard path passes it — only this call omitted
+            # the keyword, which is why every test passed. Same class as the
+            # optional-dep-never-wired bugs: a caller guarantee dropped in silence.
+            brand_color=body.brand_color,
+            ref=ref,
+            idempotency_addr=idempotency_addr,
+            idempotency_key=idempotency_key,
+        )
+    except IdempotentReplay as exc:
+        # Two requests carrying one key raced and this one lost the unique index
+        # inside create_store's transaction. The winner's store is committed and paid
+        # for; this attempt is refused >= 400 so its payment never settles.
+        return _already_created_409(request, exc.slug)
     if isinstance(result, dict) and result.get("status") == "sandbox":
         result["note"] = (
             "no merchant receive_address provided; a hidden, non-payable sample "

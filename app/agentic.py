@@ -2196,6 +2196,30 @@ def feed_json(
             # feed never saw the discovery row, and this is the one thing it cannot
             # infer from the catalog.
             "fulfilment": _store_fulfilment_mode(session, store),
+            # Whether a buy on this store can settle at all. Asked for by 0xqdee
+            # (2026-08-05) as the one thing an agent otherwise discovers by
+            # attempting a purchase and reading the refusal.
+            #
+            # Derived from _guard_store_status — the SAME predicate the agent guard
+            # runs before any 402 is emitted, and the same refusals the human
+            # /api/checkout/{slug} makes — never a second computation of "can this
+            # store take money". So it is false for a store created without a
+            # receive_address (a sample with no payout wallet: 409 at checkout, 404
+            # on the buy path) and false for a live store whose last active product
+            # was detached (409, "store has no active product"). A DB error there
+            # fails open to the payment middleware, and this key answers the same
+            # way, so the feed and the challenge cannot disagree.
+            #
+            # DELIBERATELY NOT HERE: `payee` / `pay_to` at store level. Every
+            # product already carries requiredFunds.pay_to, and the authoritative
+            # payTo is the live 402 challenge — which a merchant specifically praised
+            # us for. A store-level duplicate is the copy that gets cached and
+            # mirrored (app/federation.py ingests and caches peer feeds) and then
+            # paid without a fresh challenge, so it is the one field where a second
+            # copy buys nothing and can only ever go stale. `theme` is cosmetic and
+            # skipped for the same reason it is absent everywhere else on the agent
+            # surface: it is not a fact an agent transacts on.
+            "payable": _guard_store_status(store.slug) is None,
         },
         "products": [
             _feed_product(session, store, slug, product, store_url)

@@ -910,6 +910,37 @@ def test_stated_brand_color_beats_the_models_guess(tmp_path, monkeypatch):
     assert "palette" in store.content  # ...and the derived system still resolved
 
 
+@respx.mock
+def test_paid_route_actually_forwards_the_stated_brand_color(tmp_path, monkeypatch):
+    # The test above proves the ENGINE honours brand_color — it calls create_store()
+    # directly. That is exactly why the real defect survived: create_store_post
+    # validated body.brand_color (422 on a bad value, so it demonstrably read the
+    # field) and then never passed it on, while the 402 challenge advertised it as an
+    # accepted input. Every existing test passed. This one drives the HTTP route, so
+    # a dropped keyword fails here.
+    import app.engine as engine
+    from app.models import Store
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    monkeypatch.setenv("TILLA_LLM_KEY", "k")
+    _fake_llm(monkeypatch, _content("Tinted"))
+    _allow()
+
+    r = client.post(
+        "/create-store",
+        json={
+            "description": "I sell soy candles for 25 USDT",
+            "receive_address": "0x" + "a" * 40,
+            "brand_color": "#FF0000",
+        },
+    )
+    assert r.status_code == 200, r.text
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == r.json()["slug"]))
+    assert store.content["brand"]["hue"] == 0.0  # red, as stated
+    assert "palette" in store.content  # derived system still resolved
+
+
 def test_brand_color_validators_normalize_and_refuse():
     import pytest
     from pydantic import ValidationError

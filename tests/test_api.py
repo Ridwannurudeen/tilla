@@ -1,6 +1,9 @@
 import json
+import os
+import pathlib
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -390,6 +393,463 @@ def test_create_store_invalid_theme_422():
     # no LLM key / mock is needed.
     r = client.post("/create-store", json={"description": "socks", "theme": "neon"})
     assert r.status_code == 422
+
+
+# ---------- idempotent create + pre-settle failure envelope ----------
+# 0xqdee (2026-08-05) paid for a store, the store was created, the payment settled —
+# and a deploy-window 502 lost the response. Holding no slug and no manage_key, their
+# only move was a retry, and a retry carrying a NEW signed payment buys a SECOND store
+# and pays a SECOND time. These pin the two halves of the fix: an Idempotency-Key that
+# already funded a store is answered 409 (>= 400, so the x402 middleware skips
+# settlement and the duplicate payment never settles), and every error this route
+# returns says so in words with a correlation id to quote.
+_MERCHANT = "0x" + "a" * 40
+_PAYER = "0x" + "1" * 40
+
+
+def _store_rows():
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    with SessionLocal() as s:
+        return list(s.scalars(select(Store.slug).order_by(Store.id)))
+
+
+def _idempotency_columns():
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    with SessionLocal() as s:
+        return list(
+            s.execute(
+                select(
+                    Store.create_idempotency_addr, Store.create_idempotency_key
+                ).order_by(Store.id)
+            ).all()
+        )
+
+
+def _paid_by(monkeypatch, payer):
+    """Stand in for the x402 payer the middleware would have verified. The suite runs
+    with OKX_API_KEY unset, so no middleware runs and request.state.payment_payload
+    never exists; the extraction itself is pinned against a real PaymentPayload by
+    test_idempotency_scope_reads_the_signed_payer below. Returns the dict so a test
+    can switch payers mid-flight."""
+    seen = {"addr": payer}
+    monkeypatch.setattr("app.main._idempotency_scope", lambda request: seen["addr"])
+    return seen
+
+
+def _allow_create(tmp_path, monkeypatch, name="Idem Store"):
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    _mock_llm(
+        monkeypatch,
+        {"store_name": name, "product_name": "Honest Socks", "price_usdt": 9},
+    )
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+
+
+def test_idempotency_scope_reads_the_signed_payer():
+    """The scope is the EIP-3009 ``from`` of the payment the middleware verified,
+    lowercased — the same field the buy path reads off request.state.payment_payload.
+    Built from the real PaymentPayload so the stub the HTTP tests use cannot drift
+    from the shape production actually receives."""
+    from starlette.requests import Request
+    from x402.schemas import PaymentPayload, PaymentRequirements
+
+    from app.payment import PAYMENT_ASSET
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/create-store",
+        "headers": [],
+        "query_string": b"",
+        "client": ("test", 1),
+        "server": ("test", 80),
+        "scheme": "http",
+    }
+    req = Request(scope)
+    assert app.main._idempotency_scope(req) is None  # no paywall -> no payer
+    req.state.payment_payload = PaymentPayload(
+        x402_version=2,
+        payload={
+            "authorization": {"from": "0xAB" + "1" * 38, "nonce": "0x" + "2" * 64}
+        },
+        accepted=PaymentRequirements(
+            scheme="exact",
+            network="eip155:196",
+            asset=PAYMENT_ASSET,
+            amount="50000",
+            pay_to="0x" + "b" * 40,
+            max_timeout_seconds=300,
+            extra={},
+        ),
+    )
+    assert app.main._idempotency_scope(req) == "0xab" + "1" * 38
+
+
+@respx.mock
+def test_same_idempotency_key_returns_409_with_the_first_store(tmp_path, monkeypatch):
+    _allow_create(tmp_path, monkeypatch)
+    _paid_by(monkeypatch, _PAYER)
+    body = {"description": "I sell honest socks", "receive_address": _MERCHANT}
+    head = {"Idempotency-Key": "retry-1"}
+
+    first = client.post("/create-store", json=body, headers=head)
+    assert first.status_code == 200
+    slug = first.json()["slug"]
+
+    second = client.post("/create-store", json=body, headers=head)
+    # 409, not 200: >= 400 is what makes the middleware skip settlement, so the fresh
+    # payment on this retry never settles. Turning it into a 200 double-charges.
+    assert second.status_code == 409
+    replay = second.json()
+    assert replay["slug"] == slug
+    assert replay["url"].endswith(f"/s/{slug}/")
+    assert replay["product_name"]
+    assert replay["price_usdt"] == 9.0
+    assert replay["status"] == "live"
+    # THE money assertion: one payment, one store row. No second store, ever.
+    assert _store_rows() == [slug]
+    # ...and the key rode in on the store's OWN insert, not a patch afterwards: a
+    # commit that lands without its key is what makes the retry buy a second store.
+    assert _idempotency_columns() == [(_PAYER, "retry-1")]
+
+
+@respx.mock
+def test_idempotent_replay_409_says_not_charged_and_how_to_recover(
+    tmp_path, monkeypatch
+):
+    _allow_create(tmp_path, monkeypatch)
+    _paid_by(monkeypatch, _PAYER)
+    body = {"description": "I sell honest socks", "receive_address": _MERCHANT}
+    head = {"Idempotency-Key": "abc.123:xyz-9"}
+    assert client.post("/create-store", json=body, headers=head).status_code == 200
+
+    replay = client.post("/create-store", json=body, headers=head).json()
+    assert "NOT charged" in replay["not_charged"]
+    assert "already created a store" in replay["detail"]
+    assert len(replay["ref"]) == 12
+    # The manage_key CANNOT come back: only its sha256 is stored, and minting a fresh
+    # one would hand store control to whoever replayed a key. The 409 says so and
+    # names the wallet path instead of implying full recovery.
+    assert "manage_key" not in replay
+    assert "cannot be re-issued" in replay["recovery"]
+    assert "receive_address" in replay["recovery"]
+    assert "dashboard" in replay["recovery"]
+
+
+@respx.mock
+def test_no_idempotency_key_still_creates_two_stores(tmp_path, monkeypatch):
+    # Proves the fix did not silently make every create idempotent: with no key, two
+    # identical paid calls are two paid stores, exactly as before.
+    _allow_create(tmp_path, monkeypatch)
+    _paid_by(monkeypatch, _PAYER)
+    body = {"description": "I sell honest socks", "receive_address": _MERCHANT}
+    first = client.post("/create-store", json=body)
+    second = client.post("/create-store", json=body)
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["slug"] != second.json()["slug"]
+    assert len(_store_rows()) == 2
+
+
+@respx.mock
+def test_two_payers_may_use_the_same_idempotency_key(tmp_path, monkeypatch):
+    # The key is scoped to the PAYER (uq_stores_create_idem), so one caller's "retry-1"
+    # can never refuse another's paid create — nor leak them that store's slug, url,
+    # product and price in a 409 they did not earn.
+    _allow_create(tmp_path, monkeypatch)
+    payer = _paid_by(monkeypatch, _PAYER)
+    head = {"Idempotency-Key": "retry-1"}
+    first = client.post(
+        "/create-store",
+        json={"description": "socks", "receive_address": _MERCHANT},
+        headers=head,
+    )
+    assert first.status_code == 200
+
+    payer["addr"] = "0x" + "2" * 40
+    second = client.post(
+        "/create-store",
+        json={"description": "socks", "receive_address": "0x" + "c" * 40},
+        headers=head,
+    )
+    assert second.status_code == 200
+    assert second.json()["slug"] != first.json()["slug"]
+    assert len(_store_rows()) == 2
+
+
+@respx.mock
+def test_malformed_idempotency_key_is_422_before_anything_is_created(
+    tmp_path, monkeypatch
+):
+    # Charset and length are refused BEFORE settle (>= 400 -> no settlement), so the
+    # caller pays nothing for a key we could neither store nor safely echo.
+    _allow_create(tmp_path, monkeypatch)
+    _paid_by(monkeypatch, _PAYER)
+    body = {"description": "socks", "receive_address": _MERCHANT}
+    for bad in ("has space", "semi;colon", "a" * 201):
+        r = client.post("/create-store", json=body, headers={"Idempotency-Key": bad})
+        assert r.status_code == 422, bad
+        assert "Idempotency-Key must be" in r.json()["detail"]
+        assert "NOT charged" in r.json()["not_charged"]
+    assert _store_rows() == []
+
+
+@respx.mock
+def test_blank_idempotency_key_is_treated_as_absent(tmp_path, monkeypatch):
+    # An empty or whitespace-only header is NOT a key: storing "" would give every
+    # later caller who sends one a stranger's 409. It means today's behaviour instead.
+    _allow_create(tmp_path, monkeypatch)
+    _paid_by(monkeypatch, _PAYER)
+    body = {"description": "socks", "receive_address": _MERCHANT}
+    first = client.post("/create-store", json=body, headers={"Idempotency-Key": "   "})
+    second = client.post("/create-store", json=body, headers={"Idempotency-Key": ""})
+    assert first.status_code == 200 and second.status_code == 200
+    assert len(_store_rows()) == 2
+
+
+@respx.mock
+def test_idempotency_key_without_a_verified_payer_is_ignored(tmp_path, monkeypatch):
+    # No paywall installed (OKX_API_KEY unset) means no payer to scope the key to —
+    # and no payment to duplicate. The key is dropped rather than stored half-scoped
+    # under a NULL payer, where it would match no lookup and mean nothing. Production
+    # cannot reach this: the middleware 402s an unpaid create-store before the handler.
+    _allow_create(tmp_path, monkeypatch)
+    body = {"description": "socks", "receive_address": _MERCHANT}
+    head = {"Idempotency-Key": "retry-1"}
+    first = client.post("/create-store", json=body, headers=head)
+    second = client.post("/create-store", json=body, headers=head)
+    assert first.status_code == 200 and second.status_code == 200
+    assert len(_store_rows()) == 2
+    assert _idempotency_columns() == [(None, None), (None, None)]
+
+
+def test_create_store_503_without_llm_key_says_not_charged_with_a_ref():
+    r = client.post("/create-store", json={"description": "socks"})
+    assert r.status_code == 503
+    body = r.json()
+    assert body["detail"] == "generation unavailable"  # existing text, untouched
+    assert "NOT charged" in body["not_charged"]
+    assert len(body["ref"]) == 12
+
+
+@respx.mock
+def test_create_store_503_on_generation_outage_keeps_retry_after(tmp_path, monkeypatch):
+    import app.engine as engine
+
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+
+    def _down(desc):
+        raise engine.GenerationUnavailable("anthropic unreachable")
+
+    monkeypatch.setattr("app.engine.generate", _down)
+    r = client.post("/create-store", json={"description": "socks"})
+    assert r.status_code == 503
+    assert r.headers["Retry-After"] == "60"
+    body = r.json()
+    assert body["detail"] == "store generation temporarily unavailable — retry shortly"
+    assert "NOT charged" in body["not_charged"]
+    assert len(body["ref"]) == 12
+
+
+def test_create_store_422_on_bad_brand_color_says_not_charged_with_a_ref():
+    # The pydantic 422 — no raise site in the handler to edit, which is why the
+    # envelope is applied by an exception handler scoped to this route.
+    r = client.post("/create-store", json={"brand_color": "not-a-colour"})
+    assert r.status_code == 422
+    body = r.json()
+    assert isinstance(body["detail"], list)  # FastAPI's error list, unchanged in shape
+    assert "NOT charged" in body["not_charged"]
+    assert len(body["ref"]) == 12
+
+
+@respx.mock
+def test_create_store_422_on_screening_block_says_not_charged(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    _mock_llm(monkeypatch, {"store_name": "Bad Store", "price_usdt": 9})
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"verdict": "BLOCK", "risk_level": "high"}
+        )
+    )
+    r = client.post("/create-store", json={"description": "something unsafe"})
+    assert r.status_code == 422
+    body = r.json()
+    assert body["detail"] == "content did not pass safety screening"
+    assert "NOT charged" in body["not_charged"]
+    assert len(body["ref"]) == 12
+
+
+def test_free_routes_keep_the_plain_error_body():
+    # The envelope is scoped to the paid create route: on a free route "you were not
+    # charged" is noise, and every other route's body stays byte-identical.
+    r = client.post("/api/checkout/does-not-exist")
+    assert r.status_code == 404
+    assert r.json() == {"detail": "store not found"}
+
+
+@respx.mock
+def test_correlation_ref_is_logged_with_the_failure(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr("app.engine.STORES_DIR", tmp_path)
+    _mock_llm(monkeypatch, {"store_name": "Bad Store", "price_usdt": 9})
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"verdict": "BLOCK", "risk_level": "high"}
+        )
+    )
+    with caplog.at_level(logging.WARNING, logger="tilla"):
+        r = client.post("/create-store", json={"description": "something unsafe"})
+    ref = r.json()["ref"]
+    # The id a buyer quotes must find BOTH lines: the cause and the refusal.
+    assert f"ref={ref} risk_level=high" in caplog.text
+    assert f"ref={ref} status=422" in caplog.text
+
+
+@respx.mock
+def test_idempotency_race_loser_never_deletes_the_winners_paid_store(
+    tmp_path, monkeypatch
+):
+    """The race the pre-check cannot see: a live create runs ~15s, agent clients give
+    up around 10s and retry, so both attempts are in the pipeline at once and the
+    loser trips the unique index at INSERT. The old handler read every IntegrityError
+    as a slug collision and rmtree'd the directory — which, in the window where the
+    loser had resolved the SAME slug, is the winner's committed, PAID store: buyer
+    charged, store URL 404. unique_slug is pinned to the winner's slug to put the
+    loser exactly in that window."""
+    import app.engine as engine
+
+    _allow_create(tmp_path, monkeypatch, name="Race Store")
+    winner = engine.create_store(
+        "socks", _MERCHANT, idempotency_addr=_PAYER, idempotency_key="race-1"
+    )
+    slug = winner["slug"]
+    assert (tmp_path / slug / "index.html").exists()
+
+    monkeypatch.setattr("app.engine.unique_slug", lambda base, content=None: slug)
+    with pytest.raises(engine.IdempotentReplay) as caught:
+        engine.create_store(
+            "socks", _MERCHANT, idempotency_addr=_PAYER, idempotency_key="race-1"
+        )
+    assert caught.value.slug == slug
+    assert (tmp_path / slug / "index.html").exists()  # the paid store survives
+    assert _store_rows() == [slug]
+
+
+@respx.mock
+def test_idempotency_race_loser_leaves_no_orphan_directory(tmp_path, monkeypatch):
+    # The other half of the same branch: when the loser resolved its OWN slug, those
+    # files back no store row and would serve a rendered storefront nobody owns.
+    import app.engine as engine
+
+    _allow_create(tmp_path, monkeypatch, name="Race Store")
+    winner = engine.create_store(
+        "socks", _MERCHANT, idempotency_addr=_PAYER, idempotency_key="race-2"
+    )
+    with pytest.raises(engine.IdempotentReplay):
+        engine.create_store(
+            "socks", _MERCHANT, idempotency_addr=_PAYER, idempotency_key="race-2"
+        )
+    assert [p.name for p in tmp_path.iterdir() if p.is_dir()] == [winner["slug"]]
+    assert _store_rows() == [winner["slug"]]
+
+
+# ---------- 0034: the idempotency columns + their unique index ----------
+def test_migration_0034_additive_and_scoped_unique(tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
+
+    def _alembic(db, *args):
+        env = dict(os.environ)
+        env["TILLA_DB_PATH"] = str(db)
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=pathlib.Path(__file__).resolve().parent.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    db = tmp_path / "m34.db"
+    r = _alembic(db, "upgrade", "0033_brand_color")
+    assert r.returncode == 0, r.stderr
+
+    # two stores against the pre-0034 schema, so the columns are proven additive
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    for i in (1, 2):
+        con.execute(
+            "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme,"
+            " created_at, updated_at) VALUES (?,?,1,'live','0xabc','original.html',"
+            "'2026','2026')",
+            (i, f"m34-{i}"),
+        )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    cols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert {"create_idempotency_addr", "create_idempotency_key"} <= cols
+    # existing rows backfill to NULL/NULL, which means "no key" — today's behaviour
+    assert (
+        con.execute(
+            "SELECT count(*) FROM stores WHERE create_idempotency_key IS NULL"
+        ).fetchone()[0]
+        == 2
+    )
+    idx = {
+        i[0]
+        for i in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='stores'"
+        )
+    }
+    assert "uq_stores_create_idem" in idx
+    assert "uq_stores_custom_domain" in idx  # native ADD COLUMN, no batch rebuild
+    con.execute(
+        "UPDATE stores SET create_idempotency_addr='0xp', create_idempotency_key='k'"
+        " WHERE id=1"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute(
+            "UPDATE stores SET create_idempotency_addr='0xp',"
+            " create_idempotency_key='k' WHERE id=2"
+        )
+    # ...but the SAME key under a different payer is not a duplicate
+    con.execute(
+        "UPDATE stores SET create_idempotency_addr='0xq', create_idempotency_key='k'"
+        " WHERE id=2"
+    )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "downgrade", "0033_brand_color")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    cols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert not ({"create_idempotency_addr", "create_idempotency_key"} & cols)
+    idx = {
+        i[0]
+        for i in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='stores'"
+        )
+    }
+    assert "uq_stores_create_idem" not in idx
+    assert "uq_stores_custom_domain" in idx  # untouched by the downgrade too
+    assert con.execute("SELECT count(*) FROM stores").fetchone()[0] == 2
+    con.close()
 
 
 def test_sitemap_lists_live_stores_excludes_pending_and_blocked(make_store):

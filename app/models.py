@@ -72,6 +72,25 @@ class Store(Base):
         # never be hijacked to a second store. SQLite treats the many unclaimed NULLs
         # as distinct, so unclaimed stores are unaffected.
         UniqueConstraint("custom_domain", name="uq_stores_custom_domain"),
+        # One Idempotency-Key funds at most one store PER PAYER, ever. Same shape and
+        # reasoning as uq_acp_sessions_store_idem — the key is scoped to a tenant so
+        # there is no cross-tenant replay; here the tenant is the wallet that paid.
+        # A global key space would be worse than the double charge it fixes: the
+        # first caller to use "retry-1" would refuse every later caller's paid create
+        # for a string they never chose, and hand them that stranger's slug, url,
+        # product and price in the 409 — including for a hidden sandbox store.
+        #
+        # Declared as an INDEX, not a table-level UNIQUE, because a UNIQUE constraint
+        # cannot be added to an existing SQLite table by ALTER (0034 adds the columns
+        # then the index) — the ux_orders_x402_nonce precedent. SQLite counts a row
+        # with any NULL in the tuple as distinct, so every store created without a
+        # key (every store that exists today) is unaffected.
+        Index(
+            "uq_stores_create_idem",
+            "create_idempotency_addr",
+            "create_idempotency_key",
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -92,6 +111,28 @@ class Store(Base):
     # sha256 hex of the per-store manage key (capability secret handed to the
     # paid create-store caller once). NULL for legacy stores until minted.
     manage_key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The Idempotency-Key a paid create-store caller supplied, and the wallet that
+    # key is scoped to: the EIP-3009 payer of the x402 payment the middleware
+    # verified for that request (lowercased). Both NULL, together, for every store
+    # created without a key — every store that exists today, and every create made
+    # with the paywall off (dev/test), where no verifiable payer exists and no funds
+    # are at risk either. Written INSIDE the same transaction as the Store row
+    # (engine.create_store), never patched on afterwards: a create that committed
+    # without its key recorded is exactly the double charge below.
+    #
+    # Why they exist: a buyer (0xqdee, 2026-08-05) paid, the store WAS created, the
+    # payment DID settle — and the response was lost in a deploy-window 502. Holding
+    # no slug and no manage_key they retried, and a retry carrying a NEW signed
+    # payment would have bought a second store and paid a second time. Keying
+    # idempotency on the payment cannot fix that: a retry with the SAME proof is
+    # rejected upstream as a consumed nonce and never reaches the handler at all, so
+    # the only handle that survives a lost response is one the CLIENT chose.
+    create_idempotency_addr: Mapped[str | None] = mapped_column(
+        String(42), nullable=True
+    )
+    create_idempotency_key: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
     # Phase 1.7 sandbox/hidden mode: 'public' (default, every existing store) shows in
     # discovery / the aggregate feed / the sitemap; 'hidden' keeps a live store out of
     # those bulk surfaces while it stays fully reachable by direct link (owner + agent

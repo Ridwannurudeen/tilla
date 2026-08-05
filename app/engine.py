@@ -193,6 +193,39 @@ class GenerationUnavailable(RuntimeError):
     settlement — a paid create-store during an outage moves ZERO funds."""
 
 
+class IdempotentReplay(RuntimeError):
+    """This paid create-store's (payer, Idempotency-Key) pair ALREADY funded a store,
+    discovered at the insert rather than by the pre-check: two requests carrying one
+    key raced, and this one lost the unique index. Carries the winner's ``slug`` so
+    ``main.create_store_post`` can answer 409 with the store the caller already owns.
+
+    It exists to keep that outcome OUT of the slug-collision branch. That branch
+    ``rmtree``s the store directory, and a loser that had resolved the same slug as
+    the winner would delete the winner's COMMITTED, PAID files — buyer charged, store
+    URL 404. This is not an exotic race: a live create runs ~15s and agent clients
+    give up around 10s and retry, so both attempts are in the pipeline at once."""
+
+    def __init__(self, slug: str):
+        super().__init__(slug)
+        self.slug = slug
+
+
+def _idempotency_holder(addr: str | None, key: str | None) -> str | None:
+    """The slug of the store this (payer, Idempotency-Key) pair already funded, or
+    None. Read on a FRESH session: by the time an IntegrityError reaches its handler
+    the failing transaction has been rolled back and closed, so the row the winning
+    request committed is only visible from a new one."""
+    if not addr or not key:
+        return None
+    with SessionLocal() as session:
+        return session.scalar(
+            select(Store.slug).where(
+                Store.create_idempotency_addr == addr,
+                Store.create_idempotency_key == key,
+            )
+        )
+
+
 def _is_transient_status(code: int) -> bool:
     """HTTP statuses worth one retry: rate limiting and any server-side 5xx
     (429, 500-599 — covers Anthropic's 529 overloaded)."""
@@ -1269,6 +1302,45 @@ def hue_from_hex(hex_color: str) -> float:
     return (h * 360.0) % 360.0
 
 
+# What a caller does when the create response — the ONE place manage_key is ever shown
+# — is lost. Asked for by 0xqdee on their paid create-store (2026-08-05): "add a
+# recovery/status reference so a buyer whose response is lost can retrieve the result
+# without paying again."
+#
+# WHY this is advertised rather than built: the recovery already existed and nothing
+# said so. A store's merchant row is keyed on the receive_address
+# (get_or_create_merchant below), and dashboard.resolve_merchant accepts a session
+# token minted by signing a nonce with that same wallet — so whoever controls the
+# receive_address can manage the store with NO manage_key. A real merchant did exactly
+# that on 2026-08-05 (nonce -> personal_sign -> session -> PATCH a product). The
+# manage_key is a headless convenience, not the only key: only its sha256 is persisted
+# (delivery.hash_manage_key), so it can never be looked up or re-issued to anyone.
+RECOVERY_NOTE = (
+    "manage_key is shown once and cannot be re-issued — only its sha256 is stored, so "
+    "a lost key cannot be looked up or resent. Losing it does not lose the store: the "
+    "wallet you gave as receive_address owns this store. Sign in with that wallet at "
+    "https://tilla.gudman.xyz/dashboard — POST /api/merchant/auth/nonce with the "
+    "address, sign the message it returns, POST /api/merchant/auth/verify for a "
+    "session token — and manage the store, its products, orders and fulfilment "
+    "without the manage_key. Never pay to create this store again."
+)
+
+# WHY the sandbox variant says the opposite: a sandbox store was created WITHOUT a
+# receive_address, so its merchant row is Tilla's own demo wallet (DEFAULT_ADDR) and
+# the caller holds no wallet that can sign in for it. Handing them the sign-in recipe
+# would name a wallet they do not have — the recovery advice above is FALSE here, and a
+# false recovery path is worse than none. The manage_key half is identical: still shown
+# once, still only stored as a hash.
+SANDBOX_RECOVERY_NOTE = (
+    "manage_key is shown once and cannot be re-issued — only its sha256 is stored, so "
+    "a lost key cannot be looked up or resent. This sample was created without a "
+    "receive_address, so it has no owning wallet and dashboard sign-in cannot recover "
+    "it. Create the store again with a receive_address: that wallet then owns the "
+    "store and can always sign in at https://tilla.gudman.xyz/dashboard to manage it, "
+    "manage_key or not."
+)
+
+
 def create_store(
     desc,
     addr=None,
@@ -1279,11 +1351,20 @@ def create_store(
     brand_color=None,
     *,
     sandbox=False,
+    idempotency_addr=None,
+    idempotency_key=None,
 ):
     """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
     Returns dict; a screening-unavailable outcome returns a pending_screening
     dict with no live page deployed, instead of failing the request outright.
+
+    ``idempotency_addr``/``idempotency_key`` are the verified x402 payer and the
+    client's Idempotency-Key; they are written on the Store row in the SAME
+    transaction as the store itself, so a store can never exist without the key that
+    funded it. Raises IdempotentReplay (carrying the existing slug) when that pair
+    already funded a store — which the caller answers 409, so the duplicate payment
+    never settles.
 
     `theme` is the caller's explicit choice (short name, already validated); when
     None the LLM's own suggestion is used. The store keeps the resolved theme.
@@ -1432,6 +1513,15 @@ def create_store(
                     pay_to=addr,
                     visibility="hidden" if sandbox else "public",
                     manage_key_hash=manage_key_hash,
+                    # In the SAME transaction as the store, never patched on after
+                    # the commit. A store that committed with its key unrecorded is
+                    # the exact defect this feature exists to prevent: the caller's
+                    # retry would find no match, generate a second store and settle a
+                    # second payment. Both stay NULL unless a paid caller sent an
+                    # Idempotency-Key AND the middleware verified a payer to scope it
+                    # to (main._idempotency_scope).
+                    create_idempotency_addr=idempotency_addr,
+                    create_idempotency_key=idempotency_key,
                     delivery=store_delivery,
                     description=desc,
                     # Persist content for LIVE stores too (not just pending), so a
@@ -1524,6 +1614,25 @@ def create_store(
                 created_store_id = store.id
             break
         except IntegrityError:
+            # NOT every IntegrityError here is a slug collision. Since the (payer,
+            # Idempotency-Key) unique index exists, two requests carrying one key can
+            # both clear the pre-check and both reach this insert — the normal case,
+            # not an exotic one: a live create runs ~15s and agent clients give up
+            # around 10s and retry. The loser trips the idempotency index, and
+            # treating that as a slug collision would rmtree a directory that, in the
+            # window where the loser resolved the SAME slug (the winner had not
+            # committed yet when unique_slug ran), holds the WINNER'S committed, paid
+            # store files: buyer charged, store URL 404. So ask the DB which it was.
+            replay = _idempotency_holder(idempotency_addr, idempotency_key)
+            if replay is not None:
+                # The key already owns a store. Do not re-slug (a second store is the
+                # thing being prevented) and do not touch the winner's directory. A
+                # different slug means these files are ours alone and no DB row will
+                # ever reference them, so they go — an orphan directory would serve a
+                # rendered storefront that no store row backs.
+                if replay != slug:
+                    shutil.rmtree(d, ignore_errors=True)
+                raise IdempotentReplay(replay) from None
             shutil.rmtree(d, ignore_errors=True)
             if attempt == 1:
                 raise
@@ -1542,6 +1651,7 @@ def create_store(
             "status": store_status,
             "store_name": content.get("store_name", ""),
             "manage_key": manage_key,
+            "recovery": SANDBOX_RECOVERY_NOTE if sandbox else RECOVERY_NOTE,
             "message": (
                 "Sample created without a merchant payout address; it is hidden and "
                 "non-payable."
@@ -1558,6 +1668,7 @@ def create_store(
         "product_name": receipt_content.get("product_name", ""),
         "price_usdt": receipt_content.get("price_usdt", 0),
         "manage_key": manage_key,
+        "recovery": SANDBOX_RECOVERY_NOTE if sandbox else RECOVERY_NOTE,
         **(
             {"status": "sandbox", "visibility": "hidden", "payable": False}
             if sandbox

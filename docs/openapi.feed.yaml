@@ -35,6 +35,15 @@ properties:
       fulfilment:
         type: string
         enum: [automatic, merchant, mixed]
+      # Whether a buy on this store can settle at all: false for a sample store
+      # created with no payout wallet, and false for a live store with nothing
+      # active to sell. Derived from the same gate the x402 buy path and the human
+      # checkout enforce, so an agent can decide before it spends a call instead of
+      # reading the refusal afterwards. NOT in `required`, for the same reason
+      # `fulfilment` is not: this schema also validates INBOUND federated peer
+      # feeds, which will not emit a Tilla-specific key.
+      payable:
+        type: boolean
   products:
     type: array
     items:

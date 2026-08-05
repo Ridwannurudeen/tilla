@@ -261,6 +261,85 @@ def test_create_store_receipt_matches_persisted_catalog(tmp_path, monkeypatch):
     assert result["product_name"] == primary.name
 
 
+@respx.mock
+def test_create_response_advertises_the_wallet_recovery_path(tmp_path, monkeypatch):
+    # 0xqdee (2026-08-05) asked for a recovery reference for a caller whose create
+    # response is lost. The recovery already existed — the receive_address wallet owns
+    # the merchant row and can sign in for a session token — and was simply never
+    # stated. The key set is pinned whole because agents parse this response: the
+    # addition must be purely additive.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(monkeypatch, {"store_name": "Recoverable"})
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("i sell a thing", "0x" + "c" * 40)
+
+    assert set(result) == {
+        "slug",
+        "store_name",
+        "url",
+        "product_name",
+        "price_usdt",
+        "manage_key",
+        "recovery",
+    }
+    recovery = result["recovery"]
+    # the key cannot be re-issued (only its sha256 is stored) ...
+    assert "cannot be re-issued" in recovery
+    # ... and the concrete path that does not need it: the dashboard, signed into with
+    # the receive_address wallet through the two real merchant auth routes.
+    assert "https://tilla.gudman.xyz/dashboard" in recovery
+    assert "receive_address owns this store" in recovery
+    assert "/api/merchant/auth/nonce" in recovery
+    assert "/api/merchant/auth/verify" in recovery
+
+
+@respx.mock
+def test_sandbox_create_response_recovery_promises_no_wallet_sign_in(
+    tmp_path, monkeypatch
+):
+    # A sandbox store is created WITHOUT a receive_address, so its merchant row is
+    # Tilla's own demo wallet and the caller holds no wallet that can sign in for it.
+    # The advice that is true for a real store is FALSE here, and a false recovery
+    # path is worse than none.
+    import app.engine as engine
+
+    monkeypatch.setattr(engine, "STORES_DIR", tmp_path)
+    _fake_llm_response(monkeypatch, {"store_name": "Sample"})
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(200, json={"verdict": "ALLOW"})
+    )
+    result = engine.create_store("i sell a thing", sandbox=True)
+
+    # the sandbox keys the response already carried are untouched
+    assert set(result) == {
+        "slug",
+        "store_name",
+        "url",
+        "product_name",
+        "price_usdt",
+        "manage_key",
+        "recovery",
+        "status",
+        "visibility",
+        "payable",
+    }
+    assert result["status"] == "sandbox"
+    assert result["visibility"] == "hidden"
+    assert result["payable"] is False
+    recovery = result["recovery"]
+    assert "cannot be re-issued" in recovery
+    # no owning wallet, so no sign-in recipe for THIS store — only how to create one
+    # that a wallet does own
+    assert "no owning wallet" in recovery
+    assert "cannot recover it" in recovery
+    assert "/api/merchant/auth/nonce" not in recovery
+    assert result["recovery"] != engine.RECOVERY_NOTE
+
+
 def test_screening_text_includes_cta_and_emoji():
     content = {
         "store_name": "Store",
