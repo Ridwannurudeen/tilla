@@ -932,6 +932,53 @@ def test_prompt_forbids_inventing_capabilities_the_merchant_never_claimed(monkey
     assert "A SHORT description must yield SHORT copy" in prompt
 
 
+def test_prompt_defaults_to_one_product_and_forbids_invented_tiers(monkeypatch):
+    # Issue #3, the compound form of #1 and #2: "I sell consulting" generated a
+    # three-tier ladder including "Project Consulting" at 2500 USDT — a product the
+    # merchant does not sell at a price they never chose. The old rule made
+    # multi-product the DEFAULT ("otherwise 2 to 4 distinct items") whenever the
+    # model couldn't judge a description "clearly" singular, which a one-line
+    # description never is. Prompt-string assertions cannot prove the behaviour
+    # (the first #2 fix passed such a test while inert) — the live check is
+    # generate() against thin inputs; this pins the contradictions out instead.
+    import app.engine as engine
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": [{"text": "{}"}]}
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(
+        engine.requests,
+        "post",
+        lambda url, headers=None, json=None, timeout=None: sent.update(json) or _Resp(),
+    )
+    try:
+        engine.generate("I sell consulting")
+    except Exception:
+        pass  # the empty {} payload fails downstream; the prompt is the assertion
+    prompt = sent["messages"][0]["content"]
+    # the new default and its worked example
+    assert (
+        "ONE product unless the merchant's own description names more than one"
+        in prompt
+    )
+    assert "Never invent a tiered ladder" in prompt
+    assert "One product from a short description is the correct output" in prompt
+    # the contradictions that would silently undo it, pinned OUT — the #2 lesson:
+    # an early instruction beats a later rule, so neither may reappear anywhere
+    assert "otherwise 2 to 4 distinct items" not in prompt
+    assert "focused product catalog" not in prompt
+
+
 def test_generate_quantises_price_to_micro_precision(monkeypatch):
     # store.json is written from generated content before the Product row exists,
     # so a price finer than USDT0's 6dp would persist as a rounded price_micro the

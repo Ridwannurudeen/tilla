@@ -111,3 +111,44 @@ the prompt, matching the price/name tests.
 The fix applies to stores generated from now on. Copy already generated is persisted per-store, so
 the startup re-render faithfully reproduces it — an affected merchant clears it by editing the
 product blurb (dashboard or `manage_key`) or regenerating with `upgrade-store`.
+
+---
+
+## #3 — A thin description invents a whole product catalog, prices included
+
+**Found:** 2026-08-05, while verifying the fix for issue #2 — and disclosed to Rouma Desk before they
+could find it. Same family as #1 (invented prices) and #2 (invented capabilities).
+
+**Verified reproduction (live generation against the deployed prompt):**
+
+| Merchant description | Generated catalog |
+|---|---|
+| "I sell trading signals" | Daily Trading Signals **49** · Weekly Signal Report **99** · Premium Signal Access **199** ("priority alerts and extended coverage") |
+| "I sell consulting" | Strategy Session **500** · **Project Consulting 2500** · Retainer Package **1500** |
+| "I sell a newsletter" | Weekly Newsletter 8 *(correct — one product)* |
+
+The merchant named exactly one thing in each case. The catalog, the tier names, the feature
+differentiators and every price are inventions.
+
+**Why it is worse than #2.** An invented capability is a false sentence. An invented *tier* is a false
+sentence **plus a false product plus a false price** — a merchant who wrote one line about consulting
+could publish a store offering "Project Consulting" at 2500 USDT, an engagement they do not sell, at a
+number they never chose. #1 fixed the price of a product the merchant asked for; this invents the
+product too.
+
+**Cause.** `app/engine.py`'s catalog instruction read: *"a focused catalog of related items that fit
+the brand; use a single item when the merchant clearly sells one thing, otherwise 2 to 4 distinct
+items."* Multi-product is the **default** whenever the model does not judge the description "clearly"
+singular, and a one-line description is exactly the case where it has nothing to judge with — so it
+fills the gap by inventing a product ladder.
+
+**Status: FIXED 2026-08-05** (deployed). The default is inverted: **one product unless the merchant's
+own description names more than one distinct thing they sell**, with tiered ladders
+(Basic/Premium, Daily/Weekly, Starter/Pro) called out as forbidden inventions. A merchant who wants
+more products adds them deliberately — `POST /api/merchant/stores/{slug}/products` — which is the
+path that cannot fabricate anything.
+
+**Accepted trade-off, stated plainly.** A thin prompt now yields a one-product store rather than a
+fuller-looking one. That is a real cost to the demo and the correct call anyway: the same principle as
+#1 and #2 — Tilla does not get to invent claims about someone else's business, and "looks richer" is
+not a reason to publish a product they never offered.

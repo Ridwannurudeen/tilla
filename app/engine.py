@@ -866,8 +866,12 @@ def _post_generation(prompt: str) -> dict:
 
 def generate(desc):
     prompt = (
+        # Not "a focused product catalog" — that opening line primed plural products
+        # against the ONE-product default below, the same early-instruction-vs-later-
+        # rule contradiction that made the first issue-#2 fix inert (see that comment).
         "You are a world-class brand designer and DTC copywriter. A solo entrepreneur wants to sell "
-        "something. Turn their description into a polished storefront with a focused product catalog.\n\n"
+        "something. Turn their description into a polished storefront selling exactly what they "
+        "described — nothing more.\n\n"
         f'Merchant description: "{desc}"\n\n'
         "Output ONLY valid JSON (no markdown) with EXACTLY these keys: "
         "store_name (short brand), tagline (<=6 words), hero_headline (punchy, <=8 words), "
@@ -879,9 +883,21 @@ def generate(desc):
         "products (an array of 1 to 4 objects, each an object with: name, blurb (1-2 sentences, "
         "claiming ONLY what the merchant stated — see the claims rule below), "
         "price_usdt (number), cta_text (<=4 words), image_query, image_subject) "
-        "— a focused catalog of related "
-        "items that fit the brand; use a single item when the merchant clearly sells one thing, "
-        "otherwise 2 to 4 distinct items, "
+        # ONE PRODUCT IS THE DEFAULT (docs/ISSUES.md #3). This used to read "use a
+        # single item when the merchant clearly sells one thing, otherwise 2 to 4
+        # distinct items" — so multi-product was what happened whenever the model
+        # could not judge the description "clearly" singular, which is exactly the
+        # one-line-description case. "I sell consulting" became a three-tier ladder
+        # including "Project Consulting" at 2500 USDT. An invented tier is not just
+        # invented copy: it is a product the merchant does not sell, at a price they
+        # never chose. A merchant who wants more adds them deliberately via
+        # POST /api/merchant/stores/{slug}/products, which cannot fabricate anything.
+        "— ONE product unless the merchant's own description names more than one distinct thing "
+        "they sell; then give one product per item they actually named, up to 4. Never invent a "
+        "tiered ladder (Basic/Premium, Daily/Weekly, Starter/Pro, Standard/Deep-Dive) and never "
+        "split a single offering into several priced levels — a tier the merchant did not describe "
+        "is a product they do not sell at a price they did not choose. One product from a short "
+        "description is the correct output, "
         # PRICES ARE THE MERCHANT'S, NOT YOURS. A real store went live selling the
         # same service at 5000 one run and 2500 the next, from identical input,
         # because nothing here constrained the number (docs/ISSUES.md #1). An
