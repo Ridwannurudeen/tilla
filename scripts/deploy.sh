@@ -175,6 +175,15 @@ ssh "$VPS" "chmod +x '$REMOTE'/scripts/*.sh"
 if [ "$PYTHON_DEPS_CHANGED" = 1 ]; then
   ssh "$VPS" "cd '$REMOTE' && '$VENV/bin/pip' install --upgrade ."
 fi
+# The venv also holds a pip-installed COPY of the app package (site-packages/app).
+# Nothing on the service path imports it — uvicorn, alembic and `python -m` all
+# resolve the working tree via cwd — but `python /path/script.py` silently DOES,
+# because a script's own directory (not the cwd) heads sys.path. That shadow bit a
+# live verification on 2026-08-05: a battery imported a weeks-stale engine.py from
+# site-packages and reported 8 phantom failures against a healthy deploy. Keep the
+# copy in lockstep every deploy so a shadow import can never be stale; --no-deps so
+# this refresh can never surprise-upgrade a dependency outside the gated path above.
+ssh "$VPS" "cd '$REMOTE' && '$VENV/bin/pip' install --quiet --no-deps --force-reinstall ."
 ssh "$VPS" "'$VENV/bin/pip' check"
 if [ "$SIDECAR_DEPS_CHANGED" = 1 ] || ! ssh "$VPS" "test -d '$REMOTE/sidecar/node_modules'"; then
   ssh "$VPS" "cd '$REMOTE/sidecar' && npm ci --omit=dev"
