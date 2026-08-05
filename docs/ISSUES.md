@@ -296,3 +296,48 @@ item) pin it; three of them fail with the positional code restored, reproducing 
 **Accepted trade-off, stated plainly:** a multi-product upgrade whose regenerated names all differ
 drops those blurbs to empty rather than guessing. Honest-empty beats detailed-wrong — the same
 principle as #1 through #7.
+
+---
+
+## #10 — The paid create route validated brand_color and silently ignored it
+
+**Found:** 2026-08-05, while reading `create_store_post` during the buyer-hardening batch.
+
+`POST /create-store` (the x402 agent path) advertised `brand_color` in its own 402 challenge
+(`extensions["tilla.input"].optional`), validated it on `CreateStoreBody` — a bad value returned 422,
+proving the field was read — and then never passed it to `_run_create_store`. An agent that stated a
+brand colour paid the fee and received a randomly-seeded hue.
+
+The whole chain already existed: `_run_create_store` accepts `brand_color`, `gen_store` applies
+`hue_from_hex`, and the dashboard self-serve path passes it. **Only the keyword was missing at one
+call site**, which is why every test passed — the existing test called `engine.create_store(...)`
+directly and so exercised the engine, never the route. Same class as the optional-dependency wiring
+bugs: a caller guarantee dropped in silence, invisible to a green suite.
+
+**Status: FIXED 2026-08-05** (deployed). One argument added; a new test drives the HTTP route and
+asserts the stated hue lands in the persisted content. Mutation-proven — removing the argument fails
+it at `assert store.content["brand"]["hue"] == 0.0`.
+
+---
+
+## #11 — OPEN: a store can go live unpaid if settlement fails after the handler returns
+
+**Found:** 2026-08-05 by adversarial review of the idempotency design. **Pre-existing** — not
+introduced by that change.
+
+`create_store` commits the Store, its Products and its Deliverable, and only then does the x402
+middleware attempt settlement (`x402/http/middleware/fastapi.py`: handler first, settle after). If
+settlement then fails, the committed store stays live while no funds moved, and `/create-store` has
+no `settlement_failed_response_body` hook (only the per-store buy route has one), so the caller
+receives a bare 402 with an empty body — no slug, no manage_key. The store is orphaned and unusable.
+
+**What issue #10's sibling change altered:** the new `Idempotency-Key` 409 hands that orphan's slug
+and url back on retry, turning a previously unusable unpaid store into a delivered one. Buyer funds
+are never at risk (a failed settle moves nothing); the exposure is Tilla revenue.
+
+**Why it is open rather than fixed.** Severity depends on one externally-owned fact we cannot
+determine from source: whether OKX's facilitator `/verify` rejects a payer who cannot fund
+settlement. If verify catches it, this is a curiosity. If a payment can pass verify and
+deterministically fail settle, it is an on-demand free-store mint. **Test that first**, then decide
+between a compensating `settlement_failed_response_body` on `/create-store` (delete or quarantine the
+store) and gating the 409 on evidence of settlement.
