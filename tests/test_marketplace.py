@@ -689,12 +689,26 @@ def test_upgrade_keeps_the_catalog_in_sync_with_checkout(make_store, monkeypatch
     generated list directly desynced page from checkout: invented items 2-4 have no
     real row (buy falls back to product_index -> "product_index out of range") and
     item 1 charged the OLD price whatever the page displayed.
+
+    The generated list also arrives in the MODEL's order, not the rows' id order
+    (docs/ISSUES.md #9): here the two real products come back swapped with an invented
+    one between them. Display extras must follow the product NAME, or a blurb lands on
+    a product it does not describe.
     """
     from app import engine, screening
     from app.db import SessionLocal
     from app.models import Product, Store
 
     sid = make_store(slug="upsync", price_micro=9_000_000)
+    with SessionLocal() as s:
+        row = s.scalar(select(Product).where(Product.store_id == sid))
+        row.name = "Espresso Beans"
+        s.add(
+            Product(
+                store_id=sid, name="Ceramic Mug", price_micro=5_000_000, active=True
+            )
+        )
+        s.commit()
     monkeypatch.setattr(
         engine,
         "generate",
@@ -703,8 +717,8 @@ def test_upgrade_keeps_the_catalog_in_sync_with_checkout(make_store, monkeypatch
             "emoji": "x",
             "tagline": "t",
             "hero_subcopy": "h",
-            "product_name": "Invented One",
-            "product_blurb": "b",
+            "product_name": "Ceramic Mug",
+            "product_blurb": "stoneware, 300ml",
             "price_usdt": 999,  # LLM price that must NOT reach checkout
             "cta": "Buy",
             "palette": {
@@ -714,9 +728,13 @@ def test_upgrade_keeps_the_catalog_in_sync_with_checkout(make_store, monkeypatch
                 "text": "#000",
             },
             "products": [
-                {"name": "Invented One", "price_usdt": 999, "blurb": "b"},
-                {"name": "Invented Two", "price_usdt": 42, "blurb": "b"},
-                {"name": "Invented Three", "price_usdt": 7, "blurb": "b"},
+                {"name": "Ceramic Mug", "price_usdt": 999, "blurb": "stoneware, 300ml"},
+                {"name": "Invented Tier", "price_usdt": 42, "blurb": "b"},
+                {
+                    "name": "Espresso Beans",
+                    "price_usdt": 7,
+                    "blurb": "washed, chocolate finish",
+                },
             ],
         },
     )
@@ -735,6 +753,11 @@ def test_upgrade_keeps_the_catalog_in_sync_with_checkout(make_store, monkeypatch
             r.price_micro / 1_000_000 for r in rows
         ], "listed prices must be the prices checkout charges"
         assert all(p.get("id") for p in listed), "every listed item needs a real id"
+        # each blurb on the product it describes, and the invented tier's on nothing
+        assert {p["name"]: p["blurb"] for p in listed} == {
+            "Espresso Beans": "washed, chocolate finish",
+            "Ceramic Mug": "stoneware, 300ml",
+        }
 
 
 def test_describe_emits_the_two_part_description_the_registry_requires(make_store):

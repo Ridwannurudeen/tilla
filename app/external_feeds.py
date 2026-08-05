@@ -157,8 +157,14 @@ def _google_item(store: Store, product: Product, store_url: str) -> str:
             # ISO-4217 currency; this is a shape-correct export the merchant adapts,
             # never a claim of a real USD price (see docs/acp-checkout.md runbook).
             _tag("g:price", f"{agentic._usdt_str(product.price_micro)} USDT"),
+            # "in_stock" is true only because _active_products emits purchasable rows
+            # only — the same active gate the buy path enforces.
             _tag("g:availability", "in_stock"),
-            _tag("g:condition", "new"),
+            # No g:condition: condition is the merchant's fact and Tilla has no field
+            # for it. Google's spec makes it optional for new goods and required for
+            # used/refurbished, so omitting it asserts nothing and complies either way;
+            # a used-goods merchant needs a real condition field, never a hardcoded
+            # "new" (issue #8, 2026-08-05).
             "</item>",
         ]
     )

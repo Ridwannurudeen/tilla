@@ -256,21 +256,43 @@ proven load-bearing: restoring the old condition fails it with "generated a life
 
 ---
 
-## #8 — OPEN: feeds hard-code availability and condition
+## #8 — Feeds hard-coded availability and condition
 
 Server-asserted, not model output: JSON-LD `availability: InStock`, feed.json/OpenAI
-`"in_stock"`, and Google `g:availability in_stock` + `g:condition "new"` are emitted for every
-active product unconditionally. For auto-delivered digital goods "in stock" is defensible; `g:condition
-"new"` on, say, refurbished physical goods is a false machine-readable claim. Not fixed today:
-Google Merchant field requirements need checking before dropping/deriving the field, and the blast
-radius is low while listed stores sell digital goods. Revisit before onboarding physical-goods
-merchants at scale.
+`"in_stock"`, and Google `g:availability in_stock` + `g:condition "new"` were emitted for every
+active product unconditionally. The condition half was an invented claim — Tilla has no condition
+field and knows nothing about the goods' condition; a used-goods merchant would have been
+misrepresented in a machine-readable feed.
 
-## #9 — OPEN: upgrade-store can re-attach blurbs positionally
+**Status: FIXED 2026-08-05** (deployed), in two honest halves. *Condition:* the `g:condition` tag is
+gone. Google's product data spec makes condition **optional for new products and required for used/
+refurbished ones** (verified against the spec, 2026-08-05), so omitting it asserts nothing and
+complies either way; a future used-goods merchant needs a real merchant-supplied condition field,
+never a hardcoded "new" — that is a feature gap, recorded here, not a false claim. An absence test
+covers every feed item and fails if the tag returns. *Availability:* `in_stock` STAYS, because it is
+true by construction — every feed emits ACTIVE products only (`_active_products` is the single
+source for the Google feed, the per-store OpenAI feed and the aggregate), and `active` is the same
+gate the buy paths enforce (agent buy 404s, checkout 422s an inactive product). That premise is now
+pinned by a test (one active + one inactive product → only the active one appears in all three
+surfaces) which fails if the active filter is ever dropped.
 
-`upgrade_store` regenerates the catalog (items carry no DB id) and `resync_catalog` backfills ids
-positionally (`key = active[i].id` when `item.get("id")` is None). If the regenerated catalog's
-order or count diverges from the live Product rows, a blurb lands under a product it does not
-describe — page-visible, and #6's fix then faithfully propagates the misattached text to the feeds.
-Needs a design (match by name? refuse to carry on count mismatch?), not a hotfix. Low frequency:
-only the paid `upgrade-store` path, only multi-product stores, only on divergence.
+## #9 — upgrade-store could re-attach blurbs positionally
+
+`upgrade_store` regenerates the catalog (items carry no DB id) and `resync_catalog` backfilled ids
+positionally (`key = active[i].id` when the item had none). The positional rule was written for
+pre-CRUD legacy content, where order provably IS id order — but freshly generated items' order and
+count are the model's, so a blurb describing one product could attach to a different one: false
+text about a real product, on the page and (since #6) in every machine feed.
+
+**Status: FIXED 2026-08-05** (deployed). Position is no longer read anywhere. An id-less item now
+attaches by an attachment ladder: exact NAME match (casefold, duplicates consumed in id order), else
+the unambiguous 1:1 case (one old item, one active row — the common single-product upgrade where the
+model renamed the product), else NOTHING — the product renders an honestly-empty blurb the merchant
+can fix, never text about goods they do not sell. Legacy content still carries: its names equal the
+row names by construction, and every dashboard rename resyncs content from the rows. Seven unit
+tests plus the real upgrade-path seam test (regenerated catalog swapped AND carrying an invented
+item) pin it; three of them fail with the positional code restored, reproducing the exact defect.
+
+**Accepted trade-off, stated plainly:** a multi-product upgrade whose regenerated names all differ
+drops those blurbs to empty rather than guessing. Honest-empty beats detailed-wrong — the same
+principle as #1 through #7.

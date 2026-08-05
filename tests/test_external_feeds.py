@@ -99,8 +99,10 @@ def test_google_feed_parses_as_xml():
     item = root.find("./channel/item")
     ns = {"g": "http://base.google.com/ns/1.0"}
     assert item.find("g:id", ns) is not None
-    assert item.find("g:condition", ns).text == "new"
     assert "USDT" in item.find("g:price", ns).text
+    # Issue #8: condition is the merchant's fact and Tilla has no field for it, so no
+    # item asserts one (optional for new goods, so the feed still validates).
+    assert root.findall("./channel/item/g:condition", ns) == []
 
 
 def test_google_feed_escapes_hostile_store_name():
@@ -120,6 +122,33 @@ def test_google_feed_escapes_hostile_store_name():
 def test_google_feed_no_pay_to_leak():
     _seed("gf-nopii")
     assert PAY_TO not in client.get("/s/gf-nopii/feed/google.xml").text
+
+
+# ------------------------------------------------------- availability is earned
+def test_feeds_emit_active_products_only():
+    """The hard-coded "in_stock" is honest only because a feed can never carry an
+    unbuyable product: every emitter goes through `_active_products`, the same active
+    gate the buy path enforces. An inactive row must appear in no feed."""
+    store_id = _seed("feed-active", product_name="Live Thing")
+    with SessionLocal() as s:
+        s.add(
+            Product(
+                store_id=store_id,
+                name="Retired Thing",
+                price_micro=5_000_000,
+                active=False,
+            )
+        )
+        s.commit()
+    root = ET.fromstring(client.get("/s/feed-active/feed/google.xml").text)
+    ns = {"g": "http://base.google.com/ns/1.0"}
+    assert [i.text for i in root.findall("./channel/item/g:title", ns)] == [
+        "Live Thing"
+    ]
+    body = client.get("/s/feed-active/feed/openai.json").json()
+    assert [p["title"] for p in body["products"]] == ["Live Thing"]
+    agg = client.get("/feeds/openai.json").json()
+    assert [p["title"] for p in agg["products"]] == ["Live Thing"]
 
 
 # ---------------------------------------------------------------- status gate

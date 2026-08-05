@@ -1169,3 +1169,200 @@ def test_generate_preserves_a_micro_precise_price(monkeypatch):
         },
     )
     assert generate("fine-priced item")["price_usdt"] == 0.123456
+
+
+# ---------- resync_catalog attaches extras by product (docs/ISSUES.md #9) ----------
+def _catalog_rows(make_store, slug, *names):
+    """A live store whose ACTIVE Product rows are ``names``, in id order."""
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Product
+
+    sid = make_store(slug=slug)
+    with SessionLocal() as s:
+        rows = s.scalars(
+            select(Product).where(Product.store_id == sid).order_by(Product.id)
+        ).all()
+        rows[0].name = names[0]
+        for name in names[1:]:
+            s.add(Product(store_id=sid, name=name, price_micro=5_000_000, active=True))
+        s.commit()
+    return sid
+
+
+def _resync_with(sid, items):
+    """Persist ``items`` as the store's catalog, resync, and return the new content."""
+    import app.engine as engine
+    from app.db import SessionLocal
+    from app.models import Store
+
+    with SessionLocal() as s:
+        store = s.get(Store, sid)
+        store.content = {"store_name": "S", "products": items}
+        engine.resync_catalog(s, store)
+        s.commit()
+        return store.content
+
+
+def test_resync_attaches_an_idless_blurb_by_name_not_by_position(make_store):
+    """The #9 defect. `upgrade_store` replaces content with FRESHLY GENERATED items
+    that carry no id and whose order is the model's, so backfilling ids by position
+    printed a blurb describing one product on a different product's card — false text
+    about a real product, and since #6 propagated verbatim to every feed."""
+    sid = _catalog_rows(make_store, "byname", "Espresso Beans", "Ceramic Mug")
+    products = _resync_with(
+        sid,
+        [
+            {
+                "name": "Ceramic Mug",
+                "blurb": "stoneware, 300ml",
+                "cta_text": "Add to cart",
+                "image_query": "stoneware mug on a bench",
+            },
+            {"name": "Espresso Beans", "blurb": "washed, chocolate finish"},
+        ],
+    )["products"]
+    by_name = {p["name"]: p for p in products}
+    assert by_name["Espresso Beans"]["blurb"] == "washed, chocolate finish"
+    assert by_name["Ceramic Mug"]["blurb"] == "stoneware, 300ml"
+    # cta and the photography search text are display extras too, same rule
+    assert by_name["Ceramic Mug"]["cta_text"] == "Add to cart"
+    assert by_name["Espresso Beans"]["cta_text"] == "Buy now"
+    assert by_name["Ceramic Mug"]["image_query"] == "stoneware mug on a bench"
+    assert "image_query" not in by_name["Espresso Beans"]
+
+
+def test_resync_drops_extras_for_a_generated_item_matching_no_product(make_store):
+    """generate() is asked for 1-4 products and an upgrade leaves the Product rows
+    alone, so the regenerated catalog routinely holds items the store does not sell.
+    An invented item's copy must attach to nothing, not slide onto a real row."""
+    sid = _catalog_rows(make_store, "invented", "Espresso Beans", "Ceramic Mug")
+    products = _resync_with(
+        sid,
+        [
+            {"name": "Espresso Beans", "blurb": "washed, chocolate finish"},
+            {"name": "Tasting Flight", "blurb": "four cups, poured to order"},
+            {"name": "Ceramic Mug", "blurb": "stoneware, 300ml"},
+        ],
+    )["products"]
+    assert {p["name"]: p["blurb"] for p in products} == {
+        "Espresso Beans": "washed, chocolate finish",
+        "Ceramic Mug": "stoneware, 300ml",
+    }
+    assert "four cups" not in json.dumps(products)
+
+
+def test_resync_carries_the_only_blurb_onto_the_only_product(make_store):
+    """One old item and one active row can only mean each other, so the common
+    single-product upgrade still carries its copy even when the model renamed the
+    product. No misattachment is possible with one of each."""
+    sid = _catalog_rows(make_store, "solo", "Signal Digest")
+    products = _resync_with(
+        sid,
+        [{"name": "Daily Signals", "blurb": "market notes", "cta_text": "Subscribe"}],
+    )["products"]
+    assert products[0]["name"] == "Signal Digest"
+    assert products[0]["blurb"] == "market notes"
+    assert products[0]["cta_text"] == "Subscribe"
+
+
+def test_resync_never_bleeds_a_blurb_when_no_name_matches(make_store):
+    """Two of each and nothing matches: the honest outcome is an empty blurb the
+    merchant can fix, never a guess. An empty blurb renders as no paragraph; wrong
+    text renders as a claim about goods they do not sell."""
+    sid = _catalog_rows(make_store, "nomatch", "Espresso Beans", "Ceramic Mug")
+    content = _resync_with(
+        sid,
+        [
+            {"name": "Tasting Flight", "blurb": "four cups, poured to order"},
+            {"name": "Gift Card", "blurb": "any amount, any time"},
+        ],
+    )
+    assert [p["blurb"] for p in content["products"]] == ["", ""]
+    assert [p["cta_text"] for p in content["products"]] == ["Buy now", "Buy now"]
+    # the mirrored scalar primary is rebuilt from the list, so it must be empty too —
+    # render._catalog falls back to it and would print the dropped text.
+    assert content["product_blurb"] == ""
+
+
+def test_resync_matches_duplicate_names_in_id_order(make_store):
+    """Two rows can legitimately share a name. Matches are consumed, so the first
+    id-less item takes the lowest id and the second the next — deterministic, and
+    never both blurbs on one row."""
+    sid = _catalog_rows(make_store, "dupes", "Session Pass", "Session Pass")
+    products = _resync_with(
+        sid,
+        [
+            {"name": "Session Pass", "blurb": "morning"},
+            {"name": "Session Pass", "blurb": "afternoon"},
+        ],
+    )["products"]
+    assert [p["blurb"] for p in products] == ["morning", "afternoon"]
+    assert products[0]["id"] < products[1]["id"]
+
+
+def test_resync_keeps_id_carried_extras_and_lets_an_override_win(make_store):
+    """The dashboard shape: content items carry ids, and the id is the strong link —
+    it still decides even when the row has since been renamed past its content entry.
+    extras_override (a product just added or edited) still wins over the carried copy.
+    """
+    from sqlalchemy import select
+
+    import app.engine as engine
+    from app.db import SessionLocal
+    from app.models import Product, Store
+
+    sid = _catalog_rows(make_store, "withids", "Espresso Beans", "Ceramic Mug")
+    with SessionLocal() as s:
+        ids = [
+            p.id
+            for p in s.scalars(
+                select(Product).where(Product.store_id == sid).order_by(Product.id)
+            ).all()
+        ]
+        store = s.get(Store, sid)
+        store.content = {
+            "store_name": "S",
+            "products": [
+                {"id": ids[0], "name": "an older name", "blurb": "washed"},
+                {"id": ids[1], "name": "another older name", "blurb": "stoneware"},
+            ],
+        }
+        engine.resync_catalog(
+            s, store, extras_override={ids[1]: ("merchant's own words", "Get it")}
+        )
+        s.commit()
+        products = store.content["products"]
+    assert [p["id"] for p in products] == ids
+    assert products[0]["blurb"] == "washed"
+    assert (products[1]["blurb"], products[1]["cta_text"]) == (
+        "merchant's own words",
+        "Get it",
+    )
+
+
+def test_resync_still_backfills_legacy_precrud_content(make_store):
+    """Regression guard for the shape the positional backfill existed to serve:
+    content that predates per-item ids. The rows were created FROM that content, so
+    its names ARE the row names and the name rule carries every extra exactly as
+    before — including the photography a later upgrade re-resolves from."""
+    sid = _catalog_rows(make_store, "legacy", "Guji", "Yirg")
+    products = _resync_with(
+        sid,
+        [
+            {
+                "name": "Guji",
+                "blurb": "floral",
+                "cta_text": "Buy",
+                "image_query": "guji beans",
+            },
+            {"name": "Yirg", "blurb": "citrus", "cta_text": "Get"},
+        ],
+    )["products"]
+    assert [(p["name"], p["blurb"], p["cta_text"]) for p in products] == [
+        ("Guji", "floral", "Buy"),
+        ("Yirg", "citrus", "Get"),
+    ]
+    assert products[0]["image_query"] == "guji beans"
+    assert all(p["id"] for p in products), "ids are backfilled onto id-less content"

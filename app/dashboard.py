@@ -1725,8 +1725,9 @@ async def merchant_set_product_image(
     target.write_bytes(blob)
     width, height = 940, 650  # the product-card display geometry
     # Normalize FIRST: content that predates per-item ids has none until resync
-    # backfills them positionally, and an id-match against such content silently
-    # sets nothing — which is exactly how this endpoint failed its own first test.
+    # backfills them by name (issue #9 replaced the positional backfill), and an
+    # id-match against such content silently sets nothing — which is exactly how
+    # this endpoint failed its own first test.
     engine.resync_catalog(session, store)
     content = dict(store.content or {})
     for item in content.get("products") or []:
