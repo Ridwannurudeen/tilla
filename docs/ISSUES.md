@@ -340,7 +340,7 @@ whether OKX's facilitator `/verify` rejects a payer who cannot fund settlement. 
 it is now fixed rather than measured — a compensator costs one column and one hook, and it is
 correct whichever way verify behaves.
 
-**Status: FIXED 2026-08-05** (working tree; not yet deployed). The compensating hook was built, not
+**Status: FIXED 2026-08-05** (deployed, `ead7238`, migration 0035). The compensating hook was built, not
 the 409 gate, because gating the 409 on settlement evidence needs evidence the create path does not
 have — there is no settle-SUCCESS writer for `/create-store`, only the buy path has one.
 
