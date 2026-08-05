@@ -303,8 +303,32 @@ def _store_description(store: Store) -> str:
     return str(c.get("hero_subcopy") or c.get("tagline") or store.description or "")
 
 
-def _product_description(store: Store) -> str:
-    return str(_content(store).get("product_blurb") or "")
+def _product_description(store: Store, product: Product) -> str:
+    """This product's OWN blurb, matched by product ID.
+
+    It used to read the store-level ``product_blurb``, which is always the PRIMARY
+    product's blurb — so a store selling a 10-USDT summary and a 500-USDT full review
+    advertised BOTH with the summary's text in feed.json, MCP get_product and the
+    OpenAI/Google exports, while the human page (which builds per-product blurbs from
+    ``content['products']``) said something else: page and feeds disagreed on a priced
+    buy endpoint (found by audit 2026-08-05). The adjacent :func:`product_image_url`
+    already matches by id for exactly this reason.
+
+    Content that predates multi-product carries no ``products`` list and renders from
+    the scalar ``product_*`` fields, where ``product_blurb`` genuinely IS that store's
+    one product's blurb — so it stays the fallback for an absent/empty list, and for a
+    one-item list whose id has not been backfilled yet (the same legacy case
+    :func:`render._products_ctx` coerces into a one-item catalog). With 2+ items and no
+    id match there is no honest answer, so return "" — guessing by position is the bug.
+    """
+    content = _content(store)
+    items = [item for item in content.get("products") or [] if isinstance(item, dict)]
+    for item in items:
+        if item.get("id") == product.id:
+            return str(item.get("blurb") or "")
+    if len(items) > 1:
+        return ""
+    return str(content.get("product_blurb") or "")
 
 
 def _usdt_str(micro: int) -> str:
@@ -1611,7 +1635,7 @@ def _tool_get_product(
     result = {
         "id": product.id,
         "name": product.name,
-        "description": _product_description(store),
+        "description": _product_description(store, product),
         "price": product.price_micro / 1e6,
         "price_micro": product.price_micro,
         "currency": CURRENCY,
@@ -2082,7 +2106,7 @@ def _feed_product(
     return {
         "id": str(product.id),
         "title": product.name,
-        "description": _product_description(store),
+        "description": _product_description(store, product),
         "link": store_url,
         # Additive and omitted entirely when the product has no photograph, so an
         # agent never has to distinguish "no picture" from "broken picture".

@@ -131,11 +131,13 @@ MAX_GENERATE_ATTEMPTS = 3
 # correctly refuses them and those stores go without a hero. Generation fills that
 # specific hole — and ONLY that hole.
 #
-# Deliberately restricted to the hero and the lifestyle band. A product CARD sits
-# above a Buy button and asserts "this is the item you will receive"; a generated
-# photorealistic bottle with an invented label would be a fabricated product image,
-# which is a worse failure than the one this module spent its existence removing. A
-# hero asserts nothing about the goods, so a generated one is atmosphere, not a claim.
+# Deliberately restricted to the HERO. A product CARD sits above a Buy button and
+# asserts "this is the item you will receive"; a generated photorealistic bottle with
+# an invented label would be a fabricated product image, which is a worse failure than
+# the one this module spent its existence removing. A LIFESTYLE frame is only slightly
+# better off: its queries are asked for as scenes of the product IN USE, so a generated
+# one fabricates the merchant's goods being used (see :func:`_slot`). A hero asserts
+# nothing about the goods, so a generated one is atmosphere, not a claim.
 #
 # Keyless by design: no account, no card, no key to rotate, and no signup that a
 # challenged carrier IP can block. Seeded from the store's own PRNG so a slug always
@@ -159,9 +161,9 @@ _GENERATE_STYLE = (
 
 
 def generation_enabled() -> bool:
-    """Whether generated imagery may fill an empty hero or lifestyle slot. Read at
-    call time so it can be switched on the VPS without a code change; default OFF so
-    the paid create path gains no external dependency unless it is asked for."""
+    """Whether generated imagery may fill an empty HERO slot — the only slot it may
+    fill. Read at call time so it can be switched on the VPS without a code change;
+    default OFF so the paid create path gains no external dependency unless asked."""
     return os.environ.get(GENERATE_ENV, "").strip().lower() in (
         "1",
         "true",
@@ -732,8 +734,20 @@ def _slot(
             # content image is an accessibility defect.
             image.alt = subject[:MAX_ALT_LEN]
         return image
-    # Stock had nothing usable. For a hero or a lifestyle frame — never a product
-    # card — fall back to generated atmosphere, held to the same branding check.
+    # Stock had nothing usable. For a hero, fall back to generated atmosphere, held to
+    # the same branding check.
+    #
+    # HERO ONLY, on this module's own reason for calling a generated hero honest at
+    # all: a hero asserts nothing about the goods, so a generated one is atmosphere. A
+    # LIFESTYLE frame cannot borrow that argument, because `lifestyle_queries` are
+    # asked for as scenes showing the PRODUCT IN USE — so a generated one is an
+    # invented depiction of the merchant's goods being used, a woman running in
+    # leggings nobody photographed. That is a visual claim about someone else's
+    # business: the image form of the invented copy in docs/ISSUES.md #1-#3, and the
+    # single footer line saying some imagery is generated illustration does not make a
+    # fabricated frame of the goods true. A lifestyle band stock cannot fill therefore
+    # stays EMPTY, which this module has always counted as a correct outcome.
+    # (Found by audit, 2026-08-05.)
     #
     # SEVERAL seeds, not one, and the reason is a real store: iron-built's gym hero
     # verified fine at an arbitrary seed, yet the backfill failed it — the ONE seed
@@ -742,7 +756,7 @@ def _slot(
     # re-run. Walking a few successive draws keeps determinism (same slug, same
     # sequence, same final image) while removing the single-unlucky-seed failure —
     # the exact courtesy the stock path already extends to its runner-up candidates.
-    if kind != "product" and generation_enabled() and provider.bytes_left > 0:
+    if kind == "hero" and generation_enabled() and provider.bytes_left > 0:
         width, height = _GEOMETRY.get(_VARIANT[kind], (1200, 627))
         for _ in range(MAX_GENERATE_ATTEMPTS):
             blob = _generate(query or subject, int(rand() * 2**31), width, height)

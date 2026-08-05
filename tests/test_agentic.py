@@ -5,6 +5,7 @@ Tilla-wide discovery API. All app-served, all JSON/text (no HTML context).
 
 import json
 import pathlib
+import xml.etree.ElementTree as ET
 
 import httpx
 import jsonschema
@@ -316,6 +317,151 @@ def test_feed_hostile_store_name_is_inert_json():
     assert r.headers["content-type"].startswith("application/json")
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.json()["store"]["name"] == "<script>alert(1)</script>"
+
+
+# ------------------------------------- every feed describes the product it is selling
+SUMMARY_BLURB = "One-page summary of the filing."
+REVIEW_BLURB = "Line-by-line teardown with sourced comparables."
+
+
+class TestPerProductDescription:
+    """A store selling a 10-USDT summary and a 500-USDT full review used to advertise
+    BOTH with the summary's blurb, because every feed read the store-level
+    `product_blurb` (always the PRIMARY product's). The human page builds per-product
+    blurbs from the same content['products'], so the page and four machine feeds
+    attached to priced buy endpoints disagreed about what an agent was buying."""
+
+    @staticmethod
+    def _seed_two(slug, shift_ids=0):
+        """A store with two products carrying DISTINCT blurbs in content['products'].
+        ``shift_ids`` offsets the content ids so they match no live Product row — the
+        stale-content case, where positional guessing is what must not happen."""
+        sid = _seed(slug=slug, price_micro=10_000_000)
+        with SessionLocal() as s:
+            dear = Product(
+                store_id=sid, name="Full review", price_micro=500_000_000, active=True
+            )
+            s.add(dear)
+            s.flush()
+            cheap = s.scalar(
+                select(Product).where(Product.store_id == sid).order_by(Product.id)
+            )
+            store = s.get(Store, sid)
+            store.content = {
+                "store_name": "Shoppe",
+                # the mirrored scalar primary, exactly as resync_catalog leaves it
+                "product_blurb": SUMMARY_BLURB,
+                "products": [
+                    {
+                        "id": cheap.id + shift_ids,
+                        "name": cheap.name,
+                        "price_usdt": 10,
+                        "blurb": SUMMARY_BLURB,
+                    },
+                    {
+                        "id": dear.id + shift_ids,
+                        "name": dear.name,
+                        "price_usdt": 500,
+                        "blurb": REVIEW_BLURB,
+                    },
+                ],
+            }
+            s.commit()
+            return cheap.id, dear.id, cheap.name, dear.name
+
+    def test_feed_json_describes_each_product_with_its_own_blurb(self):
+        cheap, dear, _, _ = self._seed_two("desc-feed")
+        products = client.get("/s/desc-feed/feed.json").json()["products"]
+        assert {int(p["id"]): p["description"] for p in products} == {
+            cheap: SUMMARY_BLURB,
+            dear: REVIEW_BLURB,
+        }
+
+    def test_mcp_get_product_describes_the_product_asked_for(self):
+        cheap, dear, _, _ = self._seed_two("desc-mcp")
+        for pid, blurb in ((cheap, SUMMARY_BLURB), (dear, REVIEW_BLURB)):
+            sc = _mcp(
+                "desc-mcp",
+                "tools/call",
+                {"name": "get_product", "arguments": {"product_id": pid}},
+            ).json()["result"]["structuredContent"]
+            assert sc["description"] == blurb
+
+    def test_openai_feed_describes_each_product_with_its_own_blurb(self):
+        cheap, dear, _, _ = self._seed_two("desc-openai")
+        products = client.get("/s/desc-openai/feed/openai.json").json()["products"]
+        assert {int(p["id"]): p["description"] for p in products} == {
+            cheap: SUMMARY_BLURB,
+            dear: REVIEW_BLURB,
+        }
+
+    def test_google_feed_describes_each_product_with_its_own_blurb(self):
+        cheap, dear, _, _ = self._seed_two("desc-google")
+        assert _google_descriptions("desc-google") == {
+            cheap: SUMMARY_BLURB,
+            dear: REVIEW_BLURB,
+        }
+
+    def test_legacy_single_product_content_still_uses_the_store_level_blurb(self):
+        # Pre-multi-product content has no products list and renders from the scalar
+        # product_* fields, so `product_blurb` genuinely IS its one product's blurb.
+        _seed(
+            slug="desc-legacy", content={"store_name": "Old", "product_blurb": "Solo"}
+        )
+        pid = _pid("desc-legacy")
+        assert (
+            client.get("/s/desc-legacy/feed.json").json()["products"][0]["description"]
+            == "Solo"
+        )
+        assert (
+            _mcp(
+                "desc-legacy",
+                "tools/call",
+                {"name": "get_product", "arguments": {"product_id": pid}},
+            ).json()["result"]["structuredContent"]["description"]
+            == "Solo"
+        )
+        assert (
+            client.get("/s/desc-legacy/feed/openai.json").json()["products"][0][
+                "description"
+            ]
+            == "Solo"
+        )
+        assert _google_descriptions("desc-legacy") == {pid: "Solo"}
+
+    def test_stale_content_ids_describe_nothing_rather_than_the_wrong_product(self):
+        # Several products and no id match: there is no honest answer, so say nothing.
+        # Google keeps its `or product.name` fallback — a name, never another
+        # product's sales copy.
+        cheap, dear, cheap_name, dear_name = self._seed_two("desc-stale", shift_ids=500)
+        products = client.get("/s/desc-stale/feed.json").json()["products"]
+        assert {int(p["id"]): p["description"] for p in products} == {
+            cheap: "",
+            dear: "",
+        }
+        openai = client.get("/s/desc-stale/feed/openai.json").json()["products"]
+        assert {int(p["id"]): p["description"] for p in openai} == {cheap: "", dear: ""}
+        assert _google_descriptions("desc-stale") == {
+            cheap: cheap_name,
+            dear: dear_name,
+        }
+        for pid in (cheap, dear):
+            sc = _mcp(
+                "desc-stale",
+                "tools/call",
+                {"name": "get_product", "arguments": {"product_id": pid}},
+            ).json()["result"]["structuredContent"]
+            assert sc["description"] == ""
+
+
+def _google_descriptions(slug):
+    """{product id: g:description} from the Google Merchant RSS."""
+    root = ET.fromstring(client.get(f"/s/{slug}/feed/google.xml").text)
+    ns = {"g": "http://base.google.com/ns/1.0"}
+    return {
+        int(item.find("g:id", ns).text): item.find("g:description", ns).text
+        for item in root.findall("./channel/item")
+    }
 
 
 # ------------------------------------------------------------ llms.txt

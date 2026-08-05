@@ -212,3 +212,43 @@ def test_channel_draft_idor_blocked(make_store):
         json={"channel": "email_body"},
     )
     assert r.status_code == 401
+
+
+@respx.mock
+def test_channel_prompts_carry_the_copy_restraint(make_store, monkeypatch):
+    """Both channel prompts had zero claims language, same as the kit prompt before
+    docs/ISSUES.md #2's rules were extended to growth — and email_body is the largest
+    generated surface Tilla has (2000 characters) and the one that leaves as a real
+    email. The restraint text is engine.COPY_RESTRAINT verbatim, shared with the
+    storefront prompt and the kit prompt so the three cannot drift apart."""
+    captured = {}
+    valid_output = {"email_body": EMAIL_BODY, "product_update": PRODUCT_UPDATE}
+    asked = "email_body"
+
+    def _spy(prompt):
+        captured[asked] = prompt
+        return {"content": [{"text": json.dumps(valid_output[asked])}]}
+
+    monkeypatch.setattr(engine, "_post_generation", _spy)
+    respx.post(WARDEN_SCREEN_URL).mock(
+        return_value=httpx.Response(
+            200, json={"verdict": "ALLOW", "risk_level": "none"}
+        )
+    )
+    _, key = _store_with_key(make_store, slug="chan-restraint")
+    for channel in valid_output:
+        asked = channel
+        r = client.post(
+            "/api/stores/chan-restraint/growth/draft",
+            headers=_auth(key),
+            json={"channel": channel},
+        )
+        assert r.status_code == 200, r.text
+    assert sorted(captured) == ["email_body", "product_update"]
+    for prompt in captured.values():
+        assert engine.COPY_RESTRAINT in prompt
+        # spelled out too, so emptying the constant cannot satisfy the line above
+        assert "Never invent capabilities, features, credentials" in prompt
+        assert "Never state a delivery frequency" in prompt
+        assert "Never assert traction, demand or popularity" in prompt
+        assert "what is forbidden is the measurable promise, not the warmth" in prompt

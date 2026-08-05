@@ -80,6 +80,40 @@ ART_PROMPT_MAX = 200
 # fix persisted it into stores.delivery, so it is also a marker the repair matches.
 LEGACY_DELIVERY_MARKER = "/files/"
 
+# The restraint rules that bind EVERY buyer-facing line Tilla generates, not only the
+# storefront's. generate()'s prompt below states them at length, with the field names
+# and worked examples that only a storefront has; this is the compact form for the
+# OTHER generated surface, app/growth.py's marketing copy (_build_prompt and
+# _channel_prompt), which had no claims language at all.
+#
+# WHY it is shared rather than written twice: growth copy is the WORSE place for the
+# docs/ISSUES.md #2 failure. A false capability on a storefront is on a page Tilla
+# renders and can re-render; the same invention in a social post or marketing email is
+# published OFF-platform under the merchant's own name, where nothing we do can
+# retract it. Two independently-worded rules would have drifted the first time either
+# was edited, and the drift would be invisible — so both growth prompt builders import
+# this one string, and a test pins its vocabulary against generate()'s prompt.
+#
+# The traction clause has no counterpart in generate() because only growth has the
+# input that invites it: the scheduler feeds real first-party numbers into the prompt
+# (_performance_block), and "6 orders" paraphrased into "selling fast" is an invented
+# demand claim built from a true figure.
+COPY_RESTRAINT = (
+    "CLAIMS AND COMMITMENTS — these bind every line you write. Describe only what the "
+    "details above support. Never invent capabilities, features, credentials, "
+    "integrations or coverage that is not stated there, and never enumerate what the "
+    "product includes or covers unless the details list those items themselves. Never "
+    "state a delivery frequency (daily, weekly, real-time, 24/7), a turnaround or "
+    "response time (instant, within 24 hours), a quantity or coverage count, or a "
+    "guarantee, refund or SLA unless the details state it. Never assert traction, "
+    "demand or popularity — no sales volume, no 'trusted by', no 'selling fast', no "
+    "'join thousands', no invented scarcity or deadline — unless a number given above "
+    "says so, and never restate a number you were given as a vaguer, bigger claim "
+    "(6 orders is not 'flying off the shelves'). Tone is not a claim: evocative and "
+    "textural language is welcome ('rich, full-bodied', 'crafted with care', 'cut "
+    "through the noise') — what is forbidden is the measurable promise, not the warmth."
+)
+
 
 def default_delivery_text(slug: str, product_name: str) -> str:
     """What a buyer receives from a store with no deliverable attached.
@@ -874,8 +908,22 @@ def generate(desc):
         "described — nothing more.\n\n"
         f'Merchant description: "{desc}"\n\n'
         "Output ONLY valid JSON (no markdown) with EXACTLY these keys: "
-        "store_name (short brand), tagline (<=6 words), hero_headline (punchy, <=8 words), "
-        "hero_subcopy (1 sentence), "
+        # THE HERO FIELDS CARRY THE SAME ANCHOR AS blurb, for the reason in the comment
+        # below: a constraint stated only in a later paragraph loses to the field spec.
+        # Until now only `blurb` had one, and every worked example in the claims rule
+        # was blurb-shaped, so the rule read as products-only — while hero_subcopy is
+        # the field that travels FURTHEST. agentic.py::_store_description returns
+        # `hero_subcopy or tagline or store.description`, so this generated line — not
+        # the merchant's own words — is the store description in feed.json, llms.txt,
+        # the discovery surfaces, the Google RSS item, the meta description and
+        # og:description. An unanchored hero_subcopy is the machine-readable claim a
+        # buying agent parses BEFORE it pays.
+        "store_name (short brand), "
+        "tagline (<=6 words, claiming ONLY what the merchant stated), "
+        "hero_headline (punchy, <=8 words, claiming ONLY what the merchant stated), "
+        "hero_subcopy (1 sentence, claiming ONLY what the merchant stated — this line is "
+        "published as the store's machine-readable description, so other agents read it "
+        "before deciding to pay), "
         # NOT "benefit-led". That word sat here while the claims rule below said the
         # opposite, and the model followed the instruction attached to the field: a
         # thin description still produced invented "team credibility" and "tokenomics".
@@ -916,6 +964,14 @@ def generate(desc):
         "and for names: if the merchant's description states a store name or a product name, use "
         "that EXACT name — never translate, shorten, prettify or substitute it. Invent a name only "
         "when the merchant has not stated one. "
+        # An invented name is the one invented string that cannot be corrected: it mints
+        # the slug (unique_slug below) and a rename keeps the original slug forever. So
+        # the licence to invent one must not double as a licence to mint a credential —
+        # "Certified Signals Co." asserts an accreditation in the store's own URL.
+        "When you do invent a name, it must NOT contain a credential, certification or authority "
+        "word (Certified, Licensed, Official, Accredited, Institutional) unless the merchant used "
+        "that word themselves — a name is permanent because it mints the store's URL, and a "
+        "credential in a name is a claim. "
         # CLAIMS ARE THE MERCHANT'S TOO — same rule as prices and names, and the one
         # that reaches a buyer's wallet. Asked for a "benefit-led" blurb from a thin
         # description, the model fills the space with impressive specifics: a store
@@ -925,7 +981,12 @@ def generate(desc):
         # reported it themselves (docs/ISSUES.md #2). That is not marketing polish;
         # it is a false advertisement we printed on someone else's storefront, and
         # the buyer who pays on the strength of it is the one harmed.
-        "and for claims: describe only what the merchant's description supports. Never invent "
+        # The scope list is explicit because the rule USED to open "and for claims:" with
+        # every elaboration and example below it shaped like a product blurb — so it read
+        # as a products-only rule, and the hero fields (which is what agents and search
+        # engines actually consume) fell outside anything the model was told to restrain.
+        "and for claims, in EVERY copy field (tagline, hero_headline, hero_subcopy, blurb, "
+        "cta_text): describe only what the merchant's description supports. Never invent "
         "specific capabilities, features, credentials, integrations, guarantees or coverage the "
         "merchant did not state. Do NOT enumerate what a product examines, includes or covers "
         "unless the merchant listed those items themselves — naming the checks a service performs "
@@ -933,8 +994,39 @@ def generate(desc):
         "token due-diligence reports for EVM tokens', write 'Signed due-diligence analysis for any "
         "EVM token' and STOP; do NOT add 'covering contract security, tokenomics, team credibility' "
         "or any similar list, because you cannot know which checks that merchant actually runs. "
+        # A second worked example, on a HERO field, because the first one is a blurb and
+        # a blurb-shaped example is exactly how this rule came to be read as
+        # products-only. Credentials are the class the hero fields attract: a subcopy
+        # line has room for authority and no room for detail.
+        "The same applies to the hero fields: from 'I sell yoga classes', hero_subcopy must NOT be "
+        "'Certified instructors bring a decade of studio experience to every session' — the "
+        "certification and the decade are credentials, and credentials are the merchant's to claim, "
+        "never yours to add. "
         "A SHORT description must yield SHORT copy — one plain sentence restating what they sell is "
         "the correct output, not a failure to fill space. Vague and true beats detailed and false. "
+        # QUANTIFIABLE COMMITMENTS ARE THE MERCHANT'S TOO — the residual edge left
+        # after #1, #2 and #3 (docs/ISSUES.md), found 2026-08-05 while verifying #3.
+        # "I sell trading signals" produced the blurb "Daily trading signals to guide
+        # your market moves": one adjective, and the storefront now promises a
+        # delivery cadence the merchant never offered. The claims rule above reads as
+        # satisfied, because a measurable promise is not a capability or a tier — it
+        # leaks in at WORD scale, small enough to survive a careful merchant reading
+        # their own catalog, and a buyer who pays for a daily feed is still mis-sold.
+        # Deliberately NOT a ban on flavour: the merchant who reported #2 praised the
+        # copy's texture, and "rich, full-bodied" asserts nothing checkable. The line
+        # is measurability, not warmth — numbers go, tone stays.
+        "and for commitments, in EVERY copy field (tagline, hero_headline, hero_subcopy, blurb, "
+        "cta_text): never state a delivery frequency (daily, weekly, monthly, real-time, 24/7), "
+        "a turnaround or response time (instant, same-day, within 24 hours), a quantity or "
+        "coverage count (500+ tokens, every chain, unlimited requests), or a guarantee, refund "
+        "or SLA — unless the merchant's description states it. If they DID state one ('daily "
+        "signals', '48-hour turnaround'), use it exactly as given and keep it. Concretely: from "
+        "'I sell trading signals', write 'Trading signals to guide your market moves' and STOP; "
+        "do NOT write 'Daily trading signals to guide your market moves', because the merchant "
+        "never said daily and a buyer paying for a daily feed has been mis-sold. Tone is not a "
+        "commitment: evocative and textural language is welcome ('rich, full-bodied', 'crafted "
+        "with care', 'cut through the noise') — what is forbidden is the measurable promise, not "
+        "the warmth. "
         "emoji (single emoji for the brand), "
         # PHOTOGRAPHY. The store previously had none, and a wrong photo is worse
         # than no photo — a stock shot of a yoga mat on a store selling dumbbells

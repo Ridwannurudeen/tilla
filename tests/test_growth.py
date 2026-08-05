@@ -279,6 +279,56 @@ def test_growth_kit_get_requires_auth(make_store):
     assert r.status_code == 401
 
 
+# ======================================================= prompt restraint
+@respx.mock
+def test_kit_prompt_carries_the_copy_restraint(make_store, monkeypatch):
+    """This prompt's only guidance used to be "Make the copy compelling and on-brand" —
+    no claims language at all, which is what the storefront blurb said ("benefit-led")
+    when it invented capabilities the merchant never had (docs/ISSUES.md #2). Growth
+    copy is the worse place for that failure: the merchant publishes it off-platform
+    under their own name, where Tilla cannot retract it. The rules are shared verbatim
+    with the storefront (engine.COPY_RESTRAINT) so the two surfaces cannot drift."""
+    captured = {}
+
+    def _spy(prompt):
+        captured["prompt"] = prompt
+        return {"content": [{"text": json.dumps(GOOD_KIT)}]}
+
+    monkeypatch.setattr(engine, "_post_generation", _spy)
+    _mock_allow()
+    _, key = _store_with_key(make_store, slug="grow-restraint")
+    r = client.post("/api/stores/grow-restraint/growth-kit", headers=_auth(key))
+    assert r.status_code == 200, r.text
+    prompt = captured["prompt"]
+    assert engine.COPY_RESTRAINT in prompt
+    # spelled out too, so emptying the constant cannot satisfy the line above
+    assert "Never invent capabilities, features, credentials" in prompt
+    assert "Never state a delivery frequency" in prompt
+    assert "Never assert traction, demand or popularity" in prompt
+    # and the tone carve-out, which is what keeps the fix from flattening the copy
+    assert "what is forbidden is the measurable promise, not the warmth" in prompt
+
+
+def test_performance_block_does_not_invite_a_traction_claim():
+    """The scheduler feeds real first-party numbers into the kit prompt. "Let these
+    numbers inform the angle; do NOT quote them verbatim" forbade stating "6 orders"
+    while inviting the paraphrase — and a true number vaguened upwards is still an
+    invented demand claim."""
+    from app import growth
+
+    block = growth._performance_block(
+        {
+            "window_days": 7,
+            "orders": {"total": 6, "revenue_micro": 54_000_000},
+            "waitlist": {"total": 12, "new_in_window": 3},
+            "affiliates": {"attributed_sales": 1},
+        }
+    )
+    assert "6 orders" in block  # the numbers themselves still reach the prompt
+    assert "do NOT turn them into a traction, demand or popularity claim" in block
+    assert "inform the angle; do NOT quote them verbatim." not in block
+
+
 # ======================================================= rate limit
 @respx.mock
 def test_growth_kit_rate_limited(make_store, monkeypatch):

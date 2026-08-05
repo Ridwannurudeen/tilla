@@ -54,7 +54,7 @@ def _openai_product(
     item = {
         "id": str(product.id),
         "title": product.name,
-        "description": agentic._product_description(store),
+        "description": agentic._product_description(store, product),
         "link": store_url,
         # Omitted when the product has no photograph rather than emitted empty.
         **({"image_url": image_url} if image_url else {}),
@@ -140,7 +140,7 @@ def _tag(name: str, value) -> str:
 
 
 def _google_item(store: Store, product: Product, store_url: str) -> str:
-    desc = agentic._product_description(store) or product.name
+    desc = agentic._product_description(store, product) or product.name
     image_url = agentic.product_image_url(store, product, store_url)
     return "".join(
         [

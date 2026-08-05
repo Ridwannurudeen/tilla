@@ -1393,6 +1393,35 @@ class TestGeneratedImagery:
         assert result.hero.credit == "", "generated art has no photographer to credit"
         assert (tmp_path / result.hero.path).read_bytes() == JPEG
 
+    def test_a_lifestyle_frame_is_never_generated(self, monkeypatch, keyed, tmp_path):
+        """The other half of the restriction. A hero asserts nothing about the goods,
+        which is the whole reason a generated one is honest -- but a lifestyle frame is
+        asked for as a scene of the PRODUCT IN USE, so a generated one depicts the
+        merchant's goods being used when no such photograph exists. That is a visual
+        claim about someone else's business, the image form of docs/ISSUES.md #1-#3.
+        When stock has nothing the band stays EMPTY; the hero in the same store, whose
+        argument still holds, still fills."""
+        monkeypatch.setenv(imagery.GENERATE_ENV, "1")
+        install(monkeypatch, FakeSession({}))  # stock finds nothing for either slot
+        prompts = []
+        monkeypatch.setattr(
+            imagery,
+            "_generate",
+            lambda prompt, seed, w, h: prompts.append(prompt) or JPEG,
+        )
+        result = imagery.resolve(
+            {
+                "hero_image_query": "gym floor at dawn",
+                "hero_image_subject": "gym floor",
+                "lifestyle_queries": ["a woman running in black leggings at sunrise"],
+            },
+            tmp_path,
+            seeded(),
+        )
+        assert result.lifestyle == [], "a lifestyle frame must never be generated"
+        assert prompts == ["gym floor at dawn"], "only a hero may reach the generator"
+        assert result.hero is not None and result.hero.generated is True
+
     def test_stock_is_always_preferred_over_generation(
         self, monkeypatch, keyed, tmp_path
     ):

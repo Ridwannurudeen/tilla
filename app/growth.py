@@ -101,7 +101,15 @@ def _build_prompt(store: Store, slug: str, perf_block: str = "") -> str:
         "social_posts (array of EXACTLY 3 punchy social posts, each at most 280 "
         "characters), launch_tweet (one launch announcement tweet, at most 280 "
         "characters), email_subject (one email subject line, at most 78 characters). "
-        "Make the copy compelling and on-brand. No placeholders, no hashtag spam."
+        "Make the copy compelling and on-brand. No placeholders, no hashtag spam.\n\n"
+        # "Compelling and on-brand" was the ONLY guidance here, which is what the
+        # storefront blurb spec said ("benefit-led") when it invented capabilities the
+        # merchant never had — docs/ISSUES.md #2. Marketing copy is the worse place for
+        # it: the merchant publishes this off-platform under their own name. Shared
+        # verbatim with the storefront rules (engine.COPY_RESTRAINT) so the two cannot
+        # drift, and placed LAST because the storefront lesson is that a late rule loses
+        # to an early instruction.
+        + engine.COPY_RESTRAINT
     )
 
 
@@ -548,7 +556,13 @@ def _performance_block(perf: dict) -> str:
         f"waitlist {int(waitlist.get('total', 0))} "
         f"(+{int(waitlist.get('new_in_window', 0))} new); "
         f"affiliate-attributed sales {int(affiliates.get('attributed_sales', 0))}. "
-        "Let these numbers inform the angle; do NOT quote them verbatim."
+        # "Let these numbers inform the angle; do NOT quote them verbatim" was an
+        # invitation to paraphrase: forbidden to state "6 orders", allowed to imply
+        # "selling fast". A true number vaguened upwards is still an invented demand
+        # claim, so the block now says which use is legitimate (choosing an angle) and
+        # names the illegitimate one, matching COPY_RESTRAINT's traction clause below.
+        "Let these numbers inform WHICH ANGLE you choose; do NOT quote them verbatim, and "
+        "do NOT turn them into a traction, demand or popularity claim."
     )
 
 
@@ -740,7 +754,13 @@ def _channel_prompt(store: Store, slug: str, channel: str) -> str:
         f"Product: {c.get('product_name', '')}\n"
         f"Product description: {c.get('product_blurb', '')}\n"
         f"Price: {c.get('price_usdt', '')} USDT\n"
-        f"Store URL: {url}\n\n" + _CHANNEL_INSTRUCTIONS[channel]
+        f"Store URL: {url}\n\n"
+        + _CHANNEL_INSTRUCTIONS[channel]
+        # Same restraint as the kit prompt and the storefront, same string. An email
+        # body has 2000 characters of room to invent in — the largest generated surface
+        # Tilla has, and one that leaves as a real email.
+        + "\n\n"
+        + engine.COPY_RESTRAINT
     )
 
 

@@ -152,3 +152,125 @@ path that cannot fabricate anything.
 fuller-looking one. That is a real cost to the demo and the correct call anyway: the same principle as
 #1 and #2 — Tilla does not get to invent claims about someone else's business, and "looks richer" is
 not a reason to publish a product they never offered.
+
+---
+
+## #4 — Quantifiable commitments leak into copy at word scale
+
+**Reported by:** internal. **Found:** 2026-08-05, while verifying the fix for issue #3. The last
+member of the #1/#2/#3 family, and the smallest.
+
+**Verified reproduction (live generation against the deployed prompt):**
+
+| Merchant description | Generated blurb |
+|---|---|
+| "I sell trading signals" | "**Daily** trading signals to guide your market moves" |
+
+One adjective. The merchant never said daily, and the storefront now advertises a delivery cadence
+they never offered.
+
+**Cause.** The claims rule (fixed under #2) forbids invented *capabilities, features, credentials,
+integrations, guarantees or coverage*, and #3 forbids invented *products and tiers*. A measurable
+promise is neither — so a single quantifying word passed both rules. The class the prompt never
+bounded: delivery frequency (daily/weekly/real-time/24-7), turnaround and response times
+(instant/within 24 hours), quantities and coverage counts (500+ tokens, all chains), and
+guarantees/SLAs.
+
+**Why it matters.** It is the same harm as an invented capability, at a scale that survives review.
+An invented paragraph is visible; "Daily" is one word in a blurb a merchant skims and approves. The
+buyer is the one who pays for a daily feed that does not exist.
+
+**Status: FIXED 2026-08-05.** Quantifiable commitments now take the same rule as prices, names and
+claims: never state a frequency, turnaround, count, guarantee or SLA unless the merchant's
+description states it — and when they *did* state one ("daily signals", "48-hour turnaround"), use it
+exactly and keep it. The prompt carries a worked negative example of this exact failure ("I sell
+trading signals" → "Trading signals to guide your market moves", not "Daily trading signals…"),
+because the model follows a worked example far more reliably than an abstract rule.
+
+**Accepted boundary: tone is not a commitment.** The rule bans the *measurable promise*, not the
+warmth. Evocative, textural copy — "rich, full-bodied", "crafted with care", "cut through the noise"
+— remains explicitly welcome, and one sentence of the rule says so, because the merchant who
+reported #2 praised that texture in the same breath as the caveat. A version of this fix that
+flattened the copy into a spec sheet would be a regression, not a stricter fix. A test pins the rule,
+the worked example **and the carve-out** into the prompt, and the assembled prompt was swept for
+phrases inviting urgency or speed claims — the #2 lesson that an early instruction beats a later rule.
+
+The fix applies to stores generated from now on; already-generated copy is persisted per-store and is
+cleared by editing the blurb (dashboard or `manage_key`) or regenerating with `upgrade-store`.
+
+---
+
+## #5 — The claims rule only bound the product blurb; hero copy, names and growth prompts sat outside it
+
+**Found:** 2026-08-05, adversarial audit of the whole generation surface after #4.
+
+Three gaps of one family. (a) `tagline` / `hero_headline` / `hero_subcopy` had length-and-tone specs
+only — and `hero_subcopy` is deliberately the PREFERRED machine-readable store description
+(`agentic._store_description`: it outranks the merchant's own words in feed.json, llms.txt,
+discovery, the Google RSS channel and every meta/og description). An invented credential in that one
+sentence became the description agents parse before paying. (b) The names rule licensed inventing a
+name with no ban on credential words — "Certified Notary Co" mints a permanent slug asserting a
+certification nobody claimed. (c) The growth-kit and channel prompts ("compelling and on-brand")
+carried NO claims language at all, and the performance block's "do NOT quote them verbatim" licensed
+paraphrasing 6 orders into "selling fast" — invented traction, published off-platform under the
+merchant's own name.
+
+**Status: FIXED 2026-08-05** (deployed). On-field anchors on all three hero fields; the claims rule
+scope names every copy field; a hero worked example; credential/authority words banned in invented
+names; and a single shared restraint block (`engine.COPY_RESTRAINT`) appended to both growth prompt
+builders — shared verbatim so the storefront and marketing rules cannot drift, with a test pinning
+five clauses present in both. The performance block now names the illegitimate use: numbers choose
+the angle, they never become a traction claim.
+
+---
+
+## #6 — Every machine feed described every product with the FIRST product's blurb
+
+**Found:** 2026-08-05, same audit. `_product_description(store)` returned the store-level
+`product_blurb` — always products[0]'s — and was emitted as the per-product `description` in
+feed.json, MCP `get_product`, the OpenAI product feed and Google `g:description`. On a store selling
+a 10-USDT summary and a 500-USDT review, all four feeds advertised the 500-USDT product with the
+10-USDT product's text, attached to a priced buy endpoint, while the human page (which builds
+per-product blurbs correctly) said otherwise. The adjacent `product_image_url` already matched by id
+for exactly this reason.
+
+**Status: FIXED 2026-08-05** (deployed). `_product_description(store, product)` matches the content
+item by product id; legacy single-product content keeps its store-level blurb; with 2+ items and no
+id match it returns "" — a missing description over the wrong product's. Six tests pin all four
+surfaces, the legacy shape, and the stale-id case; restoring the old one-liner fails five of them.
+
+---
+
+## #7 — Generated imagery could depict "the product in use"
+
+**Found:** 2026-08-05, same audit — and live: `TILLA_IMAGE_GEN=1` in production. The generation
+fallback filled any non-product slot when stock failed, including LIFESTYLE slots whose queries are
+defined as scenes "showing the product in use". A generated frame of the merchant's goods in use is
+a fabricated depiction — the image form of #1–#3 — cured by neither the branding check nor the one
+footer line. The module's own honesty argument ("a hero asserts nothing about the goods") covers
+heroes only.
+
+**Status: FIXED 2026-08-05** (deployed). Generation is hero-only (`kind == "hero"`); a lifestyle
+band stock cannot fill stays empty, which the module has always counted as a correct outcome. Test
+proven load-bearing: restoring the old condition fails it with "generated a lifestyle" in the log.
+
+---
+
+## #8 — OPEN: feeds hard-code availability and condition
+
+Server-asserted, not model output: JSON-LD `availability: InStock`, feed.json/OpenAI
+`"in_stock"`, and Google `g:availability in_stock` + `g:condition "new"` are emitted for every
+active product unconditionally. For auto-delivered digital goods "in stock" is defensible; `g:condition
+"new"` on, say, refurbished physical goods is a false machine-readable claim. Not fixed today:
+Google Merchant field requirements need checking before dropping/deriving the field, and the blast
+radius is low while listed stores sell digital goods. Revisit before onboarding physical-goods
+merchants at scale.
+
+## #9 — OPEN: upgrade-store can re-attach blurbs positionally
+
+`upgrade_store` regenerates the catalog (items carry no DB id) and `resync_catalog` backfills ids
+positionally (`key = active[i].id` when `item.get("id")` is None). If the regenerated catalog's
+order or count diverges from the live Product rows, a blurb lands under a product it does not
+describe — page-visible, and #6's fix then faithfully propagates the misattached text to the feeds.
+Needs a design (match by name? refuse to carry on count mismatch?), not a hotfix. Low frequency:
+only the paid `upgrade-store` path, only multi-product stores, only on divergence.

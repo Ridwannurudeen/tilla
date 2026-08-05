@@ -882,6 +882,10 @@ def test_prompt_makes_names_belong_to_the_merchant(monkeypatch):
     prompt = sent["messages"][0]["content"]
     assert "use that EXACT name" in prompt
     assert "never translate, shorten, prettify or substitute it" in prompt
+    # An invented name is the one invented string a merchant cannot correct (it mints
+    # the slug), so the licence to invent one must not mint a credential with it.
+    assert "must NOT contain a credential, certification or authority word" in prompt
+    assert "Certified, Licensed, Official, Accredited, Institutional" in prompt
 
 
 def test_prompt_forbids_inventing_capabilities_the_merchant_never_claimed(monkeypatch):
@@ -977,6 +981,164 @@ def test_prompt_defaults_to_one_product_and_forbids_invented_tiers(monkeypatch):
     # an early instruction beats a later rule, so neither may reappear anywhere
     assert "otherwise 2 to 4 distinct items" not in prompt
     assert "focused product catalog" not in prompt
+
+
+def test_prompt_forbids_unstated_quantifiable_commitments(monkeypatch):
+    # Issue #4, the residual edge after #2 and #3: "I sell trading signals" produced
+    # the blurb "Daily trading signals to guide your market moves". One adjective, and
+    # the storefront promises a delivery cadence the merchant never offered — the
+    # claims rule read as satisfied because a measurable promise is not a capability
+    # or a tier. Same prompt-string caveat as the test above: this pins the rule and
+    # its worked example IN, and the tone carve-out with it. The carve-out is half the
+    # fix — evocative texture ("rich, full-bodied") asserts nothing checkable, the
+    # merchant who reported #2 praised it, and over-tightening would delete it.
+    import app.engine as engine
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": [{"text": "{}"}]}
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(
+        engine.requests,
+        "post",
+        lambda url, headers=None, json=None, timeout=None: sent.update(json) or _Resp(),
+    )
+    try:
+        engine.generate("I sell trading signals")
+    except Exception:
+        pass  # the empty {} payload fails downstream; the prompt is the assertion
+    prompt = sent["messages"][0]["content"]
+    # the rule: frequency, turnaround, counts, guarantees — none unless stated
+    assert "never state a delivery frequency" in prompt
+    assert "a turnaround or response time" in prompt
+    assert "a quantity or coverage count" in prompt
+    assert (
+        "or a guarantee, refund or SLA — unless the merchant's description states it"
+        in prompt
+    )
+    # a commitment the merchant DID state is theirs and must survive
+    assert "use it exactly as given and keep it" in prompt
+    # the worked negative example of the exact failure
+    assert "do NOT write 'Daily trading signals to guide your market moves'" in prompt
+    # the tone carve-out, pinned IN so a later tightening cannot quietly drop it
+    assert "Tone is not a commitment" in prompt
+    assert "evocative and textural language is welcome" in prompt
+    assert "what is forbidden is the measurable promise, not the warmth" in prompt
+
+
+def test_prompt_anchors_the_hero_fields_not_just_the_product_blurb(monkeypatch):
+    # The claims rule was written for #2, which was a blurb defect, so every example in
+    # it was blurb-shaped and `blurb` was the only field carrying an on-field anchor —
+    # leaving it readable as a products-only rule. hero_subcopy is the field that
+    # travels furthest: agentic.py::_store_description returns
+    # `hero_subcopy or tagline or store.description`, so this generated sentence, not
+    # the merchant's own words, is the store description in feed.json, llms.txt, the
+    # discovery surfaces, the RSS item and og:description — the machine-readable claim
+    # a buying agent reads before it pays.
+    import app.engine as engine
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": [{"text": "{}"}]}
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(
+        engine.requests,
+        "post",
+        lambda url, headers=None, json=None, timeout=None: sent.update(json) or _Resp(),
+    )
+    try:
+        engine.generate("I sell yoga classes")
+    except Exception:
+        pass  # the empty {} payload fails downstream; the prompt is the assertion
+    prompt = sent["messages"][0]["content"]
+    # (a) the anchor lives ON each hero field, the #2 lesson — a rule in a later
+    # paragraph loses to the spec attached to the field
+    assert "tagline (<=6 words, claiming ONLY what the merchant stated)" in prompt
+    assert (
+        "hero_headline (punchy, <=8 words, claiming ONLY what the merchant stated)"
+        in prompt
+    )
+    assert "hero_subcopy (1 sentence, claiming ONLY what the merchant stated" in prompt
+    # the length/tone specs the anchors were added to must survive alongside them
+    assert "punchy" in prompt
+    # (b) the rule's own scope names every copy field, so it can no longer be read as
+    # products-only
+    assert (
+        "and for claims, in EVERY copy field (tagline, hero_headline, hero_subcopy, "
+        "blurb, cta_text)" in prompt
+    )
+    # (c) a worked example on a HERO field, because a blurb-shaped one is how the rule
+    # came to be misread. Credentials are the class hero copy attracts.
+    assert "The same applies to the hero fields: from 'I sell yoga classes'" in prompt
+    assert (
+        "hero_subcopy must NOT be 'Certified instructors bring a decade of studio "
+        "experience to every session'" in prompt
+    )
+
+
+def test_copy_restraint_shares_the_storefront_prompts_vocabulary(monkeypatch):
+    """COPY_RESTRAINT is the compact form of this prompt's claims/commitments rules,
+    imported by app/growth.py's two prompt builders. It is a SECOND copy of a policy,
+    which is exactly how the storefront and growth surfaces would drift apart — so the
+    shared clauses are pinned to appear in both. If a rule is reworded here, this fails
+    until the constant is reworded too (and vice versa)."""
+    import app.engine as engine
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"content": [{"text": "{}"}]}
+
+    monkeypatch.setenv("TILLA_LLM_KEY", "test-key")
+    monkeypatch.setattr(engine, "KEY", "test-key")
+    monkeypatch.setattr(
+        engine.requests,
+        "post",
+        lambda url, headers=None, json=None, timeout=None: sent.update(json) or _Resp(),
+    )
+    try:
+        engine.generate("I sell trading signals")
+    except Exception:
+        pass  # the empty {} payload fails downstream; the prompt is the assertion
+    prompt = sent["messages"][0]["content"].lower()
+    restraint = engine.COPY_RESTRAINT.lower()
+    for clause in (
+        "never invent",
+        "never state a delivery frequency",
+        "a turnaround or response time",
+        "a guarantee, refund or sla",
+        "what is forbidden is the measurable promise, not the warmth",
+    ):
+        assert clause in restraint, clause
+        assert clause in prompt, clause
+    # The traction clause is growth-only by design: the storefront prompt has no
+    # performance numbers in it, and only growth's scheduler feeds real ones in.
+    assert "never assert traction, demand or popularity" in restraint
+    assert "flying off the shelves" in restraint
 
 
 def test_generate_quantises_price_to_micro_precision(monkeypatch):
