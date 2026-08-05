@@ -91,6 +91,20 @@ class Store(Base):
             "create_idempotency_key",
             unique=True,
         ),
+        # Compensator lookup: the store a FAILED settlement's authorization created.
+        # NON-UNIQUE, deliberately — the opposite call to ux_orders_x402_nonce. A nonce
+        # is single-use ON CHAIN, but a settle that FAILED never consumed it, so the
+        # retry we tell that caller to make ("no funds moved, retry costs nothing")
+        # legitimately arrives carrying the SAME nonce and creates a second store. Under
+        # a unique index that honest retry raises IntegrityError inside create_store's
+        # insert, where the 0034 classifier — which asks only "is this the idempotency
+        # pair?" — reads it as a slug collision, rmtrees the directory, re-slugs and
+        # raises on the second attempt: the one recovery path our own 402 body promises,
+        # broken by the index meant to protect it. Uniqueness buys nothing here anyway.
+        # This column is not an idempotency key (the pair above is); it is a correlation
+        # handle for the settle-failure hook, which is idempotent and refuses to act at
+        # all when the handle is ambiguous (agentic.create_settle_failed_core).
+        Index("ix_stores_create_x402_nonce", "create_x402_nonce"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -133,6 +147,16 @@ class Store(Base):
     create_idempotency_key: Mapped[str | None] = mapped_column(
         String(200), nullable=True
     )
+    # The EIP-3009 authorization nonce of the x402 payment that funded this create —
+    # the same field the buy path records as orders.x402_nonce, and the ONLY handle a
+    # settlement-failure hook has for finding the store its failed payment created
+    # (the hook is handed the request context, never the response body). Written in
+    # the SAME transaction as the store, for the same reason as the pair above: the
+    # x402 middleware runs the handler first and settles afterwards, so a create that
+    # committed before its nonce was recorded is a live store no one can prove nobody
+    # paid for. NULL wherever no verified x402 payment exists (every store today, and
+    # every create made with the paywall off) — there is nothing to compensate there.
+    create_x402_nonce: Mapped[str | None] = mapped_column(String(66), nullable=True)
     # Phase 1.7 sandbox/hidden mode: 'public' (default, every existing store) shows in
     # discovery / the aggregate feed / the sitemap; 'hidden' keeps a live store out of
     # those bulk surfaces while it stays fully reachable by direct link (owner + agent

@@ -768,6 +768,27 @@ NOT_CHARGED_NOTE = (
     "settlement, so no payment was taken for it and retrying costs nothing"
 )
 
+# The 409 for a key whose store was QUARANTINED because its create payment never
+# settled (agentic.create_settle_failed_core). The generic replay text would be a lie
+# by omission here — it says a store was created and hands back its slug and url, and
+# a caller reading that has been handed a store nobody paid for.
+QUARANTINED_REPLAY_DETAIL = (
+    "this Idempotency-Key already created a store, but the payment for that attempt "
+    "did not settle: no funds moved, and the store was NOT activated — it is "
+    "quarantined and every checkout path refuses it. This attempt was not charged "
+    "either. Retry with a NEW Idempotency-Key to create a store"
+)
+# Replaces RECOVERY_NOTE for that store: every clause of the normal note ("the wallet
+# you gave as receive_address owns this store", "never pay to create this store again")
+# is false for a store that was never activated.
+QUARANTINE_RECOVERY_NOTE = (
+    "there is nothing to recover: this store was never activated, no route can revive "
+    "it, and its manage_key was never delivered — a settlement failure replaces the "
+    "create response with the 402, which is why you hold no slug or key for it. "
+    "Create the store again with a NEW Idempotency-Key; the quarantined store holds "
+    "the old one."
+)
+
 # Charset-restricted because the key reaches a DB query and is echoed back in the 409:
 # [A-Za-z0-9._:-] covers every uuid, ULID, timestamp and "<wallet>-<n>" form a caller
 # would generate, and admits nothing that could carry markup or a SQL/glob wildcard.
@@ -836,11 +857,35 @@ app.add_exception_handler(StarletteHTTPException, _create_store_http_exception)
 app.add_exception_handler(RequestValidationError, _create_store_validation_exception)
 
 
+def _payment_authorization(request: Request) -> dict | None:
+    """The EIP-3009 authorization of the x402 payment the middleware VERIFIED for this
+    request — the same accessor the buy path reads (``request.state.payment_payload``,
+    set by the middleware before it calls the route). None when no paywall ran.
+
+    ONE extraction for both fields taken off it (the payer that scopes an
+    Idempotency-Key, and the nonce the settle-failure compensator is keyed on): a
+    second copy of this dig is a second place for the two to disagree about what a
+    verified payment looks like."""
+    payload = getattr(request.state, "payment_payload", None)
+    inner = getattr(payload, "payload", None)
+    auth = inner.get("authorization") if isinstance(inner, dict) else None
+    return auth if isinstance(auth, dict) else None
+
+
+def _payment_nonce(request: Request) -> str | None:
+    """The nonce of the authorization above, recorded ON the store row so a settlement
+    failure can find the store it created (agentic.create_settle_failed_core). Not
+    lowercased, unlike the payer: the nonce is matched against the value
+    ``_nonce_from_context`` recovers from the same header at settle time, so it is
+    stored exactly as the payer signed it."""
+    auth = _payment_authorization(request)
+    nonce = auth.get("nonce") if auth else None
+    return nonce if isinstance(nonce, str) and nonce else None
+
+
 def _idempotency_scope(request: Request) -> str | None:
     """The wallet an Idempotency-Key is scoped to: the EIP-3009 payer of the x402
-    payment the middleware VERIFIED for this request, lowercased. The same extraction
-    the buy path uses (``request.state.payment_payload``, set by the middleware before
-    it calls the route).
+    payment the middleware VERIFIED for this request, lowercased.
 
     SCOPED, never global. If one key namespace were shared, the first caller ever to
     use "retry-1" would refuse every later caller's paid create for a string they
@@ -853,10 +898,8 @@ def _idempotency_scope(request: Request) -> str | None:
     paywall there is no payment to duplicate, so there is nothing to protect and
     nothing to scope by. In production the middleware 402s an unpaid request before
     this handler runs, so a paid create always has a payer."""
-    payload = getattr(request.state, "payment_payload", None)
-    inner = getattr(payload, "payload", None)
-    auth = inner.get("authorization") if isinstance(inner, dict) else None
-    frm = auth.get("from") if isinstance(auth, dict) else None
+    auth = _payment_authorization(request)
+    frm = auth.get("from") if auth else None
     return frm.lower() if isinstance(frm, str) and frm else None
 
 
@@ -870,8 +913,12 @@ def _already_created_409(request: Request, slug: str) -> JSONResponse:
     the whole feature exists to prevent, silently, and the buyer pays twice for one
     store. Everything the caller needs is in the 409 body instead.
 
-    Built from the Store row, not from a create result, so a pending_screening or
-    sandbox store answers as truthfully as a live one."""
+    Built from the Store row, not from a create result, so a pending_screening,
+    sandbox or QUARANTINED store answers as truthfully as a live one — the last of
+    those being the whole reason this needed a second body: handing back the slug and
+    url of a store whose create payment never settled, under a detail line saying the
+    key "already created a store", is what turned an unusable unpaid store into a
+    delivered free one (docs/ISSUES.md #11)."""
     ref = _failure_ref(request)
     logger.warning("create-store idempotent replay: ref=%s slug=%s", ref, slug)
     with SessionLocal() as session:
@@ -888,10 +935,13 @@ def _already_created_409(request: Request, slug: str) -> JSONResponse:
             .order_by(Product.id)
             .limit(1)
         )
+        quarantined = agentic.quarantined_for_settle_failure(session, store)
         return JSONResponse(
             {
                 **_pre_settle_body(
-                    "this Idempotency-Key already created a store; it was not "
+                    QUARANTINED_REPLAY_DETAIL
+                    if quarantined
+                    else "this Idempotency-Key already created a store; it was not "
                     "created again and this attempt was not charged",
                     ref,
                 ),
@@ -908,7 +958,9 @@ def _already_created_409(request: Request, slug: str) -> JSONResponse:
                 # path until they use the wallet route — which is what this says. Same
                 # text the create response uses, shared so the two cannot drift.
                 "recovery": (
-                    SANDBOX_RECOVERY_NOTE
+                    QUARANTINE_RECOVERY_NOTE
+                    if quarantined
+                    else SANDBOX_RECOVERY_NOTE
                     if store.status == "sandbox"
                     else RECOVERY_NOTE
                 ),
@@ -929,6 +981,7 @@ def _run_create_store(
     ref: str,
     idempotency_addr: str | None = None,
     idempotency_key: str | None = None,
+    x402_nonce: str | None = None,
 ):
     try:
         return gen_store(
@@ -942,6 +995,7 @@ def _run_create_store(
             sandbox=receive_address is None,
             idempotency_addr=idempotency_addr,
             idempotency_key=idempotency_key,
+            x402_nonce=x402_nonce,
         )
     except ScreeningBlocked as exc:
         logger.warning(
@@ -1036,6 +1090,12 @@ def create_store_post(request: Request, body: CreateStoreBody | None = None):
             ref=ref,
             idempotency_addr=idempotency_addr,
             idempotency_key=idempotency_key,
+            # Recorded on the store row so a settlement failure — which the middleware
+            # can only discover AFTER this handler has committed a live store — can
+            # find that store and quarantine it. Unconditional, unlike the idempotency
+            # pair: the compensator does not need the caller to have opted in with a
+            # header, and a create with no verified payment simply has no nonce.
+            x402_nonce=_payment_nonce(request),
         )
     except IdempotentReplay as exc:
         # Two requests carrying one key raced and this one lost the unique index
@@ -1095,9 +1155,22 @@ def create_store_get(request: Request):
     # x402-check probes GET). A PAID GET is refused 405 BEFORE settle: a >=400
     # response makes the payment middleware skip settlement, so zero funds move on
     # the GET method (a live reviewer paid 1 USDT for the old usage-JSON 200).
+    #
+    # Zero funds moved and the body never said so, which is the exact misread that
+    # put the not-charged line on the POST failures (0xqdee, 2026-08-05). A caller
+    # who signed a payment for a GET is the same reader in the same spot, so it goes
+    # through the same envelope and the same correlation id. `error` and `how` are
+    # the published keys and do not move; `detail` is where every other create-store
+    # failure carries its message, so it carries this one rather than a second
+    # wording. The log line matches _create_store_http_exception's so a quoted ref
+    # greps out of journald identically.
+    error = "method not allowed; use POST to create a store"
+    ref = _failure_ref(request)
+    logger.warning("create-store refused pre-settle: ref=%s status=405", ref)
     return JSONResponse(
         {
-            "error": "method not allowed; use POST to create a store",
+            **_pre_settle_body(error, ref),
+            "error": error,
             "how": (
                 "POST {description?, receive_address?, theme?} (x402-paid) → "
                 "returns a live store URL; an empty body creates a sample store"
@@ -1264,9 +1337,17 @@ def upgrade_store_post(
 def upgrade_store_get(request: Request):
     # unpaid GET → 402 challenge via the paywall; a PAID GET is refused 405 BEFORE
     # settle (>=400 skips settlement — no funds move on GET, same as agent_buy_get).
+    # SAY that, for the same reason /create-store does: a buyer who signed a payment
+    # and got a bare refusal reads it as "I paid and got nothing" (a real reporter did
+    # exactly that with a 502). This is a PAID route, so the reassurance belongs here
+    # too — it was scoped to /create-store only when the helpers were introduced.
+    error = "method not allowed; use POST to upgrade a store"
+    ref = _failure_ref(request)
+    logger.warning("upgrade-store refused pre-settle: ref=%s status=405", ref)
     return JSONResponse(
         {
-            "error": "method not allowed; use POST to upgrade a store",
+            **_pre_settle_body(error, ref),
+            "error": error,
             "how": (
                 "POST {slug, description?, theme?} + Authorization: Bearer "
                 "<manage_key> (x402-paid, 0.03 USDT) → regenerates, re-screens, and "
@@ -1355,9 +1436,15 @@ def add_product_post(
 def add_product_get(request: Request):
     # unpaid GET → 402 challenge via the paywall; a PAID GET is refused 405 BEFORE
     # settle (>=400 skips settlement — no funds move on GET, same as agent_buy_get).
+    # Same reasoning as upgrade_store_get above: paid route, pre-settle refusal, so
+    # the buyer is told no funds moved and gets an id to quote.
+    error = "method not allowed; use POST to add a product"
+    ref = _failure_ref(request)
+    logger.warning("add-product refused pre-settle: ref=%s status=405", ref)
     return JSONResponse(
         {
-            "error": "method not allowed; use POST to add a product",
+            **_pre_settle_body(error, ref),
+            "error": error,
             "how": (
                 "POST {slug, name, price_usdt} + Authorization: Bearer "
                 "<manage_key> (x402-paid, 0.01 USDT) → adds a second product to a "
@@ -3230,6 +3317,13 @@ if os.getenv("OKX_API_KEY"):
         extensions=agentic.challenge_input_extension(
             CreateStoreBody.model_json_schema()
         ),
+        # The create route settles AFTER the handler has committed a live store, so a
+        # settle failure needs a compensator exactly as the buy route does. Without
+        # this the caller received a bare 402 with an EMPTY body — no slug, no
+        # manage_key, no statement that anything had been created — while the unpaid
+        # store stayed live and the Idempotency-Key 409 handed it back on the next
+        # retry (docs/ISSUES.md #11).
+        settlement_failed_response_body=agentic.create_store_settle_failed_hook,
     )
     # ':slug' compiles to [^/]+ (no cross-slash match). pay_to + price resolve
     # per request from the DB; a settle failure runs the compensating hook. The

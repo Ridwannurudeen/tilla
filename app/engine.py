@@ -126,18 +126,36 @@ def default_delivery_text(slug: str, product_name: str) -> str:
     A buy still settles on this text: refusing to sell without a deliverable would
     break every existing store, including the ones a marketplace reviewer buys from.
 
+    WHY IT NO LONGER NAMES AN ENDPOINT (found 2026-08-05, live on a listed store).
+    Both earlier wordings closed by telling the reader to
+    ``POST /api/stores/<slug>/deliverable`` with their manage key. The reader is a
+    BUYER who has just paid: they hold no manage key, the store is not theirs, and a
+    developer instruction is the one line in the message they cannot act on. The
+    attribution was never the defect — the merchant's fulfilment gap genuinely is not
+    Tilla's failure — the AUDIENCE was. Nothing is lost by dropping it: the create
+    response already hands that same instruction to the MERCHANT as
+    ``fulfilment.note`` (``main.create_store_post``), which is where a merchant is
+    looking, and the dashboard lists deliverables per product. What remains answers
+    the buyer's three questions only — did my payment go through, why is nothing
+    here, what can I do now — and it names the refund as the MERCHANT'S to give,
+    because that is the mechanism: every buy settles non-custodially to the
+    merchant's own payTo, so Tilla holds nothing to refund and a promise here would
+    be one we could not keep.
+
     Lives here as one function rather than inline because
     ``scripts/repair_delivery_text`` rewrites older stores and must produce
     byte-identical text — two copies of a user-facing string that have to agree is
-    exactly how the receipt and the persisted price came to disagree."""
+    exactly how the receipt and the persisted price came to disagree. ``slug`` no
+    longer appears in the text and is kept regardless: the repair renders this and
+    :func:`superseded_delivery_texts` from the same pair of arguments, and the
+    superseded wordings do contain it."""
     return (
         f"Payment received — thank you. {product_name} has nothing attached for "
-        "automatic delivery. If it is a physical item or a service, the merchant "
-        "delivers it directly and will follow up. If you expected a file or a "
-        "licence key, the merchant has not configured fulfilment yet. If this is "
-        f"your store, attach the goods with POST /api/stores/{slug}/deliverable "
-        "using your manage key and buyers will receive a signed download link or "
-        "licence key instead of this message."
+        "automatic delivery: the merchant has not set that up yet. If it is a "
+        "physical item or a service, the merchant delivers it directly and will "
+        "follow up. If you expected a file or a licence key, ask the merchant to "
+        "send it. Your payment went straight to the merchant's wallet, not to "
+        "Tilla, so a refund is theirs to give if they cannot deliver."
     )
 
 
@@ -162,6 +180,18 @@ def superseded_delivery_texts(slug: str, product_name: str) -> tuple[str, ...]:
             f"goods with POST /api/stores/{slug}/deliverable using your manage "
             "key, and buyers will receive a signed download link or licence key "
             "instead of this message."
+        ),
+        # v2, superseded 2026-08-05. Stopped assuming the goods were digital — the
+        # fix v1 needed — but still closed with the endpoint and the manage key, so
+        # it handed a paying buyer instructions only the merchant could follow.
+        (
+            f"Payment received — thank you. {product_name} has nothing attached for "
+            "automatic delivery. If it is a physical item or a service, the merchant "
+            "delivers it directly and will follow up. If you expected a file or a "
+            "licence key, the merchant has not configured fulfilment yet. If this is "
+            f"your store, attach the goods with POST /api/stores/{slug}/deliverable "
+            "using your manage key and buyers will receive a signed download link or "
+            "licence key instead of this message."
         ),
     )
 
@@ -1353,6 +1383,7 @@ def create_store(
     sandbox=False,
     idempotency_addr=None,
     idempotency_key=None,
+    x402_nonce=None,
 ):
     """Full pipeline: prompt -> generate -> screen -> render -> persist.
     Raises screening.ScreeningBlocked (fail-closed) if the content is unsafe.
@@ -1365,6 +1396,10 @@ def create_store(
     funded it. Raises IdempotentReplay (carrying the existing slug) when that pair
     already funded a store — which the caller answers 409, so the duplicate payment
     never settles.
+
+    ``x402_nonce`` is that payment's EIP-3009 authorization nonce, written on the same
+    row in the same transaction. It is the only handle the settlement-failure hook has
+    for finding this store if the payment that funded it never settles.
 
     `theme` is the caller's explicit choice (short name, already validated); when
     None the LLM's own suggestion is used. The store keeps the resolved theme.
@@ -1522,6 +1557,12 @@ def create_store(
                     # to (main._idempotency_scope).
                     create_idempotency_addr=idempotency_addr,
                     create_idempotency_key=idempotency_key,
+                    # Same transaction, same reason: the middleware settles AFTER this
+                    # commit, so the nonce has to be on the row before the payment can
+                    # fail. A nonce written after the commit leaves a window in which a
+                    # settle failure cannot find the store it created — the very free
+                    # store the compensator exists to quarantine.
+                    create_x402_nonce=x402_nonce,
                     delivery=store_delivery,
                     description=desc,
                     # Persist content for LIVE stores too (not just pending), so a

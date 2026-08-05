@@ -320,7 +320,7 @@ it at `assert store.content["brand"]["hue"] == 0.0`.
 
 ---
 
-## #11 — OPEN: a store can go live unpaid if settlement fails after the handler returns
+## #11 — A store could go live unpaid if settlement failed after the handler returned
 
 **Found:** 2026-08-05 by adversarial review of the idempotency design. **Pre-existing** — not
 introduced by that change.
@@ -335,9 +335,35 @@ receives a bare 402 with an empty body — no slug, no manage_key. The store is 
 and url back on retry, turning a previously unusable unpaid store into a delivered one. Buyer funds
 are never at risk (a failed settle moves nothing); the exposure is Tilla revenue.
 
-**Why it is open rather than fixed.** Severity depends on one externally-owned fact we cannot
-determine from source: whether OKX's facilitator `/verify` rejects a payer who cannot fund
-settlement. If verify catches it, this is a curiosity. If a payment can pass verify and
-deterministically fail settle, it is an on-demand free-store mint. **Test that first**, then decide
-between a compensating `settlement_failed_response_body` on `/create-store` (delete or quarantine the
-store) and gating the 409 on evidence of settlement.
+**Why it was open.** Severity depended on one externally-owned fact we cannot determine from source:
+whether OKX's facilitator `/verify` rejects a payer who cannot fund settlement. That is exactly why
+it is now fixed rather than measured — a compensator costs one column and one hook, and it is
+correct whichever way verify behaves.
+
+**Status: FIXED 2026-08-05** (working tree; not yet deployed). The compensating hook was built, not
+the 409 gate, because gating the 409 on settlement evidence needs evidence the create path does not
+have — there is no settle-SUCCESS writer for `/create-store`, only the buy path has one.
+
+- `stores.create_x402_nonce` (migration `0035_create_x402_nonce`, nullable + a NON-unique index)
+  records the EIP-3009 nonce of the payment that funded the create, bound into the store's OWN
+  INSERT — the same atomicity rule as 0034's idempotency pair, since a nonce written after the
+  commit leaves the window it is meant to close. Non-unique deliberately: a failed settle never
+  consumed the nonce, so the retry the 402 body invites replays it and legitimately creates a second
+  store, which a unique index would turn into an IntegrityError inside `create_store`'s insert —
+  where 0034's classifier would read it as a slug collision and rmtree the directory.
+- `agentic.create_store_settle_failed_hook` is now the route's `settlement_failed_response_body`. It
+  recovers the nonce from the PAYMENT-SIGNATURE header (the existing `_nonce_from_context`),
+  quarantines the store that nonce created as `status='blocked'` — the state every money path
+  already refuses with a 404 and every discovery surface already excludes — and returns a body that
+  says the payment did not settle, no funds moved, the store was not activated and a retry is free.
+  Idempotent (an already-quarantined row is excluded from the match), fail-safe (a hook exception
+  never masks the 402), and it refuses to act at all when one nonce maps to two unquarantined
+  stores, since one of those may be a store a successful settle paid for.
+- The `Idempotency-Key` 409 stays a 409 (>= 400 is what keeps the retry free) but no longer claims a
+  quarantined store was "already created": it names the failed settlement and asks for a new key. It
+  keys on the `store.settle_failed` event, not on the status, so a store withdrawn by content
+  screening — also `blocked`, but genuinely paid for — is not told its payment failed.
+
+Mutation-proven: deleting the quarantine write leaves `POST /api/checkout/{slug}` answering 200 for
+a store nobody paid for, which fails
+`test_settle_failure_quarantines_the_store_and_the_money_paths_refuse_it` (and four more).

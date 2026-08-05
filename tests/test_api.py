@@ -687,6 +687,44 @@ def test_create_store_422_on_screening_block_says_not_charged(tmp_path, monkeypa
     assert len(body["ref"]) == 12
 
 
+def test_paid_get_405_says_not_charged_and_keeps_its_published_keys():
+    # The 405 was the one create-store refusal that never said it. A paid GET is
+    # >= 400, so the middleware skips settlement and the payment signed for it is
+    # never taken — the same fund-safe outcome the POST failures now state, for the
+    # same reader who misread a 502 as a completed payment. Purely additive: the
+    # published `error` and `how` keys and the Allow header are unchanged.
+    r = client.get("/create-store")
+    assert r.status_code == 405
+    assert r.headers["allow"] == "POST"
+    body = r.json()
+    assert body["error"] == "method not allowed; use POST to create a store"
+    assert "POST" in body["how"]
+    assert "NOT charged" in body["not_charged"]
+    assert len(body["ref"]) == 12
+    # one envelope for the whole route: `detail` carries the message too, so an
+    # agent that learned to read `detail` on a create-store failure still finds it
+    assert body["detail"] == body["error"]
+
+
+def test_every_paid_get_405_says_not_charged_not_just_create_store():
+    # The reassurance was scoped to /create-store when the helpers were introduced,
+    # which left the other two PAID routes refusing a signed payment in silence —
+    # exactly the gap the create 405 had. Same mechanism, same reader, same fix.
+    for path, verb in (
+        ("/upgrade-store", "upgrade a store"),
+        ("/add-product", "add a product"),
+    ):
+        r = client.get(path)
+        assert r.status_code == 405, path
+        assert r.headers["allow"] == "POST", path
+        body = r.json()
+        assert body["error"] == f"method not allowed; use POST to {verb}", path
+        assert "POST" in body["how"], path  # published keys unchanged
+        assert "NOT charged" in body["not_charged"], path
+        assert len(body["ref"]) == 12, path
+        assert body["detail"] == body["error"], path
+
+
 def test_free_routes_keep_the_plain_error_body():
     # The envelope is scoped to the paid create route: on a free route "you were not
     # charged" is noise, and every other route's body stays byte-identical.
@@ -848,6 +886,449 @@ def test_migration_0034_additive_and_scoped_unique(tmp_path):
     }
     assert "uq_stores_create_idem" not in idx
     assert "uq_stores_custom_domain" in idx  # untouched by the downgrade too
+    assert con.execute("SELECT count(*) FROM stores").fetchone()[0] == 2
+    con.close()
+
+
+# ---------- #11: a create whose payment never settles must not leave a live store ----
+# The x402 middleware runs the handler FIRST and settles afterwards, so create_store has
+# already committed the Store, its Products and its Deliverable when settlement is
+# attempted. A settle failure used to leave that store LIVE with nobody charged, and
+# answer the caller with a bare 402 and an EMPTY body (no slug, no manage_key) — then
+# the 0034 Idempotency-Key 409 handed the orphan back on retry, turning an unusable
+# unpaid store into a delivered free one. These pin the compensator: the nonce rides the
+# store's own INSERT, and the settle-failure hook quarantines the store that nonce
+# created so every money path refuses it.
+_NONCE = "0x" + "7" * 64
+_SETTLED_NONCE = "0x" + "5" * 64
+
+
+def _paid_with_nonce(monkeypatch, payer=_PAYER, nonce=_NONCE):
+    """Stand in for what the x402 middleware verified: the payer an Idempotency-Key is
+    scoped to AND the authorization nonce the store row records. The suite runs with
+    OKX_API_KEY unset, so request.state.payment_payload never exists; the extraction
+    itself is pinned against a real PaymentPayload by
+    test_payment_nonce_reads_the_signed_authorization below."""
+    monkeypatch.setattr("app.main._idempotency_scope", lambda request: payer)
+    monkeypatch.setattr("app.main._payment_nonce", lambda request: nonce)
+
+
+def _payment_header(nonce, payer=_PAYER):
+    """A PAYMENT-SIGNATURE header as a payer's client sends it, so the hook runs its own
+    real decode (agentic._nonce_from_context) instead of being handed a nonce."""
+    import base64
+
+    return base64.b64encode(
+        json.dumps(
+            {
+                "x402Version": 1,
+                "scheme": "exact",
+                "network": "eip155:196",
+                "payload": {"authorization": {"from": payer, "nonce": nonce}},
+            }
+        ).encode()
+    ).decode()
+
+
+class _SettleCtx:
+    """The one field of x402's HTTPRequestContext the hook reads."""
+
+    def __init__(self, payment_header):
+        self.payment_header = payment_header
+
+
+def _run_hook(header):
+    import asyncio
+
+    from app import agentic
+
+    return asyncio.run(
+        agentic.create_store_settle_failed_hook(_SettleCtx(header), None)
+    )
+
+
+def _store_status(slug):
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    with SessionLocal() as s:
+        return s.scalar(select(Store.status).where(Store.slug == slug))
+
+
+def _nonce_columns():
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    with SessionLocal() as s:
+        return list(s.scalars(select(Store.create_x402_nonce).order_by(Store.id)))
+
+
+def _settle_failed_events():
+    from app.db import SessionLocal
+    from app.models import EventLog
+    from sqlalchemy import select
+
+    with SessionLocal() as s:
+        return list(
+            s.scalars(
+                select(EventLog.store_id).where(EventLog.event == "store.settle_failed")
+            )
+        )
+
+
+def _create(head=None):
+    return client.post(
+        "/create-store",
+        json={"description": "I sell honest socks", "receive_address": _MERCHANT},
+        headers=head,
+    )
+
+
+def test_payment_nonce_reads_the_signed_authorization():
+    """The nonce recorded on the store row is the EIP-3009 ``nonce`` of the payment the
+    middleware verified — the same authorization the payer field comes from, read
+    through ONE accessor so the two can never disagree about what a verified payment
+    looks like. Built from the real PaymentPayload so the stub above cannot drift."""
+    from starlette.requests import Request
+    from x402.schemas import PaymentPayload, PaymentRequirements
+
+    from app.payment import PAYMENT_ASSET
+
+    req = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/create-store",
+            "headers": [],
+            "query_string": b"",
+            "client": ("test", 1),
+            "server": ("test", 80),
+            "scheme": "http",
+        }
+    )
+    assert app.main._payment_nonce(req) is None  # no paywall -> no payment -> no nonce
+    req.state.payment_payload = PaymentPayload(
+        x402_version=2,
+        payload={"authorization": {"from": "0xAB" + "1" * 38, "nonce": _NONCE}},
+        accepted=PaymentRequirements(
+            scheme="exact",
+            network="eip155:196",
+            asset=PAYMENT_ASSET,
+            amount="50000",
+            pay_to="0x" + "b" * 40,
+            max_timeout_seconds=300,
+            extra={},
+        ),
+    )
+    # NOT lowercased, unlike the payer: this value is compared byte-for-byte against the
+    # nonce the hook recovers from the same header at settle time.
+    assert app.main._payment_nonce(req) == _NONCE
+    assert app.main._idempotency_scope(req) == "0xab" + "1" * 38
+
+
+@respx.mock
+def test_create_records_the_payment_nonce_in_the_stores_insert(tmp_path, monkeypatch):
+    """ATOMICITY, not just presence: the nonce must be bound into the store's OWN
+    INSERT. Settlement is attempted after this transaction commits, so a nonce written
+    by a follow-up UPDATE leaves a window in which a settle failure cannot find the
+    store it created — which is the free store the whole compensator exists to
+    quarantine."""
+    from sqlalchemy import event
+
+    from app.db import engine
+
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch)
+    seen = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        seen.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        r = _create()
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+    assert r.status_code == 200
+    inserts = [p for s, p in seen if s.lstrip().startswith("INSERT INTO stores")]
+    assert len(inserts) == 1
+    assert _NONCE in tuple(inserts[0])
+    assert _nonce_columns() == [_NONCE]
+
+
+@respx.mock
+def test_settle_failure_quarantines_the_store_and_the_money_paths_refuse_it(
+    tmp_path, monkeypatch
+):
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch)
+    from app import agentic
+
+    slug = _create().json()["slug"]
+    # Payable before the failure: a live store with an active product, which is exactly
+    # what makes an unquarantined one a free store rather than a curiosity.
+    assert agentic._guard_store_status(slug) is None
+    assert client.post(f"/api/checkout/{slug}").status_code == 200
+
+    body = _run_hook(_payment_header(_NONCE))
+    assert body.content_type == "application/json"
+    assert body.body["error"] == "settlement_failed"
+    assert body.body["store_activated"] is False
+    assert body.body["quarantined_slug"] == slug
+    assert "did not settle" in body.body["detail"]
+    assert "no funds moved" in body.body["detail"]
+    assert "NOT activated" in body.body["detail"]
+
+    # THE regression assertion: the routes a buyer hits, not the column.
+    assert client.post(f"/api/checkout/{slug}").status_code == 404
+    assert agentic._guard_store_status(slug) == (404, "store not found")
+    assert _store_status(slug) == "blocked"
+    assert _settle_failed_events() != []
+
+
+@respx.mock
+def test_settle_failure_never_touches_a_store_another_payment_paid_for(
+    tmp_path, monkeypatch
+):
+    """Seeded settled store: created and SETTLED under its own authorization. The
+    compensator is keyed on the failed payment's nonce, so a neighbouring paid store —
+    every other store on the platform — cannot be caught by it."""
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch, nonce=_SETTLED_NONCE)
+    paid = _create().json()["slug"]
+    _paid_with_nonce(monkeypatch, nonce=_NONCE)
+    doomed = _create().json()["slug"]
+
+    assert _run_hook(_payment_header(_NONCE)).body["quarantined_slug"] == doomed
+    assert _store_status(paid) == "live"
+    assert client.post(f"/api/checkout/{paid}").status_code == 200
+    assert _store_status(doomed) == "blocked"
+    assert len(_settle_failed_events()) == 1  # one store quarantined, not both
+
+
+@respx.mock
+def test_settle_failure_refuses_to_guess_when_one_nonce_holds_two_live_stores(
+    tmp_path, monkeypatch, caplog
+):
+    """An authorization that settled cannot be told from one that failed — there is no
+    settle-SUCCESS writer on the create path to ask — so if a nonce maps to two
+    unquarantined stores, one of them may be the store a successful settle paid for.
+    Quarantining both to recover a create fee would take a merchant's paid store
+    offline, so this case quarantines NOTHING and shouts in the log instead."""
+    import logging
+
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch)
+    first = _create().json()["slug"]
+    second = _create().json()["slug"]
+    assert _nonce_columns() == [_NONCE, _NONCE]  # non-unique index: this is allowed
+
+    with caplog.at_level(logging.ERROR, logger="tilla"):
+        body = _run_hook(_payment_header(_NONCE))
+    assert "quarantined_slug" not in body.body
+    # ...and it claims NOTHING about activation, because one of those stores IS live and
+    # a money-path body that says otherwise is worse than one that says less.
+    assert "store_activated" not in body.body
+    assert "matches more than one store" in body.body["detail"]
+    assert _store_status(first) == "live"
+    assert _store_status(second) == "live"
+    assert _settle_failed_events() == []
+    assert "quarantining none" in caplog.text
+
+
+@respx.mock
+def test_settle_failure_still_quarantines_the_retry_after_an_earlier_failure(
+    tmp_path, monkeypatch
+):
+    """The reason the nonce index is NOT unique: the 402 body tells the caller to retry,
+    and an x402 client's retry replays the SAME authorization (a failed settle never
+    consumed it). That legitimately creates a second store, and if it fails again the
+    already-quarantined first store must not make the second one ambiguous."""
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch)
+    first = _create().json()["slug"]
+    assert _run_hook(_payment_header(_NONCE)).body["quarantined_slug"] == first
+
+    second = _create().json()["slug"]
+    assert second != first
+    assert _run_hook(_payment_header(_NONCE)).body["quarantined_slug"] == second
+    assert _store_status(first) == "blocked"
+    assert _store_status(second) == "blocked"
+
+
+@respx.mock
+def test_create_settle_failed_hook_is_idempotent(tmp_path, monkeypatch):
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch)
+    slug = _create().json()["slug"]
+
+    first = _run_hook(_payment_header(_NONCE))
+    second = _run_hook(_payment_header(_NONCE))
+    assert first.body["quarantined_slug"] == slug
+    # The retried hook does not raise, does not quarantine twice, and still tells the
+    # caller the truth: nothing was charged and no store was activated.
+    assert "quarantined_slug" not in second.body
+    assert second.body["store_activated"] is False
+    assert "did not settle" in second.body["detail"]
+    assert _store_status(slug) == "blocked"
+    assert len(_settle_failed_events()) == 1
+
+
+def test_create_settle_failed_hook_survives_a_core_exception(monkeypatch):
+    """FAIL-SAFE: the SDK does not guard the hook call, and an escaping exception costs
+    the caller the whole explanation (the middleware falls back to ``{}``) without
+    changing the 402. Compensation is best-effort; the honesty of the response is not."""
+
+    def _boom(nonce):
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr("app.agentic.create_settle_failed_core", _boom)
+    body = _run_hook(_payment_header(_NONCE))
+    assert body.content_type == "application/json"
+    assert body.body == {"error": "settlement_failed", "store_activated": False}
+
+
+def test_create_settle_failed_hook_with_no_recoverable_nonce_is_inert():
+    # An undecodable header and an unknown nonce both answer honestly and touch nothing.
+    assert _run_hook("not-decodable").body["store_activated"] is False
+    unknown = _run_hook(_payment_header("0x" + "9" * 64)).body
+    assert "quarantined_slug" not in unknown
+    assert "No store was activated" in unknown["detail"]
+    assert _store_rows() == []
+
+
+@respx.mock
+def test_quarantined_store_409_says_the_payment_did_not_settle(tmp_path, monkeypatch):
+    """The half of #11 that made a free store DELIVERABLE: the 0034 409 handed the
+    orphan's slug and url back under "already created a store". It still must be a 409
+    (>= 400 is what stops the retry's payment settling), but it has to say what
+    happened."""
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch)
+    head = {"Idempotency-Key": "retry-1"}
+    slug = _create(head).json()["slug"]
+    _run_hook(_payment_header(_NONCE))
+
+    replay = _create(head)
+    assert replay.status_code == 409  # unchanged: this retry must not settle either
+    j = replay.json()
+    assert "did not settle" in j["detail"]
+    assert "NOT activated" in j["detail"]
+    assert "NEW Idempotency-Key" in j["detail"]
+    assert j["status"] == "blocked"
+    assert "nothing to recover" in j["recovery"]
+    assert "NOT charged" in j["not_charged"]
+    assert _store_rows() == [slug]  # the refusal creates nothing, as before
+
+
+@respx.mock
+def test_screening_blocked_store_409_is_not_told_its_payment_failed(
+    tmp_path, monkeypatch
+):
+    """'blocked' also means "withdrawn by content screening" (resume_pending), and THAT
+    store was genuinely paid for. Same status, opposite truth — so the 409 keys on the
+    store.settle_failed event, not on the status."""
+    from app.db import SessionLocal
+    from app.models import Store
+    from sqlalchemy import select
+
+    _allow_create(tmp_path, monkeypatch)
+    _paid_with_nonce(monkeypatch)
+    head = {"Idempotency-Key": "retry-1"}
+    slug = _create(head).json()["slug"]
+    with SessionLocal() as s:
+        store = s.scalar(select(Store).where(Store.slug == slug))
+        store.status = "blocked"  # what resume_pending writes on a screening BLOCK
+        s.commit()
+
+    j = _create(head).json()
+    assert "already created a store" in j["detail"]
+    assert "did not settle" not in j["detail"]
+    assert "cannot be re-issued" in j["recovery"]  # the normal recovery note
+
+
+# ---------- 0035: the create nonce column + its NON-unique index ----------
+def test_migration_0035_additive_and_nonce_index_is_not_unique(tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
+
+    def _alembic(db, *args):
+        # TILLA_DB_PATH, never a URL override: alembic/env.py builds its URL from
+        # config.DB_PATH and ignores every other environment variable.
+        env = dict(os.environ)
+        env["TILLA_DB_PATH"] = str(db)
+        return subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=pathlib.Path(__file__).resolve().parent.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    db = tmp_path / "m35.db"
+    r = _alembic(db, "upgrade", "0034_create_idempotency")
+    assert r.returncode == 0, r.stderr
+
+    # two stores against the pre-0035 schema, so the column is proven additive
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO merchants (id, wallet_address, created_at) VALUES (1,'0xabc','2026')"
+    )
+    for i in (1, 2):
+        con.execute(
+            "INSERT INTO stores (id, slug, merchant_id, status, pay_to, theme,"
+            " created_at, updated_at) VALUES (?,?,1,'live','0xabc','original.html',"
+            "'2026','2026')",
+            (i, f"m35-{i}"),
+        )
+    con.commit()
+    con.close()
+
+    r = _alembic(db, "upgrade", "head")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    cols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert "create_x402_nonce" in cols
+    # existing rows backfill to NULL = "no recorded payment", today's behaviour
+    assert (
+        con.execute(
+            "SELECT count(*) FROM stores WHERE create_x402_nonce IS NULL"
+        ).fetchone()[0]
+        == 2
+    )
+    idx = dict(
+        con.execute(
+            "SELECT name, \"unique\" FROM pragma_index_list('stores')"
+        ).fetchall()
+    )
+    assert idx["ix_stores_create_x402_nonce"] == 0  # NON-unique, deliberately
+    # native ADD COLUMN, no batch rebuild: the 0029 and 0034 indexes are untouched
+    assert "uq_stores_custom_domain" in idx
+    assert "uq_stores_create_idem" in idx
+    # TWO stores may share one nonce — the retry-after-a-failed-settle case. Under a
+    # unique index that honest retry raises IntegrityError inside create_store's insert,
+    # where 0034's classifier reads it as a slug collision and rmtrees the directory.
+    con.execute(f"UPDATE stores SET create_x402_nonce='{_NONCE}'")
+    con.commit()
+    assert (
+        con.execute(
+            "SELECT count(*) FROM stores WHERE create_x402_nonce=?", (_NONCE,)
+        ).fetchone()[0]
+        == 2
+    )
+    con.close()
+
+    r = _alembic(db, "downgrade", "0034_create_idempotency")
+    assert r.returncode == 0, r.stderr
+    con = sqlite3.connect(db)
+    cols = {c[1] for c in con.execute("PRAGMA table_info(stores)")}
+    assert "create_x402_nonce" not in cols
+    idx = {i[1] for i in con.execute("PRAGMA index_list('stores')")}
+    assert "ix_stores_create_x402_nonce" not in idx
+    assert "uq_stores_create_idem" in idx  # the 0034 index survives the downgrade
     assert con.execute("SELECT count(*) FROM stores").fetchone()[0] == 2
     con.close()
 

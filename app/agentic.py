@@ -66,6 +66,7 @@ from app.models import (
     Deliverable,
     Delivery,
     Entitlement,
+    EventLog,
     Order,
     Product,
     Review,
@@ -1022,6 +1023,157 @@ async def store_settle_failed_hook(context, failure) -> HTTPResponseBody:
         except Exception:
             logger.exception("settle_failed hook failed")
             body = {"error": "settlement_failed"}
+    return HTTPResponseBody(content_type="application/json", body=body)
+
+
+# ============================================================================
+# Settle-failed compensator for the PAID CREATE route (docs/ISSUES.md #11)
+# ============================================================================
+# The status a store created by a payment that never settled is moved to. NOT a new
+# value: 'blocked' is already Tilla's terminal "this store must not sell" state —
+# resume_pending writes it on a screening BLOCK — which is exactly why every money
+# path already refuses it — create_checkout, _require_live_store, _guard_store_status,
+# mpp and subscriptions all fall through to 404 on any status that is not 'live', and
+# every discovery surface (sitemap, aggregate feed, external feeds, marketplace
+# queries) selects status == 'live'. Inventing a 'quarantined' string would mean
+# auditing all of those to teach them a second dead state, and the first one missed is
+# a free store that still sells.
+STORE_QUARANTINE_STATUS = "blocked"
+# Written to event_log so the quarantine is distinguishable from a screening block
+# forever after: both leave status='blocked', and the Idempotency-Key 409 must not tell
+# a caller whose store was withdrawn for content that their payment failed to settle.
+STORE_SETTLE_FAILED_EVENT = "store.settle_failed"
+
+_CREATE_SETTLE_FAILED_BASE = (
+    "the x402 payment for this create did not settle, so no funds moved and you were "
+    "not charged. "
+)
+CREATE_SETTLE_FAILED_DETAIL = _CREATE_SETTLE_FAILED_BASE + (
+    "The store was NOT activated: it is quarantined, every checkout path refuses it "
+    "and it is excluded from discovery. Retrying this create is safe and costs "
+    "nothing — send a NEW Idempotency-Key, because the one this attempt used is now "
+    "held by the quarantined store."
+)
+CREATE_SETTLE_FAILED_NO_STORE_DETAIL = _CREATE_SETTLE_FAILED_BASE + (
+    "No store was activated for this payment. Retrying this create is safe and costs "
+    "nothing."
+)
+# The ambiguous case. It makes NO claim about activation, because one of the matched
+# stores IS live and saying otherwise would be the one thing a money-path body must
+# never do; the operator alert (logger.error below) is the channel for that, not the
+# caller's 402.
+CREATE_SETTLE_FAILED_AMBIGUOUS_DETAIL = _CREATE_SETTLE_FAILED_BASE + (
+    "This payment matches more than one store, so none of them was changed and "
+    "Tilla's operators have been alerted. Retrying this create is safe and costs "
+    "nothing."
+)
+
+
+def quarantined_for_settle_failure(session: Session, store: Store) -> bool:
+    """True when THIS store's create payment is the reason it is blocked — i.e. the
+    compensator below quarantined it. A screening BLOCK (resume_pending) leaves the
+    same status on a store that was genuinely paid for, so the two cases have to be
+    told apart before anything tells a caller their payment failed."""
+    if store.status != STORE_QUARANTINE_STATUS:
+        return False
+    return (
+        session.scalar(
+            select(EventLog.id)
+            .where(
+                EventLog.store_id == store.id,
+                EventLog.event == STORE_SETTLE_FAILED_EVENT,
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def create_settle_failed_core(nonce: str) -> dict:
+    """Compensator for a settle failure on a just-created store. The x402 middleware
+    runs the handler first and settles afterwards, so by the time this runs the Store,
+    its Products and its Deliverable are committed and the caller paid nothing: an
+    unquarantined store here is a free store, and the 0034 Idempotency-Key 409 would
+    hand its slug and url back on retry as though it had been bought.
+
+    Quarantine = ``status='blocked'`` (see STORE_QUARANTINE_STATUS), which every money
+    path already refuses. Deliberately NOT a delete and NOT an rmtree: a settle failure
+    the facilitator reported for a payment that did land on chain would then be
+    unrecoverable, whereas a status flip is undone by one UPDATE with the products,
+    content and rendered pages all intact.
+
+    Keyed on the nonce, and acts ONLY on an unambiguous match. Rows already quarantined
+    are excluded, so the retry-then-fail-again sequence (two stores, one nonce, the
+    first already blocked) still resolves to exactly one — while a nonce that somehow
+    maps to two LIVE stores means one of them may be the store a successful settle paid
+    for, and guessing would destroy it. There is no settle-SUCCESS writer on the create
+    path to ask, so that case quarantines nothing and shouts in the log instead: a free
+    store is a revenue loss, deleting a paid store is a merchant's business."""
+    with SessionLocal() as session:
+        stores = list(
+            session.scalars(
+                select(Store).where(
+                    Store.create_x402_nonce == nonce,
+                    Store.status != STORE_QUARANTINE_STATUS,
+                )
+            )
+        )
+        if not stores:
+            # Either the hook already ran (idempotent: the store is quarantined and so
+            # excluded above) or no store carries this nonce at all.
+            return {
+                "error": "settlement_failed",
+                "detail": CREATE_SETTLE_FAILED_NO_STORE_DETAIL,
+                "store_activated": False,
+            }
+        if len(stores) > 1:
+            logger.error(
+                "create settle-failed: nonce %s maps to %d unquarantined stores (%s) "
+                "— quarantining none, one may have been paid for",
+                nonce,
+                len(stores),
+                ",".join(s.slug for s in stores),
+            )
+            return {
+                "error": "settlement_failed",
+                "detail": CREATE_SETTLE_FAILED_AMBIGUOUS_DETAIL,
+            }
+        store = stores[0]
+        store.status = STORE_QUARANTINE_STATUS
+        log_event(
+            session,
+            "agentic",
+            STORE_SETTLE_FAILED_EVENT,
+            store_id=store.id,
+            data={"slug": store.slug},
+        )
+        session.commit()
+        return {
+            "error": "settlement_failed",
+            "detail": CREATE_SETTLE_FAILED_DETAIL,
+            "store_activated": False,
+            "quarantined_slug": store.slug,
+        }
+
+
+async def create_store_settle_failed_hook(context, failure) -> HTTPResponseBody:
+    """x402 ``settlement_failed_response_body`` hook for POST/GET /create-store (async
+    → the DB work runs off the event loop). Recovers the nonce from the
+    PAYMENT-SIGNATURE header, quarantines the store that nonce created, and returns an
+    honest body — the route used to answer a settle failure with a bare 402 and an
+    empty payload, so the caller could not even tell a live store had been left behind.
+
+    Fail-safe: a hook exception is swallowed into the generic body. The SDK does not
+    guard the call, and an escaping exception costs the caller the whole explanation
+    (the middleware falls back to ``{}``) without changing the 402 — so the
+    compensation is best-effort and the honesty of the status code is not."""
+    nonce = _nonce_from_context(context)
+    body = {"error": "settlement_failed", "store_activated": False}
+    if nonce:
+        try:
+            body = await asyncio.to_thread(create_settle_failed_core, nonce)
+        except Exception:
+            logger.exception("create-store settle_failed hook failed")
     return HTTPResponseBody(content_type="application/json", body=body)
 
 

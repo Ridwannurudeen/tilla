@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import app.main as main
-from app.config import WARDEN_SCREEN_URL
+from app.config import MAX_DELIVERY_LEN, WARDEN_SCREEN_URL
 from app.db import SessionLocal
 from app.models import Deliverable, Store
 
@@ -58,8 +58,9 @@ def test_default_delivery_no_longer_fabricates_a_download_link(tmp_path, monkeyp
         store = s.scalar(select(Store).where(Store.slug == r["slug"]))
     assert "/files/" not in store.delivery
     assert "demo delivery link" not in store.delivery
-    # it must say what is true, and name the endpoint that fixes it
-    assert "deliverable" in store.delivery
+    # it must say what is true: the payment landed, and nothing came with it
+    assert store.delivery.startswith("Payment received")
+    assert "nothing attached for automatic delivery" in store.delivery
 
 
 def test_default_delivery_does_not_assume_the_goods_are_digital():
@@ -71,8 +72,31 @@ def test_default_delivery_does_not_assume_the_goods_are_digital():
     text = engine.default_delivery_text("timber-time", "Classic Walnut Watch")
     assert "no downloadable file" not in text
     assert "physical item or a service" in text
-    # and it must still tell a digital seller what to do
-    assert "licence key" in text and "/api/stores/timber-time/deliverable" in text
+    # and it must still tell a digital buyer what is going on
+    assert "licence key" in text
+
+
+def test_default_delivery_speaks_to_the_buyer_not_a_developer():
+    # The reader is a BUYER who has just paid. Both earlier wordings closed by
+    # telling them to POST to /api/stores/<slug>/deliverable with their manage
+    # key — an instruction they hold no key for and cannot act on. The merchant
+    # half lives on the create response (fulfilment.note), not in a receipt.
+    import app.engine as engine
+
+    text = engine.default_delivery_text("timber-time", "Classic Walnut Watch")
+    assert "/api/" not in text and "POST" not in text
+    assert "manage key" not in text
+    # what a buyer needs instead: the payment landed, why nothing came, what now
+    assert text.startswith("Payment received")
+    assert "the merchant has not set that up yet" in text
+    assert "ask the merchant to send it" in text
+    # a refund is the merchant's to give — buys settle non-custodially to their
+    # payTo, so Tilla holds nothing and must never promise one
+    assert "a refund is theirs to give" in text
+    assert "not to Tilla" in text
+    # it ships verbatim to a buyer: no markdown, and inside the persisted ceiling
+    assert not any(c in text for c in "*_`#[]")
+    assert len(text) <= MAX_DELIVERY_LEN
 
 
 def test_superseded_delivery_texts_are_kept_verbatim_for_the_repair():
@@ -82,11 +106,17 @@ def test_superseded_delivery_texts_are_kept_verbatim_for_the_repair():
     import app.engine as engine
 
     old = engine.superseded_delivery_texts("dossier", "Token Due Diligence Report")
-    assert len(old) >= 1
+    assert len(old) >= 2
     v1 = old[0]
     assert v1.startswith("Payment received — thank you. Token Due Diligence Report")
     assert "no downloadable file attached yet" in v1
     assert "/api/stores/dossier/deliverable" in v1
+    # v2 is the wording production stores were created under before the buyer-facing
+    # rewrite. Without it here they never match _is_tilla_authored, so they keep
+    # showing paying buyers a POST and a manage key forever.
+    v2 = old[1]
+    assert "the merchant has not configured fulfilment yet" in v2
+    assert "/api/stores/dossier/deliverable" in v2
     # a superseded text must never equal the current one, or the repair would
     # treat an up-to-date store as stale and rewrite it on every run
     assert (
